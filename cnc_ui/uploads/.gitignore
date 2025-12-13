@@ -1,0 +1,4 @@
+# Keep uploads directory but ignore DXF files
+*.dxf
+*.gcode
+!.gitkeep
