@@ -9,6 +9,14 @@ from cnc.state import machine_state
 from cnc.controller import cnc_controller
 from cnc.files import file_manager
 from pathlib import Path
+from fastapi import Request
+import matplotlib.pyplot as plt
+from dxf_processing.dxf_processor import DXFProcessor
+from toolpath_planning.toolpath_generator import ToolpathGenerator
+from toolpath_planning.gcode_visualizer import GCodeVisualizer
+
+# Application version
+APP_VERSION = "v1.0.0"
 
 
 # Jog parameters (user-adjustable)
@@ -19,6 +27,40 @@ jog_params = {
     'feed_rate': 1000.0,  # mm/min
 }
 
+# DXF processing and toolpath generation
+dxf_processor = DXFProcessor()
+toolpath_generator = ToolpathGenerator(
+    cutting_height=-12.7,  # -0.5 inches converted to mm
+    safe_height=-50.8,     # -2.0 inches converted to mm
+    corner_angle_threshold=15.0,
+    feed_rate=3000.0,      # mm/min
+    plunge_rate=3000.0     # mm/min
+)
+
+# Global storage for current toolpath visualization data
+current_toolpath_shapes = {}
+toolpath_plot = None  # Reference to the pyplot element for updates
+
+# API endpoint for jog control from JavaScript
+@app.post('/jog')
+async def jog_endpoint(request: Request):
+    """Handle jog requests."""
+    data = await request.json()
+    axis = data['axis']
+    direction = data['direction']
+    
+    if axis == 'X' or axis == 'Y':
+        distance = jog_params['xy_step'] * direction
+    elif axis == 'Z':
+        distance = jog_params['z_step'] * direction
+    elif axis == 'A':
+        distance = jog_params['a_step'] * direction
+    else:
+        return {'status': 'error', 'message': 'Invalid axis'}
+    
+    cnc_controller.jog(axis, distance, jog_params['feed_rate'])
+    return {'status': 'ok'}
+
 # Current loaded G-code
 current_gcode = []
 
@@ -26,213 +68,324 @@ current_gcode = []
 def create_header():
     """Create the application header."""
     with ui.header().classes('items-center justify-between bg-primary text-white py-2 px-4'):
-        ui.label('fabCNC Controller').classes('text-h5 sm:text-h4')
+        ui.label('fabCNC Controller').classes('text-h4 font-bold')
         with ui.row().classes('items-center gap-4'):
-            ui.label('Raspberry Pi 5 CNC').classes('text-body2 sm:text-body1')
+            ui.label(APP_VERSION).classes('text-h6')
 
 
 def create_position_display():
     """Create the compact position display."""
-    with ui.row().classes('w-full items-center gap-2 sm:gap-4 flex-wrap'):
-        pos_labels = {}
-        for axis in ['X', 'Y', 'Z', 'A']:
-            with ui.row().classes('items-center gap-1 sm:gap-2'):
-                ui.label(f'{axis}:').classes('text-body2 sm:text-body1 text-grey-7')
-                unit = '°' if axis == 'A' else 'mm'
-                pos_labels[axis] = ui.label(f'0.00 {unit}').classes('text-body1 sm:text-h6 font-bold')
+    pos_labels = {}
+    for axis in ['X', 'Y', 'Z', 'A']:
+        with ui.row().classes('items-center gap-1'):
+            ui.label(f'{axis}:').classes('text-h6 text-grey-7')
+            unit = '°' if axis == 'A' else 'mm'
+            pos_labels[axis] = ui.label(f'0.00 {unit}').classes('text-h5 font-bold')
     
     return pos_labels
 
 
 def create_status_display():
     """Create the compact status and progress display."""
-    with ui.column().classes('w-full gap-2'):
-        with ui.row().classes('items-center gap-2'):
-            ui.label('Status:').classes('text-body2 sm:text-body1 text-grey-7')
-            status_label = ui.label('Idle').classes('text-body1 sm:text-h6 font-bold')
-        progress_bar = ui.linear_progress(value=0.0, show_value=False).classes('w-full')
+    with ui.row().classes('items-center gap-2'):
+        ui.label('Status:').classes('text-h6 text-grey-7')
+        status_label = ui.label('Idle').classes('text-h5 font-bold')
+    progress_bar = ui.linear_progress(value=0.0, show_value=False).style('height: 8px')
     
     return status_label, progress_bar
 
 
 def create_jog_controls():
-    """Create the compact jog control panel."""
-    with ui.row().classes('w-full items-start gap-2 sm:gap-4 md:gap-6 flex-wrap'):
-        # XY jogging
-        with ui.column().classes('items-center gap-1'):
-            ui.label('XY').classes('text-caption text-grey-7')
+    """Create jog controls with native buttons."""
+    with ui.row().classes('w-full gap-4 items-start'):
+        # Step size selectors stacked vertically on the left
+        with ui.column().classes('gap-3').style('height: 398px; justify-content: space-between'):
+            # XY step selector
+            with ui.column().classes('gap-2 flex-1').style('justify-content: center'):
+                ui.label('XY Step').classes('text-body1 font-bold text-center mb-1')
+                with ui.row().classes('gap-2'):
+                    xy_1 = ui.button('1mm', on_click=lambda: [jog_params.update({'xy_step': 1.0}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    xy_10 = ui.button('10mm', on_click=lambda: [jog_params.update({'xy_step': 10.0}), update_step_buttons()]) \
+                        .props('unelevated color=primary').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    xy_100 = ui.button('100mm', on_click=lambda: [jog_params.update({'xy_step': 100.0}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
             
-            with ui.column().classes('items-center gap-1'):
-                # Y+
-                ui.button('Y+', on_click=lambda: jog_axis('Y', jog_params['xy_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock', 
-                                     backward=lambda _: machine_state.is_idle())
+            # Z step selector
+            with ui.column().classes('gap-2 flex-1').style('justify-content: center'):
+                ui.label('Z Step').classes('text-body1 font-bold text-center')
+                with ui.row().classes('gap-2'):
+                    z_01 = ui.button('0.1mm', on_click=lambda: [jog_params.update({'z_step': 0.1}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    z_1 = ui.button('1mm', on_click=lambda: [jog_params.update({'z_step': 1.0}), update_step_buttons()]) \
+                        .props('unelevated color=primary').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    z_10 = ui.button('10mm', on_click=lambda: [jog_params.update({'z_step': 10.0}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+            
+            # A step selector
+            with ui.column().classes('gap-2 flex-1').style('justify-content: center'):
+                ui.label('A Step').classes('text-body1 font-bold text-center')
+                with ui.row().classes('gap-2'):
+                    a_1 = ui.button('1°', on_click=lambda: [jog_params.update({'a_step': 1.0}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    a_45 = ui.button('45°', on_click=lambda: [jog_params.update({'a_step': 45.0}), update_step_buttons()]) \
+                        .props('unelevated color=primary').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    a_90 = ui.button('90°', on_click=lambda: [jog_params.update({'a_step': 90.0}), update_step_buttons()]) \
+                        .props('outline').style('min-width: 77px; font-size: 14px; padding: 34px 12px')
+                    
+            # Store button references for updating
+            jog_params['_buttons'] = {
+                'xy': {1.0: xy_1, 10.0: xy_10, 100.0: xy_100},
+                'z': {0.1: z_01, 1.0: z_1, 10.0: z_10},
+                'a': {1.0: a_1, 45.0: a_45, 90.0: a_90}
+            }
+        
+        # 3x3 XY Grid with Home in center
+        with ui.column().classes('gap-2').style('height: 398px'):
+                    ui.label('XY Control').classes('text-body1 font-bold text-center mb-1')
+                    # Row 1
+                    with ui.row().classes('gap-2'):
+                        ui.button(icon='north_west') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_diagonal(-1, 1)) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='north') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_axis('Y', jog_params['xy_step'])) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='north_east') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_diagonal(1, 1)) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    
+                    # Row 2
+                    with ui.row().classes('gap-2'):
+                        ui.button(icon='west') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_axis('X', -jog_params['xy_step'])) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='home') \
+                            .props('color=red-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: home_all()) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='east') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_axis('X', jog_params['xy_step'])) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    
+                    # Row 3
+                    with ui.row().classes('gap-2'):
+                        ui.button(icon='south_west') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_diagonal(-1, -1)) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='south') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_axis('Y', -jog_params['xy_step'])) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                        ui.button(icon='south_east') \
+                            .props('color=blue-grey-6 size=xl') \
+                            .style('width: 116px; height: 116px; font-size: 34px') \
+                            .on('click', lambda: jog_diagonal(1, -1)) \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
                 
-                # X-, X+
-                with ui.row().classes('gap-1'):
-                    ui.button('X-', on_click=lambda: jog_axis('X', -jog_params['xy_step'])) \
-                        .props('dense size=sm') \
-                        .classes('w-16 sm:w-20') \
-                        .bind_enabled_from(machine_state, '_lock',
-                                         backward=lambda _: machine_state.is_idle())
-                    ui.button('X+', on_click=lambda: jog_axis('X', jog_params['xy_step'])) \
-                        .props('dense size=sm') \
-                        .classes('w-16 sm:w-20') \
-                        .bind_enabled_from(machine_state, '_lock',
-                                         backward=lambda _: machine_state.is_idle())
-                
-                # Y-
-                ui.button('Y-', on_click=lambda: jog_axis('Y', -jog_params['xy_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock',
-                                     backward=lambda _: machine_state.is_idle())
+        # 2x2 Z/A Grid - taller buttons to match XY grid height
+        with ui.column().classes('gap-2').style('height: 398px'):
+            ui.label('Z / A Control').classes('text-body1 font-bold text-center mb-1')
+            # Row 1
+            with ui.row().classes('gap-2'):
+                ui.button('Z+') \
+                    .props('color=green-6 size=xl') \
+                    .style('width: 116px; height: 179px; font-size: 25px; font-weight: bold') \
+                    .on('click', lambda: jog_axis('Z', jog_params['z_step'])) \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                ui.button('A+') \
+                    .props('color=orange-6 size=xl') \
+                    .style('width: 116px; height: 179px; font-size: 25px; font-weight: bold') \
+                    .on('click', lambda: jog_axis('A', jog_params['a_step'])) \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+            
+            # Row 2
+            with ui.row().classes('gap-2'):
+                ui.button('Z-') \
+                    .props('color=green-6 size=xl') \
+                    .style('width: 116px; height: 179px; font-size: 25px; font-weight: bold') \
+                    .on('click', lambda: jog_axis('Z', -jog_params['z_step'])) \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                ui.button('A-') \
+                    .props('color=orange-6 size=xl') \
+                    .style('width: 116px; height: 179px; font-size: 25px; font-weight: bold') \
+                    .on('click', lambda: jog_axis('A', -jog_params['a_step'])) \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
         
-        # Z jogging
-        with ui.column().classes('items-center gap-1'):
-            ui.label('Z').classes('text-caption text-grey-7')
+        # Individual Homing Controls stacked vertically
+        with ui.column().classes('gap-2').style('height: 400px'):
+            ui.label('Homing').classes('text-body1 font-bold text-center mb-1')
+            ui.button('Home X', on_click=lambda: home_axis('X')) \
+                .props('color=red-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
             
-            with ui.column().classes('gap-1'):
-                ui.button('Z+', on_click=lambda: jog_axis('Z', jog_params['z_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock',
-                                     backward=lambda _: machine_state.is_idle())
-                ui.button('Z-', on_click=lambda: jog_axis('Z', -jog_params['z_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock',
-                                     backward=lambda _: machine_state.is_idle())
-        
-        # A jogging
-        with ui.column().classes('items-center gap-1'):
-            ui.label('A').classes('text-caption text-grey-7')
+            ui.button('Home Y', on_click=lambda: home_axis('Y')) \
+                .props('color=red-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
             
-            with ui.column().classes('gap-1'):
-                ui.button('A+', on_click=lambda: jog_axis('A', jog_params['a_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock',
-                                     backward=lambda _: machine_state.is_idle())
-                ui.button('A-', on_click=lambda: jog_axis('A', -jog_params['a_step'])) \
-                    .props('dense size=sm') \
-                    .classes('w-16 sm:w-20') \
-                    .bind_enabled_from(machine_state, '_lock',
-                                     backward=lambda _: machine_state.is_idle())
-        
-        # Jog parameters - compact vertical layout
-        with ui.column().classes('gap-1'):
-            ui.label('Steps & Speed').classes('text-caption text-grey-7')
+            ui.button('Home Z', on_click=lambda: home_axis('Z')) \
+                .props('color=red-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
             
-            ui.number('XY', value=jog_params['xy_step'], min=0.1, max=100, step=0.1,
-                     on_change=lambda e: jog_params.update({'xy_step': e.value})) \
-                .props('dense suffix=mm') \
-                .classes('w-32 sm:w-40')
-            
-            ui.number('Z', value=jog_params['z_step'], min=0.1, max=50, step=0.1,
-                     on_change=lambda e: jog_params.update({'z_step': e.value})) \
-                .props('dense suffix=mm') \
-                .classes('w-32 sm:w-40')
-            
-            ui.number('A', value=jog_params['a_step'], min=1, max=360, step=1,
-                     on_change=lambda e: jog_params.update({'a_step': e.value})) \
-                .props('dense suffix=°') \
-                .classes('w-32 sm:w-40')
-            
-            ui.number('Feed', value=jog_params['feed_rate'], min=10, max=5000, step=10,
-                     on_change=lambda e: jog_params.update({'feed_rate': e.value})) \
-                .props('dense suffix=mm/min') \
-                .classes('w-32 sm:w-40')
+            ui.button('Home A', on_click=lambda: home_axis('A')) \
+                .props('color=red-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
 
 
 def create_homing_controls():
     """Create the compact homing control panel."""
-    with ui.column().classes('gap-2'):
-        ui.label('Homing').classes('text-caption text-grey-7')
+    with ui.column().classes('gap-3'):
+        ui.label('Homing').classes('text-h6 text-grey-7 font-bold')
         
-        with ui.row().classes('gap-1 sm:gap-2'):
+        with ui.row().classes('gap-2'):
             ui.button('X', on_click=lambda: home_axis('X')) \
-                .props('dense size=sm') \
-                .classes('w-12 sm:w-16') \
+                .props('size=lg') \
+                .classes('w-20') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_idle())
             ui.button('Y', on_click=lambda: home_axis('Y')) \
-                .props('dense size=sm') \
-                .classes('w-12 sm:w-16') \
+                .props('size=lg') \
+                .classes('w-20') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_idle())
             ui.button('Z', on_click=lambda: home_axis('Z')) \
-                .props('dense size=sm') \
-                .classes('w-12 sm:w-16') \
+                .props('size=lg') \
+                .classes('w-20') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_idle())
             ui.button('A', on_click=lambda: home_axis('A')) \
-                .props('dense size=sm') \
-                .classes('w-12 sm:w-16') \
+                .props('size=lg') \
+                .classes('w-20') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_idle())
         
         ui.button('Home All', on_click=home_all, color='primary') \
-            .props('dense size=sm') \
+            .props('size=lg') \
             .classes('w-full') \
+            .style('font-size: 18px; padding: 12px 16px') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.is_idle())
 
 
 def create_file_controls():
     """Create the compact file upload and management panel."""
-    with ui.column().classes('w-full gap-2'):
-        ui.label('Job File').classes('text-body2 font-bold')
+    with ui.column().classes('w-full gap-3'):
+        ui.label('Job File').classes('text-h5 font-bold')
         
-        loaded_file_label = ui.label('No file loaded').classes('text-caption text-grey-7')
+        loaded_file_label = ui.label('No file loaded').classes('text-body1 text-grey-7')
         
         upload = ui.upload(
             label='Load DXF File',
             auto_upload=True,
             on_upload=lambda e: handle_file_upload(e, loaded_file_label)
-        ).props('accept=.dxf dense').classes('w-full')
+        ).props('accept=.dxf').classes('w-full').style('font-size: 16px')
         
         return loaded_file_label
 
 
 def create_job_controls():
     """Create the compact job execution control panel."""
-    with ui.column().classes('w-full gap-2'):
-        ui.label('Job Control').classes('text-body2 font-bold')
+    with ui.column().classes('w-full gap-3'):
+        ui.label('Job Control').classes('text-h5 font-bold')
         
-        with ui.row().classes('gap-1'):
+        with ui.row().classes('gap-2'):
             start_btn = ui.button('Start', on_click=start_job, color='positive') \
-                .props('dense size=sm') \
+                .props('size=lg') \
                 .classes('flex-1') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.job_loaded and machine_state.is_idle())
             
             pause_btn = ui.button('Pause', on_click=pause_job, color='warning') \
-                .props('dense size=sm') \
+                .props('size=lg') \
                 .classes('flex-1') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_running())
             
             resume_btn = ui.button('Resume', on_click=resume_job, color='positive') \
-                .props('dense size=sm') \
+                .props('size=lg') \
                 .classes('flex-1') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.paused)
             
             stop_btn = ui.button('Stop', on_click=stop_job, color='negative') \
-                .props('dense size=sm') \
+                .props('size=lg') \
                 .classes('flex-1') \
+                .style('font-size: 18px; padding: 12px 16px') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.busy)
 
 
 # Event handlers
 
+def update_step_buttons():
+    """Update step button styling to show active selection."""
+    if '_buttons' not in jog_params:
+        return
+    
+    # Update XY buttons
+    for val, btn in jog_params['_buttons']['xy'].items():
+        if val == jog_params['xy_step']:
+            btn.props(remove='outline')
+            btn.props('unelevated color=primary')
+        else:
+            btn.props(remove='unelevated color')
+            btn.props('outline')
+    
+    # Update Z buttons
+    for val, btn in jog_params['_buttons']['z'].items():
+        if val == jog_params['z_step']:
+            btn.props(remove='outline')
+            btn.props('unelevated color=primary')
+        else:
+            btn.props(remove='unelevated color')
+            btn.props('outline')
+    
+    # Update A buttons
+    for val, btn in jog_params['_buttons']['a'].items():
+        if val == jog_params['a_step']:
+            btn.props(remove='outline')
+            btn.props('unelevated color=primary')
+        else:
+            btn.props(remove='unelevated color')
+            btn.props('outline')
+
+
 def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
+
+
+def jog_diagonal(x_dir: int, y_dir: int):
+    """Handle diagonal jog (X and Y simultaneously)."""
+    x_distance = x_dir * jog_params['xy_step']
+    y_distance = y_dir * jog_params['xy_step']
+    cnc_controller.jog('X', x_distance, jog_params['feed_rate'])
+    cnc_controller.jog('Y', y_distance, jog_params['feed_rate'])
 
 
 def home_axis(axis: str):
@@ -245,35 +398,95 @@ def home_all():
     cnc_controller.home_all()
 
 
-def handle_file_upload(event, label):
+def update_toolpath_plot(shapes: dict):
+    """Update the toolpath visualization with new shapes."""
+    global toolpath_plot
+    
+    if toolpath_plot is None:
+        return
+    
+    # Clear and redraw
+    toolpath_plot.clear()
+    
+    with toolpath_plot:
+        fig = plt.gcf()
+        fig.clear()
+        ax = fig.add_subplot(111)
+        fig.set_size_inches(10, 6)
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        ax.set_xlim(0, 1365)
+        ax.set_ylim(0, 875)
+        ax.set_aspect('auto')
+        ax.axis('off')
+        
+        # Add light grey grid manually (crosshatch pattern)
+        grid_color = '#E0E0E0'
+        grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
+        for x in range(0, 1366, grid_spacing):
+            ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
+        for y in range(0, 876, grid_spacing):
+            ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
+        
+        # Add light grey border
+        ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
+        
+        # Plot shapes if available
+        if shapes:
+            colors = ['#2196F3', '#4CAF50', '#FF9800', '#E91E63', '#9C27B0', '#00BCD4']
+            for i, (shape_name, points) in enumerate(shapes.items()):
+                if points:
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    color = colors[i % len(colors)]
+                    ax.plot(xs, ys, color=color, linewidth=2, label=shape_name)
+    
+    toolpath_plot.update()
+
+
+async def handle_file_upload(event, label):
     """Handle file upload event."""
-    global current_gcode
+    global current_gcode, current_toolpath_shapes
     
-    # Save uploaded file - event.content contains the file data
-    # event has 'name' attribute for filename
-    filename = event.name if hasattr(event, 'name') else 'uploaded.dxf'
-    
-    # Write the uploaded content to a temporary location
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
-        tmp.write(event.content.read())
-        tmp_path = tmp.name
-    
-    # Save to uploads directory
-    saved_path = file_manager.save_uploaded_file(tmp_path, filename)
-    
-    # Clean up temp file
     import os
-    os.unlink(tmp_path)
+    import tempfile
     
-    # Generate stub G-code
-    current_gcode = file_manager.get_gcode_stub(saved_path)
-    
-    # Update state
-    machine_state.set_job_loaded(True, filename)
-    label.set_text(f'Loaded: {filename}')
-    
-    ui.notify(f'File loaded: {filename}', type='positive')
+    try:
+        # NiceGUI UploadEventArguments has a .file attribute containing the SmallFileUpload
+        uploaded_file = event.file
+        filename = uploaded_file.name
+        
+        # SmallFileUpload.read() is async
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
+            content = await uploaded_file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        # Save to uploads directory
+        saved_path = file_manager.save_uploaded_file(tmp_path, filename)
+        os.unlink(tmp_path)
+        
+        # Process DXF file
+        ui.notify('Processing DXF file...', type='info')
+        shapes = dxf_processor.process_dxf_basic(saved_path, min_distance=1.0)  # 1mm spacing
+        current_toolpath_shapes = shapes
+        
+        # Generate toolpath
+        ui.notify('Generating toolpath...', type='info')
+        gcode_str = toolpath_generator.generate_toolpath(shapes)
+        current_gcode = gcode_str.split('\n')
+        
+        # Update visualization
+        update_toolpath_plot(shapes)
+        
+        # Update state
+        machine_state.set_job_loaded(True, filename)
+        label.set_text(f'Loaded: {filename}')
+        
+        ui.notify(f'File loaded: {filename} ({len(shapes)} shapes, {len(current_gcode)} lines of G-code)', type='positive')
+    except Exception as e:
+        ui.notify(f'Error processing DXF: {str(e)}', type='negative')
+        import traceback
+        traceback.print_exc()
 
 
 def start_job():
@@ -320,45 +533,85 @@ def update_ui(pos_labels, status_label, progress_bar):
 @ui.page('/')
 def main_page():
     """Main application page with responsive tabbed interface optimized for 1280x720 and larger."""
+    # Disable scrolling on body and html
+    ui.add_head_html('''
+        <style>
+            html, body {
+                overflow: hidden !important;
+                height: 100vh !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+        </style>
+    ''')
+    
     create_header()
     
-    with ui.column().classes('w-full max-w-7xl mx-auto h-screen p-2 sm:p-4 gap-2 sm:gap-3'):
-        # Top status bar - always visible
+    # Register JavaScript functions for jog control
+    ui.run_javascript('''
+        window.jogAxis = async (axis, direction) => {
+            await fetch('/jog', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ axis: axis, direction: direction })
+            });
+        };
+    ''')
+    
+    with ui.column().classes('w-full max-w-7xl mx-auto gap-2').style('height: 100vh; overflow: hidden; padding: 12px;'):
+        # Top status bar - position and status on same row
         with ui.card().classes('w-full').style('padding: 8px 12px'):
-            pos_labels = create_position_display()
-            ui.separator().classes('my-1')
-            status_label, progress_bar = create_status_display()
+            with ui.row().classes('w-full items-center gap-4 justify-between'):
+                with ui.row().classes('items-center gap-3'):
+                    pos_labels = create_position_display()
+                ui.separator().props('vertical')
+                status_label, progress_bar = create_status_display()
+            progress_bar.classes('w-full mt-2')
         
         # Tabbed interface for different control sections
         with ui.tabs().classes('w-full') as tabs:
-            control_tab = ui.tab('Control', icon='gamepad')
-            job_tab = ui.tab('Job', icon='work')
-            toolpath_tab = ui.tab('Toolpath', icon='route')
+            control_tab = ui.tab('Control', icon='gamepad').style('font-size: 16px; min-height: 50px')
+            job_tab = ui.tab('Toolpath', icon='route').style('font-size: 16px; min-height: 50px')
         
-        with ui.tab_panels(tabs, value=control_tab).classes('w-full flex-1'):
+        with ui.tab_panels(tabs, value=control_tab).classes('w-full').style('flex: 1; min-height: 0; overflow: hidden;'):
             # Control tab - Manual jogging and homing
-            with ui.tab_panel(control_tab):
-                with ui.card().classes('w-full h-full').style('padding: 12px 16px'):
-                    with ui.row().classes('w-full items-start gap-4 sm:gap-6 md:gap-8'):
-                        create_jog_controls()
-                        ui.separator().props('vertical').classes('hidden sm:flex')
-                        create_homing_controls()
+            with ui.tab_panel(control_tab).classes('w-full').style('height: 100%; overflow: hidden; max-height: 475px;'):
+                with ui.card().classes('w-full h-full').style('padding: 12px 16px; overflow: hidden;'):
+                    create_jog_controls()
             
-            # Job tab - File loading and job execution
-            with ui.tab_panel(job_tab):
-                with ui.card().classes('w-full h-full').style('padding: 12px 16px'):
-                    with ui.column().classes('gap-4 max-w-2xl'):
-                        create_file_controls()
-                        ui.separator()
-                        create_job_controls()
-            
-            # Toolpath tab - Future toolpath visualization
-            with ui.tab_panel(toolpath_tab):
-                with ui.card().classes('w-full h-full').style('padding: 12px 16px'):
-                    with ui.column().classes('items-center justify-center h-full'):
-                        ui.icon('route', size='xl').classes('text-grey-5')
-                        ui.label('Toolpath Visualization').classes('text-h6 sm:text-h5 text-grey-7')
-                        ui.label('Coming soon - will display toolpath plot here').classes('text-caption sm:text-body2 text-grey-5')
+            # Job tab - File loading, job execution, and toolpath visualization
+            with ui.tab_panel(job_tab).style('height: 100%; overflow: hidden; max-height: 475px;'):
+                with ui.card().classes('w-full h-full').style('padding: 12px 16px; overflow: hidden;'):
+                    with ui.row().classes('gap-4 w-full h-full'):
+                        # Left column: Job file and controls
+                        with ui.column().classes('gap-4').style('flex: 0 0 400px;'):
+                            create_file_controls()
+                            ui.separator()
+                            create_job_controls()
+                        
+                        # Right column: Toolpath visualization
+                        global toolpath_plot
+                        with ui.column().style('flex: 1; min-width: 0; height: 100%; display: flex;'):
+                            # Create matplotlib plot for toolpath
+                            toolpath_plot = ui.pyplot(close=False).style('width: 100%; height: 100%; flex: 1;')
+                            with toolpath_plot:
+                                fig = plt.gcf()
+                                fig.set_size_inches(10, 6)
+                                fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                                ax = fig.add_subplot(111)
+                                ax.set_xlim(0, 1365)
+                                ax.set_ylim(0, 875)
+                                ax.set_aspect('auto')
+                                ax.axis('off')
+                                # Add light grey grid manually (crosshatch pattern)
+                                grid_color = '#E0E0E0'
+                                grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
+                                for x in range(0, 1366, grid_spacing):
+                                    ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
+                                for y in range(0, 876, grid_spacing):
+                                    ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
+                                # Add light grey border
+                                ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
         
         # Start periodic UI update timer (10 Hz = 100ms)
         ui.timer(0.1, lambda: update_ui(pos_labels, status_label, progress_bar))
