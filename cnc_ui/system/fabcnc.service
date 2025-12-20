@@ -1,0 +1,16 @@
+[Unit]
+Description=fabCNC Web Controller
+After=network.target
+
+[Service]
+Type=simple
+User=fab
+WorkingDirectory=/home/fab/code/fabCNC/cnc_ui
+ExecStart=/home/fab/code/fabCNC/venv/bin/python3 /home/fab/code/fabCNC/cnc_ui/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

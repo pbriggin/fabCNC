@@ -14,6 +14,14 @@ import matplotlib.pyplot as plt
 from dxf_processing.dxf_processor import DXFProcessor
 from toolpath_planning.toolpath_generator import ToolpathGenerator
 from toolpath_planning.gcode_visualizer import GCodeVisualizer
+import logging
+
+# Configure logging to see all debug output
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
 
 # Application version
 APP_VERSION = "v1.0.0"
@@ -24,14 +32,14 @@ jog_params = {
     'xy_step': 10.0,  # mm
     'z_step': 1.0,    # mm
     'a_step': 45.0,   # degrees
-    'feed_rate': 1000.0,  # mm/min
+    'feed_rate': 4000.0,  # mm/min
 }
 
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
-    cutting_height=-12.7,  # -0.5 inches converted to mm
-    safe_height=-50.8,     # -2.0 inches converted to mm
+    cutting_height=-20.0,  # Z height when cutting (mm)
+    safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=15.0,
     feed_rate=3000.0,      # mm/min
     plunge_rate=3000.0     # mm/min
@@ -355,6 +363,7 @@ def update_step_buttons():
         else:
             btn.props(remove='unelevated color')
             btn.props('outline')
+        btn.update()
     
     # Update Z buttons
     for val, btn in jog_params['_buttons']['z'].items():
@@ -364,6 +373,7 @@ def update_step_buttons():
         else:
             btn.props(remove='unelevated color')
             btn.props('outline')
+        btn.update()
     
     # Update A buttons
     for val, btn in jog_params['_buttons']['a'].items():
@@ -373,10 +383,12 @@ def update_step_buttons():
         else:
             btn.props(remove='unelevated color')
             btn.props('outline')
+        btn.update()
 
 
 def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
+    print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
 
 
@@ -384,8 +396,7 @@ def jog_diagonal(x_dir: int, y_dir: int):
     """Handle diagonal jog (X and Y simultaneously)."""
     x_distance = x_dir * jog_params['xy_step']
     y_distance = y_dir * jog_params['xy_step']
-    cnc_controller.jog('X', x_distance, jog_params['feed_rate'])
-    cnc_controller.jog('Y', y_distance, jog_params['feed_rate'])
+    cnc_controller.jog_xy(x_distance, y_distance, jog_params['feed_rate'])
 
 
 def home_axis(axis: str):
@@ -449,11 +460,16 @@ async def handle_file_upload(event, label):
     
     import os
     import tempfile
+    import math
     
     try:
         # NiceGUI UploadEventArguments has a .file attribute containing the SmallFileUpload
         uploaded_file = event.file
         filename = uploaded_file.name
+        
+        print(f"\n{'='*60}")
+        print(f"DXF IMPORT DEBUG: {filename}")
+        print(f"{'='*60}")
         
         # SmallFileUpload.read() is async
         with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
@@ -464,16 +480,71 @@ async def handle_file_upload(event, label):
         # Save to uploads directory
         saved_path = file_manager.save_uploaded_file(tmp_path, filename)
         os.unlink(tmp_path)
+        print(f"Saved to: {saved_path}")
         
         # Process DXF file
         ui.notify('Processing DXF file...', type='info')
-        shapes = dxf_processor.process_dxf_basic(saved_path, min_distance=1.0)  # 1mm spacing
+        # min_distance is in inches (DXF units before conversion to mm)
+        # 0.1" = 2.54mm spacing - good balance of detail and point count
+        shapes = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
         current_toolpath_shapes = shapes
+        
+        # Debug: Print shape details
+        print(f"\n--- DXF Processing Results ---")
+        print(f"Total shapes extracted: {len(shapes)}")
+        
+        for shape_name, points in shapes.items():
+            if not points:
+                print(f"  {shape_name}: EMPTY")
+                continue
+                
+            # Calculate bounds
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            width = max_x - min_x
+            height = max_y - min_y
+            
+            # Check if closed
+            first, last = points[0], points[-1]
+            gap = math.sqrt((first[0] - last[0])**2 + (first[1] - last[1])**2)
+            is_closed = gap < 3.81  # 0.15" in mm
+            
+            print(f"\n  {shape_name}:")
+            print(f"    Points: {len(points)}")
+            print(f"    Bounds: X({min_x:.1f} to {max_x:.1f}), Y({min_y:.1f} to {max_y:.1f})")
+            print(f"    Size: {width:.1f}mm x {height:.1f}mm")
+            print(f"    Start: ({first[0]:.2f}, {first[1]:.2f})")
+            print(f"    End: ({last[0]:.2f}, {last[1]:.2f})")
+            print(f"    Gap: {gap:.2f}mm {'(CLOSED)' if is_closed else '(OPEN)'}")
         
         # Generate toolpath
         ui.notify('Generating toolpath...', type='info')
-        gcode_str = toolpath_generator.generate_toolpath(shapes)
+        print(f"\n--- Toolpath Generation ---")
+        gcode_str = toolpath_generator.generate_toolpath(shapes, source_filename=filename)
         current_gcode = gcode_str.split('\n')
+        
+        # Debug: Show gcode summary
+        g0_count = sum(1 for line in current_gcode if line.startswith('G0'))
+        g1_count = sum(1 for line in current_gcode if line.startswith('G1'))
+        corner_count = sum(1 for line in current_gcode if 'corner' in line.lower())
+        print(f"  Total lines: {len(current_gcode)}")
+        print(f"  Rapid moves (G0): {g0_count}")
+        print(f"  Cut moves (G1): {g1_count}")
+        print(f"  Corners detected: {corner_count}")
+        
+        # Show A-axis range
+        a_values = []
+        for line in current_gcode:
+            import re
+            a_match = re.search(r'A([-\d.]+)', line)
+            if a_match:
+                a_values.append(float(a_match.group(1)))
+        if a_values:
+            print(f"  A-axis range: {min(a_values):.1f}° to {max(a_values):.1f}°")
+        
+        print(f"{'='*60}\n")
         
         # Update visualization
         update_toolpath_plot(shapes)
@@ -490,9 +561,10 @@ async def handle_file_upload(event, label):
 
 
 def start_job():
-    """Handle start job button click."""
+    """Handle start job button click - streams gcode via serial."""
     if current_gcode:
-        cnc_controller.start_job(current_gcode)
+        ui.notify('Starting job...', type='info')
+        cnc_controller.start_job(current_gcode, use_sd=False)
         ui.notify('Job started', type='positive')
 
 
@@ -572,6 +644,7 @@ def main_page():
         with ui.tabs().classes('w-full') as tabs:
             control_tab = ui.tab('Control', icon='gamepad').style('font-size: 16px; min-height: 50px')
             job_tab = ui.tab('Toolpath', icon='route').style('font-size: 16px; min-height: 50px')
+            gcode_tab = ui.tab('GCODE', icon='terminal').style('font-size: 16px; min-height: 50px')
         
         with ui.tab_panels(tabs, value=control_tab).classes('w-full').style('flex: 1; min-height: 0; overflow: hidden;'):
             # Control tab - Manual jogging and homing
@@ -612,6 +685,41 @@ def main_page():
                                     ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
                                 # Add light grey border
                                 ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
+            
+            # GCODE tab - Manual G-code command interface
+            with ui.tab_panel(gcode_tab).style('height: 100%; overflow: hidden; max-height: 475px;'):
+                with ui.card().classes('w-full h-full').style('padding: 16px;'):
+                    ui.label('Manual G-code Commands').classes('text-h6 mb-2')
+                    
+                    # Command input
+                    with ui.row().classes('w-full gap-2 items-center mb-4'):
+                        gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined')
+                        
+                        async def send_gcode():
+                            cmd = gcode_input.value.strip()
+                            if cmd:
+                                response_log.push(f'>>> {cmd}')
+                                response = cnc_controller.send_command_with_response(cmd, timeout=10.0)
+                                for line in response.split('\n'):
+                                    response_log.push(f'<<< {line}')
+                                gcode_input.value = ''
+                        
+                        ui.button('Send', on_click=send_gcode, icon='send').props('color=primary')
+                    
+                    # Common commands
+                    ui.label('Quick Commands:').classes('text-subtitle2 text-grey-7 mb-1')
+                    with ui.row().classes('gap-2 mb-4'):
+                        ui.button('M115 (Firmware)', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('size=sm outline')
+                        ui.button('M114 (Position)', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('size=sm outline')
+                        ui.button('M503 (Settings)', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('size=sm outline')
+                        ui.button('M999 (Reset)', on_click=lambda: [gcode_input.set_value('M999'), send_gcode()]).props('size=sm outline color=orange')
+                    
+                    # Response log
+                    ui.label('Response Log:').classes('text-subtitle2 text-grey-7 mb-1')
+                    response_log = ui.log().classes('w-full').style('height: 280px; font-family: monospace; font-size: 13px;')
+                    
+                    # Allow enter key to send command
+                    gcode_input.on('keydown.enter', send_gcode)
         
         # Start periodic UI update timer (10 Hz = 100ms)
         ui.timer(0.1, lambda: update_ui(pos_labels, status_label, progress_bar))

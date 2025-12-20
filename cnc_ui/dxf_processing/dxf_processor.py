@@ -146,8 +146,8 @@ class DXFProcessor:
             # 1. Merge shapes that share points
             merged_shapes = self._merge_connected_shapes(shapes_mm)
             
-            # 2. Position shapes with bottom-left justification (10mm buffers)
-            positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=10.0, y_buffer_mm=10.0)
+            # 2. Position shapes with bottom-left justification (10mm X buffer, 40mm Y buffer)
+            positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=10.0, y_buffer_mm=40.0)
             
             logger.info(f"Processed {len(shapes)} entities with basic approach, merged into {len(merged_shapes)} shapes")
             return positioned_shapes
