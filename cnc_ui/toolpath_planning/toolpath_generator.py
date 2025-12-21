@@ -29,7 +29,7 @@ class ToolpathGenerator:
                  cutting_height: float = -20.0,  # Z height when cutting (lower)
                  safe_height: float = -15.0,  # Z height when raised (higher)
                  corner_angle_threshold: float = 15.0,  # Increased from 5.0 to be less sensitive to curves
-                 feed_rate: float = 3000.0,
+                 feed_rate: float = 12000.0,  # 200 mm/s (firmware max is 300)
                  plunge_rate: float = 3000.0):
         """
         Initialize the toolpath generator.
@@ -132,6 +132,14 @@ class ToolpathGenerator:
             "G21 ; Set units to millimeters",
             "G90 ; Set absolute positioning",
             "G17 ; Select XY plane",
+            "M17 ; Enable all steppers",
+            "",
+            "; Set speed/accel for cutting",
+            "M203 Z25 ; Max Z speed 25 mm/s (1500 mm/min)",
+            "M201 X500 Y500 ; Max XY accel 500 mm/s² (reduced for smoother motion)",
+            "M201 Z100 ; Max Z accel 100 mm/s²",
+            "M201 A3000 ; Max A accel 3000 deg/s² (faster rotation at corners)",
+            "M204 P2000 T3000 ; Print accel 2000, Travel accel 3000",
             "",
             f"G0 Z{self.safe_height} F{self.plunge_rate} ; Move to safe height",
             ""
@@ -142,8 +150,15 @@ class ToolpathGenerator:
         return [
             "",
             f"G0 Z{self.safe_height} ; Return to safe height",
-            "G0 X0 Y0 A0 ; Return to origin",
+            "G0 X0 Y0 Z0 A0 ; Return to origin",
             "M400 ; Wait for moves to finish",
+            "",
+            "; Restore Z and A speed/accel to firmware defaults (safe for homing)",
+            "M203 Z5 ; Max Z speed 5 mm/s",
+            "M201 Z15 ; Max Z accel 15 mm/s²",
+            "M201 A1000 ; Max A accel 1000 deg/s² (default)",
+            "M204 P1000 T1000 ; Reset acceleration",
+            "",
             "M18 ; Disable steppers"
         ]
     

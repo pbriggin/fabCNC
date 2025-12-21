@@ -15,6 +15,10 @@ from dxf_processing.dxf_processor import DXFProcessor
 from toolpath_planning.toolpath_generator import ToolpathGenerator
 from toolpath_planning.gcode_visualizer import GCodeVisualizer
 import logging
+import socket
+import subprocess
+import os
+import math
 
 # Configure logging to see all debug output
 logging.basicConfig(
@@ -22,9 +26,23 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%H:%M:%S'
 )
+logger = logging.getLogger(__name__)
 
 # Application version
 APP_VERSION = "v1.0.0"
+
+
+def get_local_ip():
+    """Get the local IP address of this machine."""
+    try:
+        # Create a socket to determine the local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 # Jog parameters (user-adjustable)
@@ -38,16 +56,17 @@ jog_params = {
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
-    cutting_height=-20.0,  # Z height when cutting (mm)
+    cutting_height=-26.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=15.0,
-    feed_rate=3000.0,      # mm/min
+    feed_rate=7500.0,      # mm/min (125 mm/s)
     plunge_rate=3000.0     # mm/min
 )
 
 # Global storage for current toolpath visualization data
 current_toolpath_shapes = {}
 toolpath_plot = None  # Reference to the pyplot element for updates
+toolpath_ax = None  # Reference to the axes for updates
 
 # API endpoint for jog control from JavaScript
 @app.post('/jog')
@@ -74,10 +93,43 @@ current_gcode = []
 
 
 def create_header():
-    """Create the application header."""
+    """Create the application header with connection status and IP address."""
     with ui.header().classes('items-center justify-between bg-primary text-white py-2 px-4'):
+        # Left side: App name
         ui.label('fabCNC Controller').classes('text-h4 font-bold')
+        
+        # Right side: Status, IP, Version
         with ui.row().classes('items-center gap-4'):
+            # Connection status indicator
+            with ui.row().classes('items-center gap-1'):
+                connection_icon = ui.icon('check_circle', color='green').classes('text-h5')
+                connection_label = ui.label('Connected').classes('text-body1')
+                
+                # Update connection status periodically
+                def update_connection_status():
+                    if cnc_controller.connected:
+                        connection_icon.props('name=check_circle color=green')
+                        connection_label.set_text('Connected')
+                    else:
+                        connection_icon.props('name=cancel color=red')
+                        connection_label.set_text('Disconnected')
+                
+                ui.timer(1.0, update_connection_status)
+            
+            # IP address
+            local_ip = get_local_ip()
+            ui.label(f'http://{local_ip}:8080').classes('text-body1 bg-white/20 px-2 py-1 rounded')
+            
+            # Restart button
+            def restart_service():
+                ui.notify('Restarting service...', type='warning')
+                # Use os.system to restart in background so the response can be sent
+                subprocess.Popen(['sudo', 'systemctl', 'restart', 'fabcnc.service'], 
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            ui.button(icon='refresh', on_click=restart_service).props('flat round color=white').tooltip('Restart Service')
+            
+            # Version
             ui.label(APP_VERSION).classes('text-h6')
 
 
@@ -411,35 +463,35 @@ def home_all():
 
 def update_toolpath_plot(shapes: dict):
     """Update the toolpath visualization with new shapes."""
-    global toolpath_plot
+    global toolpath_plot, toolpath_ax
     
-    if toolpath_plot is None:
+    if toolpath_plot is None or toolpath_ax is None:
+        logger.warning("toolpath_plot or toolpath_ax is None, cannot update")
         return
     
-    # Clear and redraw
-    toolpath_plot.clear()
+    logger.info(f"Updating toolpath plot with {len(shapes) if shapes else 0} shapes")
     
+    # Context manager is REQUIRED for NiceGUI to trigger canvas update
     with toolpath_plot:
-        fig = plt.gcf()
-        fig.clear()
-        ax = fig.add_subplot(111)
-        fig.set_size_inches(10, 6)
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-        ax.set_xlim(0, 1365)
-        ax.set_ylim(0, 875)
-        ax.set_aspect('auto')
-        ax.axis('off')
+        # Clear and redraw on the stored axes
+        toolpath_ax.clear()
+        
+        # Set up axes again after clear
+        toolpath_ax.set_xlim(0, 1365)
+        toolpath_ax.set_ylim(0, 875)
+        toolpath_ax.set_aspect('auto')
+        toolpath_ax.axis('off')
         
         # Add light grey grid manually (crosshatch pattern)
         grid_color = '#E0E0E0'
         grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
         for x in range(0, 1366, grid_spacing):
-            ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
+            toolpath_ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
         for y in range(0, 876, grid_spacing):
-            ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
+            toolpath_ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
         
         # Add light grey border
-        ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
+        toolpath_ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
         
         # Plot shapes if available
         if shapes:
@@ -449,18 +501,16 @@ def update_toolpath_plot(shapes: dict):
                     xs = [p[0] for p in points]
                     ys = [p[1] for p in points]
                     color = colors[i % len(colors)]
-                    ax.plot(xs, ys, color=color, linewidth=2, label=shape_name)
-    
-    toolpath_plot.update()
+                    toolpath_ax.plot(xs, ys, color=color, linewidth=2, label=shape_name)
+                    logger.info(f"  Plotted {shape_name}: {len(points)} points, x={min(xs):.1f}-{max(xs):.1f}, y={min(ys):.1f}-{max(ys):.1f}")
 
 
 async def handle_file_upload(event, label):
     """Handle file upload event."""
-    global current_gcode, current_toolpath_shapes
+    global current_gcode, current_toolpath_shapes, toolpath_plot
     
     import os
     import tempfile
-    import math
     
     try:
         # NiceGUI UploadEventArguments has a .file attribute containing the SmallFileUpload
@@ -561,11 +611,10 @@ async def handle_file_upload(event, label):
 
 
 def start_job():
-    """Handle start job button click - streams gcode via serial."""
+    """Handle start job button click - streams via serial."""
     if current_gcode:
         ui.notify('Starting job...', type='info')
-        cnc_controller.start_job(current_gcode, use_sd=False)
-        ui.notify('Job started', type='positive')
+        cnc_controller.start_job(current_gcode)
 
 
 def pause_job():
@@ -663,7 +712,7 @@ def main_page():
                             create_job_controls()
                         
                         # Right column: Toolpath visualization
-                        global toolpath_plot
+                        global toolpath_plot, toolpath_ax
                         with ui.column().style('flex: 1; min-width: 0; height: 100%; display: flex;'):
                             # Create matplotlib plot for toolpath
                             toolpath_plot = ui.pyplot(close=False).style('width: 100%; height: 100%; flex: 1;')
@@ -671,20 +720,20 @@ def main_page():
                                 fig = plt.gcf()
                                 fig.set_size_inches(10, 6)
                                 fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-                                ax = fig.add_subplot(111)
-                                ax.set_xlim(0, 1365)
-                                ax.set_ylim(0, 875)
-                                ax.set_aspect('auto')
-                                ax.axis('off')
+                                toolpath_ax = fig.add_subplot(111)
+                                toolpath_ax.set_xlim(0, 1365)
+                                toolpath_ax.set_ylim(0, 875)
+                                toolpath_ax.set_aspect('auto')
+                                toolpath_ax.axis('off')
                                 # Add light grey grid manually (crosshatch pattern)
                                 grid_color = '#E0E0E0'
                                 grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
                                 for x in range(0, 1366, grid_spacing):
-                                    ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
+                                    toolpath_ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
                                 for y in range(0, 876, grid_spacing):
-                                    ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
+                                    toolpath_ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
                                 # Add light grey border
-                                ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
+                                toolpath_ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
             
             # GCODE tab - Manual G-code command interface
             with ui.tab_panel(gcode_tab).style('height: 100%; overflow: hidden; max-height: 475px;'):

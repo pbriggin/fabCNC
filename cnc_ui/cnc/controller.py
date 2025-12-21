@@ -37,9 +37,8 @@ class CNCController:
         self.ok_lock = threading.Lock()
         self.ok_event = threading.Event()  # Signal when ok received
         self.streaming_mode = False  # True when streaming a job
-        
         # Buffer settings for streaming (Marlin typically has 4-16 command buffer)
-        self.buffer_size = 4  # Keep this many commands ahead
+        self.buffer_size = 8  # Keep this many commands ahead to prevent pauses
         
         # Try to connect on initialization
         self._auto_connect()
@@ -83,9 +82,8 @@ class CNCController:
                         # Enable position reporting
                         self._send_command("M114")  # Get current position
                         
-                        # Set acceleration and jerk for smoother motion
-                        self._send_command("M204 P1000 T1000")  # Set acceleration (mm/s²)
-                        self._send_command("M205 X10 Y10 Z10")  # Set jerk (mm/s)
+                        # Set faster XY acceleration (firmware supports up to 3000)
+                        self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
                         
                         return True
                     else:
@@ -225,6 +223,9 @@ class CNCController:
             logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
             return
         
+        # Set slower acceleration for jogging (gentler motion)
+        self._send_command("M204 P500 T500")  # Jog accel 500 mm/s²
+        
         # For A axis, use degrees directly (Marlin handles rotary axes)
         if axis.upper() == 'A':
             # Invert A axis direction to match physical motor wiring
@@ -242,6 +243,8 @@ class CNCController:
             self._send_command(f"G1 {axis}{distance} F{feed_rate}")  # Use G1 for controlled acceleration
             self._send_command("G90")  # Back to absolute mode
         
+        self._send_command("M400")  # Wait for move to finish
+        self._send_command("M204 P2000 T3000")  # Restore fast acceleration
         self._send_command("M114")  # Request position update
     
     def jog_xy(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
@@ -259,9 +262,14 @@ class CNCController:
         
         logger.info(f"JOG XY DIAGONAL: X={x_distance} mm, Y={y_distance} mm, feed={feed_rate} mm/min")
         
+        # Set slower acceleration for jogging (gentler motion)
+        self._send_command("M204 P500 T500")  # Jog accel 500 mm/s²
+        
         self._send_command("G91")  # Relative mode
         self._send_command(f"G1 X{x_distance} Y{y_distance} F{feed_rate}")  # Use G1 for controlled acceleration
         self._send_command("G90")  # Back to absolute mode
+        self._send_command("M400")  # Wait for move to finish
+        self._send_command("M204 P2000 T3000")  # Restore fast acceleration
         self._send_command("M114")  # Request position update
     
     def home_axis(self, axis: str) -> None:
@@ -276,12 +284,26 @@ class CNCController:
         
         machine_state.set_status(f"Homing {axis}...", busy=True)
         
+        # Enable all steppers
+        self._send_command("M17")
+        
+        # Reset Z speed/accel to safe firmware defaults for homing
+        self._send_command("M203 Z5")  # Max Z speed 5 mm/s
+        self._send_command("M201 Z15")  # Max Z accel 15 mm/s²
+        self._send_command("M204 P1000 T1000")  # Safe acceleration
+        
         # Marlin homing command
         self._send_command(f"G28 {axis.upper()}")
         
         # Wait for homing to complete
         time.sleep(0.5)
         self._send_command("M114")  # Request position update
+        
+        # Restore faster XY acceleration (but keep Z safe)
+        self._send_command("M204 P2000 T3000")
+        
+        # Disable steppers after homing
+        self._send_command("M18")
         
         machine_state.set_status("Idle", busy=False)
     
@@ -291,6 +313,14 @@ class CNCController:
             return
         
         machine_state.set_status("Homing all axes...", busy=True)
+        
+        # Enable all steppers
+        self._send_command("M17")
+        
+        # Reset Z speed/accel to safe firmware defaults for homing
+        self._send_command("M203 Z5")  # Max Z speed 5 mm/s
+        self._send_command("M201 Z15")  # Max Z accel 15 mm/s²
+        self._send_command("M204 P1000 T1000")  # Safe acceleration
         
         # Marlin home all command
         self._send_command("G28")  # Home X, Y, Z
@@ -302,133 +332,22 @@ class CNCController:
         self._send_command("G92 E0")
         self._send_command("M114")  # Request position update
         
+        # Restore faster XY acceleration (but keep Z safe)
+        self._send_command("M204 P2000 T3000")
+        
+        # Disable steppers after homing
+        self._send_command("M18")
+        
         machine_state.set_status("Idle", busy=False)
-    
-    # ==================== SD Card Operations ====================
-    
-    def sd_init(self) -> str:
-        """Initialize SD card. Returns response."""
-        return self.send_command_with_response("M21", timeout=5.0)
-    
-    def sd_list_files(self) -> str:
-        """List files on SD card. Returns file listing."""
-        return self.send_command_with_response("M20", timeout=10.0)
-    
-    def sd_upload_file(self, filename: str, gcode_content: str) -> bool:
-        """
-        Upload a gcode file to the SD card.
-        
-        Args:
-            filename: Name for the file on SD card (8.3 format recommended)
-            gcode_content: The gcode content to upload
-            
-        Returns:
-            True if upload successful
-        """
-        if not self.connected:
-            logger.error("Cannot upload to SD: not connected")
-            return False
-        
-        try:
-            # Initialize SD card
-            self._send_command("M21")
-            time.sleep(0.5)
-            
-            # Start file write
-            self._send_command(f"M28 {filename}")
-            time.sleep(0.2)
-            
-            # Send gcode lines
-            lines = gcode_content.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith(';'):
-                    self._send_command(line)
-                    time.sleep(0.01)  # Small delay to not overflow buffer
-            
-            # End file write
-            self._send_command("M29")
-            time.sleep(0.5)
-            
-            logger.info(f"Uploaded {filename} to SD card ({len(lines)} lines)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"SD upload failed: {e}")
-            return False
-    
-    def sd_start_file(self, filename: str) -> bool:
-        """
-        Start running a gcode file from SD card.
-        
-        Args:
-            filename: Name of file on SD card
-            
-        Returns:
-            True if started successfully
-        """
-        if not self.connected:
-            return False
-        
-        try:
-            # Initialize SD
-            self._send_command("M21")
-            time.sleep(0.3)
-            
-            # Select file
-            self._send_command(f"M23 {filename}")
-            time.sleep(0.3)
-            
-            # Start print
-            self._send_command("M24")
-            
-            machine_state.set_status("Running (SD)", busy=True)
-            logger.info(f"Started SD print: {filename}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to start SD file: {e}")
-            return False
-    
-    def sd_pause(self) -> None:
-        """Pause SD card print."""
-        self._send_command("M25")
-        machine_state.set_status("Paused (SD)", busy=True, paused=True)
-    
-    def sd_resume(self) -> None:
-        """Resume SD card print."""
-        self._send_command("M24")
-        machine_state.set_status("Running (SD)", busy=True, paused=False)
-    
-    def sd_stop(self) -> None:
-        """Stop SD card print and delete temp file."""
-        self._send_command("M524")  # Abort SD print (Marlin 2.x)
-        machine_state.set_status("Stopped", busy=False)
-    
-    def sd_get_progress(self) -> Optional[float]:
-        """Get SD print progress (0.0 to 1.0)."""
-        response = self.send_command_with_response("M27", timeout=2.0)
-        # Parse response like "SD printing byte 1234/5678"
-        if "byte" in response.lower():
-            try:
-                parts = response.split("byte")[1].strip().split("/")
-                current = int(parts[0])
-                total = int(parts[1])
-                if total > 0:
-                    return current / total
-            except:
-                pass
-        return None
     
     # ==================== Job Execution ====================
     
-    def start_job(self, gcode_lines: list[str], use_sd: bool = False) -> None:
+    def start_job(self, gcode_lines: list[str]) -> None:
         """
-        Start executing a G-code job.
+        Start executing a G-code job via serial streaming.
         
         Args:
             gcode_lines: List of G-code commands to execute
-            use_sd: If True, upload to SD card and run from there (more reliable)
         """
         if not machine_state.is_idle() or not machine_state.job_loaded or not self.connected:
             return
@@ -436,19 +355,9 @@ class CNCController:
         self.stop_requested = False
         self.pause_requested = False
         
-        if use_sd:
-            # Upload to SD and run from there
-            gcode_content = '\n'.join(gcode_lines)
-            if self.sd_upload_file("job.gco", gcode_content):
-                self.sd_start_file("job.gco")
-            else:
-                logger.error("Failed to upload to SD card, falling back to streaming")
-                self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
-                self.job_thread.start()
-        else:
-            # Stream via serial (original method)
-            self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
-            self.job_thread.start()
+        # Stream via serial
+        self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
+        self.job_thread.start()
     
     def pause_job(self) -> None:
         """Pause the currently running job."""
