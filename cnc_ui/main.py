@@ -309,6 +309,24 @@ def create_jog_controls():
                 .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
                 .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
 
+        # Set Zero Controls stacked vertically
+        with ui.column().classes('gap-2').style('height: 400px'):
+            ui.label('Set Zero').classes('text-body1 font-bold text-center mb-1')
+            ui.button('Zero XY', on_click=set_xy_zero) \
+                .props('color=blue-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4 * 2 + 8px); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+            
+            ui.button('Zero Z', on_click=set_z_zero) \
+                .props('color=blue-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+            
+            ui.button('Zero A', on_click=set_a_zero) \
+                .props('color=blue-6') \
+                .style('min-width: 116px; height: calc((100% - 32px - 24px) / 4); font-size: 17px') \
+                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+
 
 def create_homing_controls():
     """Create the compact homing control panel."""
@@ -459,6 +477,24 @@ def home_axis(axis: str):
 def home_all():
     """Handle home all button click."""
     cnc_controller.home_all()
+
+
+def set_xy_zero():
+    """Set current XY position as zero."""
+    cnc_controller.send_command("G92 X0 Y0")
+    ui.notify("XY position set to zero", type='positive')
+
+
+def set_z_zero():
+    """Set current Z position + 27 as zero (so current position becomes -27)."""
+    cnc_controller.send_command("G92 Z-27")
+    ui.notify("Z zero set (current = -27)", type='positive')
+
+
+def set_a_zero():
+    """Set current A position as zero."""
+    cnc_controller.send_command("G92 A0")
+    ui.notify("A position set to zero", type='positive')
 
 
 def update_toolpath_plot(shapes: dict):
