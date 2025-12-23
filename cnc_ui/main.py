@@ -10,6 +10,7 @@ from cnc.controller import cnc_controller
 from cnc.files import file_manager
 from pathlib import Path
 from fastapi import Request
+from fastapi.staticfiles import StaticFiles
 import matplotlib.pyplot as plt
 from dxf_processing.dxf_processor import DXFProcessor
 from toolpath_planning.toolpath_generator import ToolpathGenerator
@@ -19,6 +20,7 @@ import socket
 import subprocess
 import os
 import math
+import json
 
 # Configure logging to see all debug output
 logging.basicConfig(
@@ -30,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 # Application version
 APP_VERSION = "v1.0.0"
+
+# Mount static files directory
+app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
 
 
 def get_local_ip():
@@ -65,8 +70,7 @@ toolpath_generator = ToolpathGenerator(
 
 # Global storage for current toolpath visualization data
 current_toolpath_shapes = {}
-toolpath_plot = None  # Reference to the pyplot element for updates
-toolpath_ax = None  # Reference to the axes for updates
+toolpath_canvas = None  # Reference to the canvas element
 
 # API endpoint for jog control from JavaScript
 @app.post('/jog')
@@ -497,53 +501,48 @@ def set_a_zero():
     ui.notify("A position set to zero", type='positive')
 
 
-def update_toolpath_plot(shapes: dict):
-    """Update the toolpath visualization with new shapes."""
-    global toolpath_plot, toolpath_ax
+def regenerate_toolpath():
+    """Regenerate gcode from current shape positions after shapes have been moved."""
+    global current_gcode, current_toolpath_shapes
     
-    if toolpath_plot is None or toolpath_ax is None:
-        logger.warning("toolpath_plot or toolpath_ax is None, cannot update")
+    if not current_toolpath_shapes:
         return
     
-    logger.info(f"Updating toolpath plot with {len(shapes) if shapes else 0} shapes")
+    logger.info("Regenerating toolpath after shape move...")
+    gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="moved_shapes")
+    current_gcode = gcode_str.split('\n')
     
-    # Context manager is REQUIRED for NiceGUI to trigger canvas update
-    with toolpath_plot:
-        # Clear and redraw on the stored axes
-        toolpath_ax.clear()
-        
-        # Set up axes again after clear
-        toolpath_ax.set_xlim(0, 1365)
-        toolpath_ax.set_ylim(0, 875)
-        toolpath_ax.set_aspect('auto')
-        toolpath_ax.axis('off')
-        
-        # Add light grey grid manually (crosshatch pattern)
-        grid_color = '#E0E0E0'
-        grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
-        for x in range(0, 1366, grid_spacing):
-            toolpath_ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
-        for y in range(0, 876, grid_spacing):
-            toolpath_ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
-        
-        # Add light grey border
-        toolpath_ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
-        
-        # Plot shapes if available
-        if shapes:
-            colors = ['#2196F3', '#4CAF50', '#FF9800', '#E91E63', '#9C27B0', '#00BCD4']
-            for i, (shape_name, points) in enumerate(shapes.items()):
-                if points:
-                    xs = [p[0] for p in points]
-                    ys = [p[1] for p in points]
-                    color = colors[i % len(colors)]
-                    toolpath_ax.plot(xs, ys, color=color, linewidth=2, label=shape_name)
-                    logger.info(f"  Plotted {shape_name}: {len(points)} points, x={min(xs):.1f}-{max(xs):.1f}, y={min(ys):.1f}-{max(ys):.1f}")
+    # Update state using the correct method
+    machine_state.set_job_loaded(True, "shapes (repositioned)")
+    ui.notify("Toolpath regenerated with new positions", type='positive')
+
+
+def update_toolpath_plot(shapes: dict):
+    """Update the toolpath visualization with new shapes using Fabric.js canvas."""
+    global toolpath_canvas, current_toolpath_shapes
+    
+    if toolpath_canvas is None:
+        logger.warning("toolpath_canvas is None, cannot update")
+        return
+    
+    logger.info(f"Updating toolpath canvas with {len(shapes) if shapes else 0} shapes")
+    
+    # Clear existing shapes
+    ui.run_javascript('window.toolpathCanvas.clearShapes();')
+    
+    # Add each shape to the canvas
+    if shapes:
+        for i, (shape_name, points) in enumerate(shapes.items()):
+            if points:
+                # Convert points to JSON-safe format
+                points_json = json.dumps(points)
+                ui.run_javascript(f'window.toolpathCanvas.addShape("{shape_name}", {points_json}, {i});')
+                logger.info(f"  Added {shape_name}: {len(points)} points")
 
 
 async def handle_file_upload(event, label):
     """Handle file upload event."""
-    global current_gcode, current_toolpath_shapes, toolpath_plot
+    global current_gcode, current_toolpath_shapes, toolpath_canvas
     
     import os
     import tempfile
@@ -747,29 +746,59 @@ def main_page():
                             ui.separator()
                             create_job_controls()
                         
-                        # Right column: Toolpath visualization
-                        global toolpath_plot, toolpath_ax
+                        # Right column: Interactive Toolpath Canvas (Fabric.js)
+                        global toolpath_canvas
                         with ui.column().style('flex: 1; min-width: 0; height: 100%; display: flex;'):
-                            # Create matplotlib plot for toolpath
-                            toolpath_plot = ui.pyplot(close=False).style('width: 100%; height: 100%; flex: 1;')
-                            with toolpath_plot:
-                                fig = plt.gcf()
-                                fig.set_size_inches(10, 6)
-                                fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-                                toolpath_ax = fig.add_subplot(111)
-                                toolpath_ax.set_xlim(0, 1365)
-                                toolpath_ax.set_ylim(0, 875)
-                                toolpath_ax.set_aspect('auto')
-                                toolpath_ax.axis('off')
-                                # Add light grey grid manually (crosshatch pattern)
-                                grid_color = '#E0E0E0'
-                                grid_spacing = 35  # mm (divides evenly: 1365/35=39, 875/35=25)
-                                for x in range(0, 1366, grid_spacing):
-                                    toolpath_ax.axvline(x, color=grid_color, linewidth=1.5, alpha=0.7)
-                                for y in range(0, 876, grid_spacing):
-                                    toolpath_ax.axhline(y, color=grid_color, linewidth=1.5, alpha=0.7)
-                                # Add light grey border
-                                toolpath_ax.plot([0, 1365, 1365, 0, 0], [0, 0, 875, 875, 0], color='#E0E0E0', linewidth=2)
+                            # Load Fabric.js library
+                            ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js"></script>')
+                            
+                            # Create canvas container
+                            toolpath_canvas = ui.html('''
+                                <div id="canvas-container" style="width: 100%; height: 400px; border: 1px solid #ddd; background: #fafafa;">
+                                    <canvas id="toolpath-canvas" width="800" height="400"></canvas>
+                                </div>
+                            ''', sanitize=False)
+                            
+                            # Initialize canvas after page fully loads
+                            async def init_canvas_after_load():
+                                await ui.context.client.connected()
+                                await ui.run_javascript('''
+                                    // Wait for Fabric.js and our canvas module to be ready
+                                    function initWhenReady() {
+                                        const container = document.getElementById('canvas-container');
+                                        const canvasEl = document.getElementById('toolpath-canvas');
+                                        if (typeof fabric !== 'undefined' && window.toolpathCanvas && container && canvasEl) {
+                                            console.log('Initializing toolpath canvas...');
+                                            window.toolpathCanvas.init("toolpath-canvas");
+                                            return true;
+                                        } else {
+                                            console.log('Waiting for dependencies... fabric:', typeof fabric, 'toolpathCanvas:', !!window.toolpathCanvas, 'container:', !!container);
+                                            setTimeout(initWhenReady, 100);
+                                            return false;
+                                        }
+                                    }
+                                    initWhenReady();
+                                ''')
+                            
+                            # Schedule initialization
+                            ui.timer(0.5, init_canvas_after_load, once=True)
+                            
+                            # Handle shape moved events from JavaScript
+                            def on_shape_moved(e):
+                                global current_toolpath_shapes
+                                # e.args contains the data passed from emitEvent
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                shape_name = data.get('shapeName') if isinstance(data, dict) else None
+                                new_points = data.get('newPoints') if isinstance(data, dict) else None
+                                if shape_name and new_points:
+                                    # Update the stored shapes with new positions
+                                    current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
+                                    logger.info(f"Shape '{shape_name}' moved to new position")
+                                    # Regenerate toolpath with new positions
+                                    regenerate_toolpath()
+                            
+                            ui.on('shape_moved', on_shape_moved)
             
             # GCODE tab - Manual G-code command interface
             with ui.tab_panel(gcode_tab).style('height: 100%; overflow: hidden; max-height: 475px;'):
