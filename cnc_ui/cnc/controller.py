@@ -121,6 +121,10 @@ class CNCController:
             logger.error(f"Error sending command '{command}': {e}")
             return False
     
+    def send_command(self, command: str) -> bool:
+        """Public method to send a G-code command to Marlin."""
+        return self._send_command(command)
+    
     def _read_response(self, timeout: float = 1.0) -> str:
         """Read response from Marlin until 'ok' is received."""
         if not self.serial_port or not self.serial_port.is_open:
@@ -439,9 +443,19 @@ class CNCController:
                 commands.append(line)
         
         total_commands = len(commands)
-        logger.info(f"Starting job with {total_commands} commands (buffer size: {self.buffer_size})")
+        # Flow control: keep some commands in flight but don't overflow Marlin's buffer
+        max_in_flight = 8  # Conservative - Marlin has ~16 slot buffer
+        throttle_threshold = 4  # Start waiting when this many in flight
+        logger.info(f"Starting job with {total_commands} commands")
         
         sent_count = 0  # Commands sent
+        last_progress_log = 0
+        
+        # Debug timing
+        job_start_time = time.time()
+        total_wait_time = 0
+        wait_count = 0
+        max_wait_time = 0
         
         try:
             for i, cmd in enumerate(commands):
@@ -457,19 +471,13 @@ class CNCController:
                 if self.stop_requested:
                     break
                 
-                # Send the command
+                # Send the command immediately
                 self._send_command(cmd)
                 sent_count += 1
                 
-                # Calculate how many commands are "in flight" (sent but not acknowledged)
-                with self.ok_lock:
-                    in_flight = sent_count - self.ok_count
-                
-                # If buffer is full, wait for an 'ok' before sending more
-                # Use longer wait for special commands
+                # Special handling only for blocking commands
                 if cmd.upper().startswith('G28'):  # Homing
-                    max_wait = 60.0
-                    # Wait for ALL pending commands to complete before and after homing
+                    # Wait for ALL pending commands to complete
                     while not self.stop_requested:
                         with self.ok_lock:
                             in_flight = sent_count - self.ok_count
@@ -477,51 +485,57 @@ class CNCController:
                             break
                         self.ok_event.clear()
                         self.ok_event.wait(timeout=1.0)
-                    time.sleep(0.1)  # Extra delay after homing
+                    time.sleep(0.1)
                     
                 elif cmd.upper().startswith('G4'):  # Dwell
-                    # Wait for dwell to complete
-                    max_wait = 30.0
                     start = time.time()
-                    while not self.stop_requested and (time.time() - start) < max_wait:
+                    while not self.stop_requested and (time.time() - start) < 30.0:
                         with self.ok_lock:
                             in_flight = sent_count - self.ok_count
                         if in_flight <= 0:
                             break
                         self.ok_event.clear()
                         self.ok_event.wait(timeout=1.0)
-                        
-                elif in_flight >= self.buffer_size:
-                    # Buffer full - wait for at least one ok
-                    wait_start = time.time()
-                    while not self.stop_requested:
-                        self.ok_event.clear()
-                        # Wait for ok with short timeout
-                        if self.ok_event.wait(timeout=0.5):
+                else:
+                    # Flow control - wait if too many commands in flight
+                    with self.ok_lock:
+                        in_flight = sent_count - self.ok_count
+                    
+                    if in_flight >= throttle_threshold:
+                        wait_start = time.time()
+                        while not self.stop_requested and in_flight >= throttle_threshold:
+                            self.ok_event.clear()
+                            self.ok_event.wait(timeout=0.05)
                             with self.ok_lock:
                                 in_flight = sent_count - self.ok_count
-                            if in_flight < self.buffer_size:
+                            
+                            if time.time() - wait_start > 30.0:
+                                logger.warning(f"Timeout waiting for ok (in_flight={in_flight})")
+                                with self.ok_lock:
+                                    self.ok_count = sent_count - throttle_threshold + 1
                                 break
                         
-                        # Timeout check - if no ok in 10 seconds, something is wrong
-                        if time.time() - wait_start > 10.0:
-                            logger.warning(f"Timeout waiting for ok (in_flight={in_flight})")
-                            # Reset and continue - may cause issues but better than hanging
-                            with self.ok_lock:
-                                self.ok_count = sent_count - 1
-                            break
+                        this_wait = time.time() - wait_start
+                        total_wait_time += this_wait
+                        wait_count += 1
+                        if this_wait > max_wait_time:
+                            max_wait_time = this_wait
                 
-                # Update progress based on acknowledged commands
+                # Update progress
                 with self.ok_lock:
                     acked = self.ok_count
                 progress = min(1.0, acked / total_commands) if total_commands > 0 else 1.0
                 machine_state.update_job_progress(progress)
                 
                 # Log progress every 10%
-                if (i + 1) % max(1, total_commands // 10) == 0:
+                progress_pct = int(progress * 10)
+                if progress_pct > last_progress_log:
+                    last_progress_log = progress_pct
                     with self.ok_lock:
                         in_flight = sent_count - self.ok_count
-                    logger.info(f"Job progress: {progress*100:.0f}% (sent={sent_count}, acked={acked}, in_flight={in_flight})")
+                    elapsed = time.time() - job_start_time
+                    avg_wait = (total_wait_time / wait_count * 1000) if wait_count > 0 else 0
+                    logger.info(f"Job progress: {progress*100:.0f}% (sent={sent_count}, acked={acked}, in_flight={in_flight}, elapsed={elapsed:.1f}s)")
             
             # Wait for all remaining commands to be acknowledged
             if not self.stop_requested:
@@ -532,11 +546,12 @@ class CNCController:
                         in_flight = sent_count - self.ok_count
                     if in_flight <= 0:
                         break
-                    if time.time() - wait_start > 30.0:
-                        logger.warning(f"Timeout waiting for final commands ({in_flight} remaining)")
+                    # Shorter timeout - 10 seconds should be enough for motion to complete
+                    if time.time() - wait_start > 10.0:
+                        logger.warning(f"Timeout waiting for final commands ({in_flight} remaining) - continuing anyway")
                         break
                     self.ok_event.clear()
-                    self.ok_event.wait(timeout=1.0)
+                    self.ok_event.wait(timeout=0.2)
             
             # Job complete
             if not self.stop_requested:

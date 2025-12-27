@@ -1,6 +1,7 @@
 // Fabric.js Canvas for interactive toolpath editing
 let canvas = null;
 let shapes = {};  // Store shape objects by name
+let shapeData = {};  // Store original mm points and initial positions separately
 let gridLines = [];
 let workAreaRect = null;
 
@@ -142,11 +143,26 @@ function clearShapes() {
         canvas.remove(shape);
     });
     shapes = {};
+    shapeData = {};  // Clear stored data too
     canvas.renderAll();
 }
 
 function addShape(name, points, colorIndex) {
     if (!canvas || !points || points.length < 2) return;
+    
+    // Store original mm points in separate object (deep copy)
+    shapeData[name] = {
+        originalMmPoints: points.map(p => [p[0], p[1]]),
+        initialLeft: null,
+        initialTop: null
+    };
+    
+    // Log what we received
+    const xVals = points.map(p => p[0]);
+    const yVals = points.map(p => p[1]);
+    console.log('addShape:', name, 
+        'mm X(' + Math.min(...xVals).toFixed(1) + '-' + Math.max(...xVals).toFixed(1) + ')',
+        'Y(' + Math.min(...yVals).toFixed(1) + '-' + Math.max(...yVals).toFixed(1) + ')');
     
     // Convert points to canvas coordinates
     const canvasPoints = points.map(p => ({
@@ -171,67 +187,90 @@ function addShape(name, points, colorIndex) {
         borderColor: color,
         cornerSize: 8,
         transparentCorners: false,
-        shapeName: name,  // Custom property to identify shape
-        originalPoints: points  // Store original mm coordinates
+        shapeName: name
     });
     
     shapes[name] = polyline;
     canvas.add(polyline);
     canvas.renderAll();
     
-    console.log('Added shape:', name, 'with', points.length, 'points');
+    // Store initial left/top position AFTER adding to canvas
+    shapeData[name].initialLeft = polyline.left;
+    shapeData[name].initialTop = polyline.top;
+    
+    console.log('addShape stored:', name,
+        'initialLeft:', polyline.left.toFixed(1),
+        'initialTop:', polyline.top.toFixed(1));
 }
 
 function onShapeMoved(e) {
     const obj = e.target;
     if (!obj || !obj.shapeName) return;
     
-    // Calculate the offset in mm
-    const offsetX = fromCanvasX(obj.left) - fromCanvasX(obj.left - (obj.left - obj.oCoords.tl.x));
-    const offsetY = fromCanvasY(obj.top) - fromCanvasY(obj.top - (obj.top - obj.oCoords.tl.y));
+    const name = obj.shapeName;
+    const data = shapeData[name];
     
-    // Get new position of first point
-    const matrix = obj.calcTransformMatrix();
-    const points = obj.points;
-    
-    // Calculate new points in mm
-    const newPoints = points.map(p => {
-        const transformed = fabric.util.transformPoint(p, matrix);
-        return [fromCanvasX(transformed.x), fromCanvasY(transformed.y)];
-    });
-    
-    // Send update to Python backend using NiceGUI's emitEvent
-    const updateData = {
-        shapeName: obj.shapeName,
-        newPoints: newPoints
-    };
-    
-    // Use NiceGUI's built-in emitEvent function
-    if (typeof emitEvent === 'function') {
-        emitEvent('shape_moved', updateData);
-    } else {
-        console.warn('emitEvent not available yet');
+    if (!data || !data.originalMmPoints || data.initialLeft === null) {
+        console.error('No stored data for shape:', name);
+        return;
     }
     
-    console.log('Shape moved:', obj.shapeName, 'new bounds:', 
-        Math.min(...newPoints.map(p => p[0])).toFixed(1), '-',
-        Math.max(...newPoints.map(p => p[0])).toFixed(1), 'x',
-        Math.min(...newPoints.map(p => p[1])).toFixed(1), '-',
-        Math.max(...newPoints.map(p => p[1])).toFixed(1));
+    // Calculate how much the object moved in canvas pixels
+    const deltaCanvasX = obj.left - data.initialLeft;
+    const deltaCanvasY = obj.top - data.initialTop;
+    
+    // Ignore tiny movements (like initial render noise)
+    if (Math.abs(deltaCanvasX) < 2 && Math.abs(deltaCanvasY) < 2) {
+        console.log('Ignoring tiny movement for', name);
+        return;
+    }
+    
+    // Convert canvas delta to mm delta
+    // X: just divide by scale
+    // Y: divide by scale and negate (canvas Y is flipped)
+    const deltaMmX = deltaCanvasX / scale;
+    const deltaMmY = -deltaCanvasY / scale;
+    
+    console.log('onShapeMoved:', name,
+        'canvas delta:', deltaCanvasX.toFixed(1), deltaCanvasY.toFixed(1),
+        'mm delta:', deltaMmX.toFixed(1), deltaMmY.toFixed(1));
+    
+    // Apply delta to original mm points
+    const newPoints = data.originalMmPoints.map(p => [
+        p[0] + deltaMmX,
+        p[1] + deltaMmY
+    ]);
+    
+    // Update stored values for next move (deep copy)
+    data.originalMmPoints = newPoints.map(p => [p[0], p[1]]);
+    data.initialLeft = obj.left;
+    data.initialTop = obj.top;
+    
+    // Log result
+    const newX = newPoints.map(p => p[0]);
+    const newY = newPoints.map(p => p[1]);
+    console.log('Shape moved:', name, 
+        'new mm X(' + Math.min(...newX).toFixed(1) + '-' + Math.max(...newX).toFixed(1) + ')',
+        'Y(' + Math.min(...newY).toFixed(1) + '-' + Math.max(...newY).toFixed(1) + ')');
+    
+    // Send update to Python backend
+    if (typeof emitEvent === 'function') {
+        emitEvent('shape_moved', {
+            shapeName: name,
+            newPoints: newPoints
+        });
+    }
 }
 
 function getShapePositions() {
     // Return current positions of all shapes in mm
     const positions = {};
     
-    Object.entries(shapes).forEach(([name, obj]) => {
-        const matrix = obj.calcTransformMatrix();
-        const points = obj.points;
-        
-        positions[name] = points.map(p => {
-            const transformed = fabric.util.transformPoint(p, matrix);
-            return [fromCanvasX(transformed.x), fromCanvasY(transformed.y)];
-        });
+    Object.keys(shapeData).forEach(name => {
+        const data = shapeData[name];
+        if (data && data.originalMmPoints) {
+            positions[name] = data.originalMmPoints.map(p => [p[0], p[1]]);
+        }
     });
     
     return positions;

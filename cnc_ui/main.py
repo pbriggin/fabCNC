@@ -64,7 +64,7 @@ toolpath_generator = ToolpathGenerator(
     cutting_height=-26.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=15.0,
-    feed_rate=7500.0,      # mm/min (125 mm/s)
+    feed_rate=3000.0,      # mm/min (50 mm/s)
     plunge_rate=3000.0     # mm/min
 )
 
@@ -490,9 +490,9 @@ def set_xy_zero():
 
 
 def set_z_zero():
-    """Set current Z position + 27 as zero (so current position becomes -27)."""
-    cnc_controller.send_command("G92 Z-27")
-    ui.notify("Z zero set (current = -27)", type='positive')
+    """Set current Z position + 26 as zero (so current position becomes -26)."""
+    cnc_controller.send_command("G92 Z-26")
+    ui.notify("Z zero set (current = -26)", type='positive')
 
 
 def set_a_zero():
@@ -534,6 +534,11 @@ def update_toolpath_plot(shapes: dict):
     if shapes:
         for i, (shape_name, points) in enumerate(shapes.items()):
             if points:
+                # Log the bounds being sent to JavaScript
+                x_vals = [p[0] for p in points]
+                y_vals = [p[1] for p in points]
+                logger.info(f"  Sending {shape_name} to canvas: {len(points)} pts, X({min(x_vals):.1f}-{max(x_vals):.1f}), Y({min(y_vals):.1f}-{max(y_vals):.1f})")
+                
                 # Convert points to JSON-safe format
                 points_json = json.dumps(points)
                 ui.run_javascript(f'window.toolpathCanvas.addShape("{shape_name}", {points_json}, {i});')
@@ -649,6 +654,8 @@ def start_job():
     """Handle start job button click - streams via serial."""
     if current_gcode:
         ui.notify('Starting job...', type='info')
+        
+        # Start job without callback - we'll monitor completion via state
         cnc_controller.start_job(current_gcode)
 
 
@@ -670,6 +677,9 @@ def stop_job():
     ui.notify('Job stopped', type='negative')
 
 
+# Track previous status for change detection
+_previous_status = {'text': None}
+
 def update_ui(pos_labels, status_label, progress_bar):
     """Update UI with current machine state (called periodically)."""
     # Update position display
@@ -680,7 +690,16 @@ def update_ui(pos_labels, status_label, progress_bar):
     pos_labels['A'].set_text(f'{a:.2f} °')
     
     # Update status
-    status_label.set_text(machine_state.status_text)
+    current_status = machine_state.status_text
+    status_label.set_text(current_status)
+    
+    # Detect status changes and show notifications
+    if _previous_status['text'] != current_status:
+        if current_status == 'Complete':
+            ui.notify('Job completed successfully!', type='positive')
+        elif current_status == 'Error':
+            ui.notify('Job error!', type='negative')
+        _previous_status['text'] = current_status
     
     # Update progress
     progress_bar.set_value(machine_state.job_progress)
@@ -791,6 +810,15 @@ def main_page():
                                 data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
                                 shape_name = data.get('shapeName') if isinstance(data, dict) else None
                                 new_points = data.get('newPoints') if isinstance(data, dict) else None
+                                
+                                # Debug logging
+                                if new_points:
+                                    x_vals = [p[0] for p in new_points]
+                                    y_vals = [p[1] for p in new_points]
+                                    logger.info(f"SHAPE MOVE DEBUG: Received {len(new_points)} points")
+                                    logger.info(f"SHAPE MOVE DEBUG: X range: {min(x_vals):.1f} to {max(x_vals):.1f}")
+                                    logger.info(f"SHAPE MOVE DEBUG: Y range: {min(y_vals):.1f} to {max(y_vals):.1f}")
+                                
                                 if shape_name and new_points:
                                     # Update the stored shapes with new positions
                                     current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
