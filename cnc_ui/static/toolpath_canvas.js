@@ -5,15 +5,106 @@ let shapeData = {};  // Store original mm points and initial positions separatel
 let gridLines = [];
 let workAreaRect = null;
 
+// Undo stack
+let undoStack = [];
+const MAX_UNDO = 50;
+
 // Canvas dimensions and scale
-const WORK_WIDTH = 1365;  // mm
+const WORK_WIDTH = 1375;  // mm
 const WORK_HEIGHT = 875;  // mm
 let scale = 1;
 let canvasWidth = 800;
 let canvasHeight = 500;
 
-// Colors for shapes
-const SHAPE_COLORS = ['#2196F3', '#4CAF50', '#FF9800', '#E91E63', '#9C27B0', '#00BCD4'];
+// Colors for shapes (brighter for dark mode)
+const SHAPE_COLORS = ['#42A5F5', '#66BB6A', '#FFA726', '#EC407A', '#AB47BC', '#26C6DA'];
+
+// Dark mode colors
+const BG_COLOR = '#1e1e1e';
+const GRID_COLOR = '#333333';
+const WORK_AREA_COLOR = '#444444';
+
+function updateCanvasSize() {
+    const container = document.getElementById('canvas-container');
+    if (!container || !canvas) return;
+    
+    // Get actual container dimensions
+    const newWidth = container.offsetWidth || container.clientWidth || 800;
+    const newHeight = container.offsetHeight || container.clientHeight || 520;
+    
+    // Only resize if dimensions changed significantly
+    if (Math.abs(newWidth - canvasWidth) < 5 && Math.abs(newHeight - canvasHeight) < 5) {
+        return;
+    }
+    
+    canvasWidth = newWidth;
+    canvasHeight = newHeight;
+    
+    // Ensure minimum size
+    if (canvasWidth < 200) canvasWidth = 800;
+    if (canvasHeight < 200) canvasHeight = 520;
+    
+    // Recalculate scale
+    const scaleX = canvasWidth / WORK_WIDTH;
+    const scaleY = canvasHeight / WORK_HEIGHT;
+    scale = Math.min(scaleX, scaleY) * 0.95;
+    
+    // Resize canvas
+    canvas.setWidth(canvasWidth);
+    canvas.setHeight(canvasHeight);
+    
+    // Redraw grid and work area
+    drawGrid();
+    drawWorkArea();
+    
+    // Redraw all shapes at new scale
+    redrawAllShapes();
+    
+    canvas.renderAll();
+    console.log('Canvas resized:', canvasWidth, 'x', canvasHeight, 'scale:', scale);
+}
+
+function redrawAllShapes() {
+    // Re-render all shapes at the new scale
+    Object.keys(shapeData).forEach(shapeName => {
+        if (shapes[shapeName] && shapeData[shapeName]) {
+            const data = shapeData[shapeName];
+            const shape = shapes[shapeName];
+            
+            // Skip if no original points
+            if (!data.originalMmPoints) return;
+            
+            // Remove old shape
+            canvas.remove(shape);
+            
+            // Recreate shape with new scale
+            const points = data.originalMmPoints.map(p => ({
+                x: toCanvasX(p[0]),
+                y: toCanvasY(p[1])
+            }));
+            
+            const newShape = new fabric.Polyline(points, {
+                fill: 'transparent',
+                stroke: shape.stroke || '#42A5F5',
+                strokeWidth: 2,
+                selectable: true,
+                hasControls: true,
+                hasBorders: true,
+                lockRotation: true,
+                lockScalingX: true,
+                lockScalingY: true,
+                shapeName: shapeName
+            });
+            
+            shapes[shapeName] = newShape;
+            canvas.add(newShape);
+            
+            // Update initial position
+            data.initialLeft = newShape.left;
+            data.initialTop = newShape.top;
+        }
+    });
+}
 
 function initCanvas(elementId) {
     // Get canvas element and container
@@ -23,13 +114,19 @@ function initCanvas(elementId) {
         return;
     }
     
-    const container = document.getElementById('canvas-container') || canvasEl.parentElement;
-    canvasWidth = container.clientWidth || 800;
-    canvasHeight = container.clientHeight || 400;
+    const container = document.getElementById('canvas-container');
+    if (!container) {
+        console.error('Canvas container not found');
+        return;
+    }
+    
+    // Get actual container dimensions - use offsetWidth/Height for rendered size
+    canvasWidth = container.offsetWidth || container.clientWidth || 800;
+    canvasHeight = container.offsetHeight || container.clientHeight || 520;
     
     // Ensure minimum size
-    if (canvasWidth < 100) canvasWidth = 800;
-    if (canvasHeight < 100) canvasHeight = 400;
+    if (canvasWidth < 200) canvasWidth = 800;
+    if (canvasHeight < 200) canvasHeight = 520;
     
     console.log('Container size:', canvasWidth, 'x', canvasHeight);
     
@@ -38,22 +135,60 @@ function initCanvas(elementId) {
     const scaleY = canvasHeight / WORK_HEIGHT;
     scale = Math.min(scaleX, scaleY) * 0.95;  // 95% to leave some margin
     
-    // Create Fabric canvas
+    // Create Fabric canvas with dark mode
     canvas = new fabric.Canvas(elementId, {
         width: canvasWidth,
         height: canvasHeight,
-        backgroundColor: '#FAFAFA',
+        backgroundColor: BG_COLOR,
         selection: true,
         preserveObjectStacking: true
     });
+    
+    // Force background color multiple ways (Fabric.js can be stubborn)
+    canvas.backgroundColor = BG_COLOR;
+    canvas.renderAll();
+    
+    // Also style the wrapper and lower canvas elements directly
+    const wrapper = canvas.wrapperEl;
+    if (wrapper) {
+        wrapper.style.backgroundColor = BG_COLOR;
+    }
+    const lowerCanvas = canvas.lowerCanvasEl;
+    if (lowerCanvas) {
+        lowerCanvas.style.backgroundColor = BG_COLOR;
+    }
     
     // Draw grid and work area
     drawGrid();
     drawWorkArea();
     
-    // Handle object movement
+    // Save undo state before any transform starts
+    canvas.on('mouse:down', function(e) {
+        if (e.target && e.target.shapeName) {
+            saveUndoState();
+        }
+    });
+    
+    // Handle object movement and transforms
     canvas.on('object:moved', onShapeMoved);
-    canvas.on('object:modified', onShapeMoved);
+    canvas.on('object:scaled', onShapeScaled);
+    canvas.on('object:rotated', onShapeRotated);
+    canvas.on('object:modified', onShapeModified);
+    
+    // Add resize listeners
+    window.addEventListener('resize', updateCanvasSize);
+    
+    // Use ResizeObserver for more reliable container resize detection
+    if (typeof ResizeObserver !== 'undefined') {
+        const resizeObserver = new ResizeObserver(() => {
+            updateCanvasSize();
+        });
+        resizeObserver.observe(container);
+    }
+    
+    // Also check size after a short delay (for when container is still laying out)
+    setTimeout(updateCanvasSize, 100);
+    setTimeout(updateCanvasSize, 500);
     
     canvas.renderAll();
     console.log('Canvas initialized:', canvasWidth, 'x', canvasHeight, 'scale:', scale);
@@ -81,18 +216,28 @@ function fromCanvasY(canvasY) {
     return (canvasHeight - canvasY - offsetY) / scale;
 }
 
+let axisLabels = [];  // Store axis label objects
+
 function drawGrid() {
-    // Remove old grid lines
+    // Remove old grid lines and labels
     gridLines.forEach(line => canvas.remove(line));
     gridLines = [];
+    axisLabels.forEach(label => canvas.remove(label));
+    axisLabels = [];
     
-    const gridSpacing = 35;  // mm
-    const gridColor = '#E0E0E0';
+    // GCD of 1375 and 875 is 125 - use for major grid
+    const majorSpacing = 125;  // mm - major grid lines
+    const minorSpacing = 25;   // mm - minor grid lines
     
-    // Vertical lines
-    for (let x = 0; x <= WORK_WIDTH; x += gridSpacing) {
+    const majorGridColor = GRID_COLOR;
+    const minorGridColor = '#2a2a2a';  // fainter for minor lines
+    const labelColor = '#888888';
+    
+    // Draw minor vertical lines first (so major lines are on top)
+    for (let x = 0; x <= WORK_WIDTH; x += minorSpacing) {
+        if (x % majorSpacing === 0) continue;  // Skip major line positions
         const line = new fabric.Line([toCanvasX(x), toCanvasY(0), toCanvasX(x), toCanvasY(WORK_HEIGHT)], {
-            stroke: gridColor,
+            stroke: minorGridColor,
             strokeWidth: 1,
             selectable: false,
             evented: false
@@ -101,10 +246,11 @@ function drawGrid() {
         canvas.add(line);
     }
     
-    // Horizontal lines
-    for (let y = 0; y <= WORK_HEIGHT; y += gridSpacing) {
+    // Draw minor horizontal lines
+    for (let y = 0; y <= WORK_HEIGHT; y += minorSpacing) {
+        if (y % majorSpacing === 0) continue;  // Skip major line positions
         const line = new fabric.Line([toCanvasX(0), toCanvasY(y), toCanvasX(WORK_WIDTH), toCanvasY(y)], {
-            stroke: gridColor,
+            stroke: minorGridColor,
             strokeWidth: 1,
             selectable: false,
             evented: false
@@ -113,7 +259,60 @@ function drawGrid() {
         canvas.add(line);
     }
     
-    // Send grid to back
+    // Draw major vertical lines and X labels
+    for (let x = 0; x <= WORK_WIDTH; x += majorSpacing) {
+        const line = new fabric.Line([toCanvasX(x), toCanvasY(0), toCanvasX(x), toCanvasY(WORK_HEIGHT)], {
+            stroke: majorGridColor,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false
+        });
+        gridLines.push(line);
+        canvas.add(line);
+        
+        // X axis label (at bottom)
+        const label = new fabric.Text(Math.round(x).toString(), {
+            left: toCanvasX(x),
+            top: toCanvasY(0) + 5,
+            fontSize: 10,
+            fontFamily: 'Roboto, sans-serif',
+            fill: labelColor,
+            selectable: false,
+            evented: false,
+            originX: 'center'
+        });
+        axisLabels.push(label);
+        canvas.add(label);
+    }
+    
+    // Draw major horizontal lines and Y labels
+    for (let y = 0; y <= WORK_HEIGHT; y += majorSpacing) {
+        const line = new fabric.Line([toCanvasX(0), toCanvasY(y), toCanvasX(WORK_WIDTH), toCanvasY(y)], {
+            stroke: majorGridColor,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false
+        });
+        gridLines.push(line);
+        canvas.add(line);
+        
+        // Y axis label (at left)
+        const label = new fabric.Text(Math.round(y).toString(), {
+            left: toCanvasX(0) - 5,
+            top: toCanvasY(y),
+            fontSize: 10,
+            fontFamily: 'Roboto, sans-serif',
+            fill: labelColor,
+            selectable: false,
+            evented: false,
+            originX: 'right',
+            originY: 'center'
+        });
+        axisLabels.push(label);
+        canvas.add(label);
+    }
+    
+    // Send grid and labels to back
     gridLines.forEach(line => canvas.sendToBack(line));
 }
 
@@ -128,7 +327,7 @@ function drawWorkArea() {
         width: WORK_WIDTH * scale,
         height: WORK_HEIGHT * scale,
         fill: 'transparent',
-        stroke: '#BDBDBD',
+        stroke: WORK_AREA_COLOR,
         strokeWidth: 2,
         selectable: false,
         evented: false
@@ -137,18 +336,72 @@ function drawWorkArea() {
     canvas.sendToBack(workAreaRect);
 }
 
+// Helper: Constrain points to work area bounds
+function constrainShapeToWorkArea(points) {
+    const xVals = points.map(p => p[0]);
+    const yVals = points.map(p => p[1]);
+    const minX = Math.min(...xVals);
+    const maxX = Math.max(...xVals);
+    const minY = Math.min(...yVals);
+    const maxY = Math.max(...yVals);
+    
+    let offsetX = 0, offsetY = 0;
+    if (minX < 0) offsetX = -minX;
+    else if (maxX > WORK_WIDTH) offsetX = WORK_WIDTH - maxX;
+    if (minY < 0) offsetY = -minY;
+    else if (maxY > WORK_HEIGHT) offsetY = WORK_HEIGHT - maxY;
+    
+    if (offsetX !== 0 || offsetY !== 0) {
+        return points.map(p => [p[0] + offsetX, p[1] + offsetY]);
+    }
+    return points;
+}
+
 function clearShapes() {
-    // Remove all shape objects
+    // Remove all shape objects from canvas
     Object.values(shapes).forEach(shape => {
         canvas.remove(shape);
     });
     shapes = {};
     shapeData = {};  // Clear stored data too
+    undoStack = [];  // Clear undo history
+    clipboard = null;  // Clear clipboard
+    
+    // Also remove any other objects that aren't grid/work area
+    const objectsToRemove = canvas.getObjects().filter(obj => 
+        obj !== workAreaRect && !gridLines.includes(obj) && !axisLabels.includes(obj)
+    );
+    objectsToRemove.forEach(obj => canvas.remove(obj));
+    
+    canvas.discardActiveObject();
     canvas.renderAll();
+    console.log('Canvas cleared');
 }
 
-function addShape(name, points, colorIndex) {
+function addShape(name, points, colorIndexOrColor) {
     if (!canvas || !points || points.length < 2) return;
+    
+    // Log what we received
+    const xVals = points.map(p => p[0]);
+    const yVals = points.map(p => p[1]);
+    const minX = Math.min(...xVals);
+    const maxX = Math.max(...xVals);
+    const minY = Math.min(...yVals);
+    const maxY = Math.max(...yVals);
+    const shapeWidth = maxX - minX;
+    const shapeHeight = maxY - minY;
+    
+    console.log('addShape:', name, 
+        'mm X(' + minX.toFixed(1) + '-' + maxX.toFixed(1) + ')',
+        'Y(' + minY.toFixed(1) + '-' + maxY.toFixed(1) + ')',
+        'size: ' + shapeWidth.toFixed(1) + ' x ' + shapeHeight.toFixed(1));
+    
+    // Check if shape can fit in work area at all
+    if (shapeWidth > WORK_WIDTH || shapeHeight > WORK_HEIGHT) {
+        const msg = `Shape "${name}" (${shapeWidth.toFixed(0)}mm x ${shapeHeight.toFixed(0)}mm) is too large for work area (${WORK_WIDTH}mm x ${WORK_HEIGHT}mm)`;
+        console.error(msg);
+        throw new Error(msg);
+    }
     
     // Store original mm points in separate object (deep copy)
     shapeData[name] = {
@@ -157,12 +410,19 @@ function addShape(name, points, colorIndex) {
         initialTop: null
     };
     
-    // Log what we received
-    const xVals = points.map(p => p[0]);
-    const yVals = points.map(p => p[1]);
-    console.log('addShape:', name, 
-        'mm X(' + Math.min(...xVals).toFixed(1) + '-' + Math.max(...xVals).toFixed(1) + ')',
-        'Y(' + Math.min(...yVals).toFixed(1) + '-' + Math.max(...yVals).toFixed(1) + ')');
+    // Constrain shape to work area bounds if needed
+    if (minX < 0 || maxX > WORK_WIDTH || minY < 0 || maxY > WORK_HEIGHT) {
+        let offsetX = 0, offsetY = 0;
+        if (minX < 0) offsetX = -minX;
+        else if (maxX > WORK_WIDTH) offsetX = WORK_WIDTH - maxX;
+        if (minY < 0) offsetY = -minY;
+        else if (maxY > WORK_HEIGHT) offsetY = WORK_HEIGHT - maxY;
+        
+        // Apply offset to constrain within bounds
+        shapeData[name].originalMmPoints = points.map(p => [p[0] + offsetX, p[1] + offsetY]);
+        points = shapeData[name].originalMmPoints;
+        console.log('Shape constrained to work area:', name);
+    }
     
     // Convert points to canvas coordinates
     const canvasPoints = points.map(p => ({
@@ -170,8 +430,10 @@ function addShape(name, points, colorIndex) {
         y: toCanvasY(p[1])
     }));
     
-    // Create polyline path
-    const color = SHAPE_COLORS[colorIndex % SHAPE_COLORS.length];
+    // Create polyline path - colorIndexOrColor can be a number (index) or string (color)
+    const color = typeof colorIndexOrColor === 'string' 
+        ? colorIndexOrColor 
+        : SHAPE_COLORS[(colorIndexOrColor || 0) % SHAPE_COLORS.length];
     
     const polyline = new fabric.Polyline(canvasPoints, {
         fill: 'transparent',
@@ -180,18 +442,21 @@ function addShape(name, points, colorIndex) {
         selectable: true,
         hasControls: true,
         hasBorders: true,
-        lockRotation: true,
-        lockScalingX: true,
-        lockScalingY: true,
+        lockRotation: false,
+        lockScalingX: false,
+        lockScalingY: false,
         cornerColor: color,
         borderColor: color,
-        cornerSize: 8,
+        cornerSize: 10,
+        cornerStyle: 'circle',
         transparentCorners: false,
         shapeName: name
     });
     
     shapes[name] = polyline;
     canvas.add(polyline);
+    canvas.bringToFront(polyline);
+    canvas.setActiveObject(polyline);
     canvas.renderAll();
     
     // Store initial left/top position AFTER adding to canvas
@@ -236,10 +501,46 @@ function onShapeMoved(e) {
         'mm delta:', deltaMmX.toFixed(1), deltaMmY.toFixed(1));
     
     // Apply delta to original mm points
-    const newPoints = data.originalMmPoints.map(p => [
+    let newPoints = data.originalMmPoints.map(p => [
         p[0] + deltaMmX,
         p[1] + deltaMmY
     ]);
+    
+    // Check bounds and constrain if necessary
+    let minX = Math.min(...newPoints.map(p => p[0]));
+    let maxX = Math.max(...newPoints.map(p => p[0]));
+    let minY = Math.min(...newPoints.map(p => p[1]));
+    let maxY = Math.max(...newPoints.map(p => p[1]));
+    
+    // Constrain to work area
+    let constrainX = 0, constrainY = 0;
+    if (minX < 0) constrainX = -minX;
+    else if (maxX > WORK_WIDTH) constrainX = WORK_WIDTH - maxX;
+    if (minY < 0) constrainY = -minY;
+    else if (maxY > WORK_HEIGHT) constrainY = WORK_HEIGHT - maxY;
+    
+    if (constrainX !== 0 || constrainY !== 0) {
+        // Apply constraint
+        newPoints = newPoints.map(p => [p[0] + constrainX, p[1] + constrainY]);
+        
+        // Recalculate canvas position for constrained shape
+        const constrainedCanvasPoints = newPoints.map(p => ({
+            x: toCanvasX(p[0]),
+            y: toCanvasY(p[1])
+        }));
+        
+        // Find the new bounding box top-left
+        const canvasMinX = Math.min(...constrainedCanvasPoints.map(p => p.x));
+        const canvasMinY = Math.min(...constrainedCanvasPoints.map(p => p.y));
+        
+        // Update object position
+        obj.left = canvasMinX;
+        obj.top = canvasMinY;
+        obj.setCoords();
+        canvas.renderAll();
+        
+        console.log('Shape constrained to work area:', name);
+    }
     
     // Update stored values for next move (deep copy)
     data.originalMmPoints = newPoints.map(p => [p[0], p[1]]);
@@ -262,6 +563,111 @@ function onShapeMoved(e) {
     }
 }
 
+// Handle shape scaling via handles
+function onShapeScaled(e) {
+    const obj = e.target;
+    if (!obj || !obj.shapeName) return;
+    
+    const name = obj.shapeName;
+    const data = shapeData[name];
+    if (!data || !data.originalMmPoints) return;
+    
+    const scaleX = obj.scaleX;
+    const scaleY = obj.scaleY;
+    
+    // Get object center in canvas coords
+    const centerCanvas = obj.getCenterPoint();
+    const centerMmX = fromCanvasX(centerCanvas.x);
+    const centerMmY = fromCanvasY(centerCanvas.y);
+    
+    // Scale points around the center
+    const originalPoints = data.originalMmPoints;
+    const oldXVals = originalPoints.map(p => p[0]);
+    const oldYVals = originalPoints.map(p => p[1]);
+    const oldCenterX = (Math.min(...oldXVals) + Math.max(...oldXVals)) / 2;
+    const oldCenterY = (Math.min(...oldYVals) + Math.max(...oldYVals)) / 2;
+    
+    let newPoints = originalPoints.map(p => [
+        centerMmX + (p[0] - oldCenterX) * scaleX,
+        centerMmY + (p[1] - oldCenterY) * scaleY
+    ]);
+    
+    // Constrain to work area bounds
+    newPoints = constrainShapeToWorkArea(newPoints);
+    
+    // Reset object scale and update points
+    obj.scaleX = 1;
+    obj.scaleY = 1;
+    
+    data.originalMmPoints = newPoints;
+    redrawShapeFromData(name);
+    emitShapeUpdate(name);
+    
+    console.log('Shape scaled:', name, 'scaleX:', scaleX.toFixed(2), 'scaleY:', scaleY.toFixed(2));
+}
+
+// Handle shape rotation via handles
+function onShapeRotated(e) {
+    const obj = e.target;
+    if (!obj || !obj.shapeName) return;
+    
+    const name = obj.shapeName;
+    const data = shapeData[name];
+    if (!data || !data.originalMmPoints) return;
+    
+    // Negate angle because canvas Y is flipped
+    const angle = -obj.angle * Math.PI / 180; // Convert to radians, negate for flipped Y
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    
+    // Get object center in mm coords
+    const centerCanvas = obj.getCenterPoint();
+    const centerMmX = fromCanvasX(centerCanvas.x);
+    const centerMmY = fromCanvasY(centerCanvas.y);
+    
+    // Rotate points around center
+    const originalPoints = data.originalMmPoints;
+    const oldXVals = originalPoints.map(p => p[0]);
+    const oldYVals = originalPoints.map(p => p[1]);
+    const oldCenterX = (Math.min(...oldXVals) + Math.max(...oldXVals)) / 2;
+    const oldCenterY = (Math.min(...oldYVals) + Math.max(...oldYVals)) / 2;
+    
+    let newPoints = originalPoints.map(p => {
+        const dx = p[0] - oldCenterX;
+        const dy = p[1] - oldCenterY;
+        return [
+            centerMmX + dx * cos - dy * sin,
+            centerMmY + dx * sin + dy * cos
+        ];
+    });
+    
+    // Constrain to work area bounds
+    newPoints = constrainShapeToWorkArea(newPoints);
+    
+    // Reset object rotation and update points
+    obj.angle = 0;
+    
+    data.originalMmPoints = newPoints;
+    redrawShapeFromData(name);
+    emitShapeUpdate(name);
+    
+    console.log('Shape rotated:', name, 'angle:', (-angle * 180 / Math.PI).toFixed(1) + '°');
+}
+
+// Handle any modification (fallback)
+function onShapeModified(e) {
+    const obj = e.target;
+    if (!obj || !obj.shapeName) return;
+    
+    // Reset any remaining transforms
+    if (obj.scaleX !== 1 || obj.scaleY !== 1) {
+        onShapeScaled(e);
+    }
+    if (obj.angle !== 0) {
+        onShapeRotated(e);
+    }
+}
+
 function getShapePositions() {
     // Return current positions of all shapes in mm
     const positions = {};
@@ -280,9 +686,15 @@ function getShapePositions() {
 function resizeCanvas() {
     if (!canvas) return;
     
-    const container = canvas.wrapperEl.parentElement;
+    const container = document.getElementById('canvas-container');
+    if (!container) return;
+    
     canvasWidth = container.clientWidth || 800;
     canvasHeight = container.clientHeight || 500;
+    
+    // Ensure minimum size
+    if (canvasWidth < 100) canvasWidth = 800;
+    if (canvasHeight < 100) canvasHeight = 500;
     
     const scaleX = canvasWidth / WORK_WIDTH;
     const scaleY = canvasHeight / WORK_HEIGHT;
@@ -290,13 +702,726 @@ function resizeCanvas() {
     
     canvas.setWidth(canvasWidth);
     canvas.setHeight(canvasHeight);
+    canvas.setBackgroundColor(BG_COLOR, canvas.renderAll.bind(canvas));
     
     // Redraw grid and work area
     drawGrid();
     drawWorkArea();
-    
+
     // TODO: Rescale existing shapes
     canvas.renderAll();
+}
+
+// ============ SHAPE MANIPULATION TOOLS ============
+
+// Get selected shape (single)
+function getSelectedShape() {
+    const activeObj = canvas.getActiveObject();
+    if (activeObj && activeObj.shapeName) {
+        return activeObj;
+    }
+    return null;
+}
+
+// Get all selected shapes (handles multi-select)
+function getSelectedShapes() {
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return [];
+    
+    // If it's an ActiveSelection (multi-select), get all objects
+    if (activeObj.type === 'activeSelection') {
+        return activeObj.getObjects().filter(obj => obj.shapeName);
+    }
+    
+    // Single selection
+    if (activeObj.shapeName) {
+        return [activeObj];
+    }
+    
+    return [];
+}
+
+// Mirror shape(s) horizontally (X axis) - supports multi-select
+function mirrorX() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Find center X of shape
+        const xVals = points.map(p => p[0]);
+        const centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+        
+        // Mirror points around center
+        data.originalMmPoints = points.map(p => [
+            2 * centerX - p[0],
+            p[1]
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Mirror shape(s) vertically (Y axis) - supports multi-select
+function mirrorY() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Find center Y of shape
+        const yVals = points.map(p => p[1]);
+        const centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+        
+        // Mirror points around center
+        data.originalMmPoints = points.map(p => [
+            p[0],
+            2 * centerY - p[1]
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Rotate shape 90 degrees clockwise
+function rotate90() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Find center of shape
+        const xVals = points.map(p => p[0]);
+        const yVals = points.map(p => p[1]);
+        const centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+        const centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+        
+        // Rotate points 90 degrees clockwise around center
+        data.originalMmPoints = points.map(p => [
+            centerX + (p[1] - centerY),
+            centerY - (p[0] - centerX)
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Scale shape(s) by factor - supports multi-select
+function scaleShape(factor) {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Find center of shape
+        const xVals = points.map(p => p[0]);
+        const yVals = points.map(p => p[1]);
+        const centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+        const centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+        
+        // Scale points around center
+        data.originalMmPoints = points.map(p => [
+            centerX + (p[0] - centerX) * factor,
+            centerY + (p[1] - centerY) * factor
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Move shape(s) to origin (0, 0) - supports multi-select
+function moveToOrigin() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    // For multi-select, find the global min and move all shapes together
+    let globalMinX = Infinity;
+    let globalMinY = Infinity;
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        const points = shapeData[shape.shapeName].originalMmPoints;
+        if (!points) return;
+        
+        const minX = Math.min(...points.map(p => p[0]));
+        const minY = Math.min(...points.map(p => p[1]));
+        globalMinX = Math.min(globalMinX, minX);
+        globalMinY = Math.min(globalMinY, minY);
+    });
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Shift points by global offset
+        data.originalMmPoints = points.map(p => [
+            p[0] - globalMinX,
+            p[1] - globalMinY
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Center shape(s) on work area - supports multi-select
+function centerOnBed() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    // For multi-select, find the global bounds and center all shapes together
+    let globalMinX = Infinity, globalMaxX = -Infinity;
+    let globalMinY = Infinity, globalMaxY = -Infinity;
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        const points = shapeData[shape.shapeName].originalMmPoints;
+        if (!points) return;
+        
+        const xVals = points.map(p => p[0]);
+        const yVals = points.map(p => p[1]);
+        globalMinX = Math.min(globalMinX, Math.min(...xVals));
+        globalMaxX = Math.max(globalMaxX, Math.max(...xVals));
+        globalMinY = Math.min(globalMinY, Math.min(...yVals));
+        globalMaxY = Math.max(globalMaxY, Math.max(...yVals));
+    });
+    
+    const width = globalMaxX - globalMinX;
+    const height = globalMaxY - globalMinY;
+    const targetX = (WORK_WIDTH - width) / 2;
+    const targetY = (WORK_HEIGHT - height) / 2;
+    const offsetX = targetX - globalMinX;
+    const offsetY = targetY - globalMinY;
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Shift points
+        data.originalMmPoints = points.map(p => [
+            p[0] + offsetX,
+            p[1] + offsetY
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Duplicate selected shape
+function duplicateShape() {
+    const shape = getSelectedShape();
+    if (!shape || !shapeData[shape.shapeName]) return null;
+    
+    const data = shapeData[shape.shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return null;
+    
+    const newName = shape.shapeName + '_copy_' + Date.now();
+    
+    // Deep copy the points with small offset (20mm)
+    const newPoints = points.map(p => [p[0] + 20, p[1] + 20]);
+    
+    addShape(newName, newPoints);
+    return newName;
+}
+
+// Delete selected shape(s) - supports multi-select
+function deleteShape() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    // Discard selection first (important for multi-select)
+    canvas.discardActiveObject();
+    
+    const deletedNames = [];
+    selectedShapes.forEach(shape => {
+        const name = shape.shapeName;
+        canvas.remove(shape);
+        delete shapes[name];
+        delete shapeData[name];
+        deletedNames.push(name);
+    });
+    
+    canvas.renderAll();
+    
+    // Notify Python
+    if (window.emitEvent) {
+        deletedNames.forEach(name => {
+            window.emitEvent('shape_deleted', { shapeName: name });
+        });
+    }
+    console.log('Deleted shapes:', deletedNames);
+    return true;
+}
+
+// Select all shapes
+function selectAll() {
+    const objs = Object.values(shapes);
+    if (objs.length === 0) return;
+    
+    canvas.discardActiveObject();
+    const sel = new fabric.ActiveSelection(objs, { canvas: canvas });
+    canvas.setActiveObject(sel);
+    canvas.renderAll();
+}
+
+// Linear array - repeat shape in X or Y direction
+function linearArray(axis, count, spacing) {
+    const shape = getSelectedShape();
+    if (!shape || !shapeData[shape.shapeName]) return [];
+    
+    const data = shapeData[shape.shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return [];
+    
+    const strokeColor = shape.stroke;
+    const newNames = [];
+    
+    for (let i = 1; i < count; i++) {
+        const newName = shape.shapeName + '_arr_' + i + '_' + Date.now();
+        const offsetX = axis === 'x' ? spacing * i : 0;
+        const offsetY = axis === 'y' ? spacing * i : 0;
+        
+        const newPoints = points.map(p => [
+            p[0] + offsetX,
+            p[1] + offsetY
+        ]);
+        
+        addShape(newName, newPoints, strokeColor);
+        newNames.push(newName);
+    }
+    
+    return newNames;
+}
+
+// Grid array - create X by Y grid of copies with auto spacing
+function gridArray(countX, countY) {
+    const shape = getSelectedShape();
+    if (!shape || !shapeData[shape.shapeName]) return [];
+    
+    const data = shapeData[shape.shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return [];
+    
+    // Save state for undo
+    saveUndoState();
+    
+    // Calculate shape bounds for auto-spacing
+    const xVals = points.map(p => p[0]);
+    const yVals = points.map(p => p[1]);
+    const shapeWidth = Math.max(...xVals) - Math.min(...xVals);
+    const shapeHeight = Math.max(...yVals) - Math.min(...yVals);
+    
+    // Auto spacing = shape size + 15mm buffer
+    const spacingX = shapeWidth + 15;
+    const spacingY = shapeHeight + 15;
+    
+    const strokeColor = shape.stroke;
+    const newNames = [];
+    
+    for (let i = 0; i < countX; i++) {
+        for (let j = 0; j < countY; j++) {
+            if (i === 0 && j === 0) continue; // Skip original position
+            
+            const newName = shape.shapeName + '_grid_' + i + '_' + j + '_' + Date.now();
+            const offsetX = spacingX * i;
+            const offsetY = spacingY * j;
+            
+            const newPoints = points.map(p => [
+                p[0] + offsetX,
+                p[1] + offsetY
+            ]);
+            
+            addShape(newName, newPoints, strokeColor);
+            newNames.push(newName);
+        }
+    }
+    
+    console.log('Grid created:', countX, 'x', countY, 'spacing:', spacingX.toFixed(1), 'x', spacingY.toFixed(1));
+    return newNames;
+}
+
+// Mirror copy - duplicate and flip
+function mirrorCopy(axis) {
+    const shape = getSelectedShape();
+    if (!shape || !shapeData[shape.shapeName]) return null;
+    
+    const data = shapeData[shape.shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return null;
+    
+    // Find bounds
+    const xVals = points.map(p => p[0]);
+    const yVals = points.map(p => p[1]);
+    const minX = Math.min(...xVals);
+    const maxX = Math.max(...xVals);
+    const minY = Math.min(...yVals);
+    const maxY = Math.max(...yVals);
+    
+    const strokeColor = shape.stroke;
+    const newName = shape.shapeName + '_mirror_' + Date.now();
+    let newPoints;
+    
+    if (axis === 'x') {
+        // Mirror to the right
+        newPoints = points.map(p => [
+            2 * maxX - p[0],
+            p[1]
+        ]);
+    } else {
+        // Mirror above
+        newPoints = points.map(p => [
+            p[0],
+            2 * maxY - p[1]
+        ]);
+    }
+    
+    addShape(newName, newPoints, strokeColor);
+    return newName;
+}
+
+// Helper: Redraw a single shape from its data
+function redrawShapeFromData(shapeName) {
+    if (!shapes[shapeName] || !shapeData[shapeName]) return;
+    
+    const data = shapeData[shapeName];
+    const oldShape = shapes[shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return;
+    
+    const strokeColor = oldShape.stroke || '#42A5F5';
+    canvas.remove(oldShape);
+    
+    const canvasPoints = points.map(p => ({
+        x: toCanvasX(p[0]),
+        y: toCanvasY(p[1])
+    }));
+    
+    const newShape = new fabric.Polyline(canvasPoints, {
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: 2,
+        selectable: true,
+        hasControls: true,
+        hasBorders: true,
+        lockRotation: false,
+        lockScalingX: false,
+        lockScalingY: false,
+        cornerColor: strokeColor,
+        borderColor: strokeColor,
+        cornerSize: 10,
+        cornerStyle: 'circle',
+        transparentCorners: false,
+        shapeName: shapeName
+    });
+    
+    shapes[shapeName] = newShape;
+    canvas.add(newShape);
+    canvas.setActiveObject(newShape);
+    
+    // Update initial position
+    data.initialLeft = newShape.left;
+    data.initialTop = newShape.top;
+    
+    canvas.renderAll();
+}
+
+// Helper: Emit shape update to Python
+function emitShapeUpdate(shapeName) {
+    if (!shapeData[shapeName]) return;
+    
+    const data = shapeData[shapeName];
+    const points = data.originalMmPoints;
+    if (!points) return;
+    
+    if (window.emitEvent) {
+        window.emitEvent('shape_moved', {
+            shapeName: shapeName,
+            newPoints: points
+        });
+    }
+}
+
+// Clipboard for copy/paste
+let clipboard = null;
+
+// Save current state to undo stack
+function saveUndoState() {
+    const state = {};
+    Object.keys(shapeData).forEach(name => {
+        if (shapeData[name] && shapeData[name].originalMmPoints) {
+            state[name] = {
+                points: shapeData[name].originalMmPoints.map(p => [p[0], p[1]]),
+                stroke: shapes[name] ? shapes[name].stroke : '#42A5F5'
+            };
+        }
+    });
+    undoStack.push(JSON.stringify(state));
+    if (undoStack.length > MAX_UNDO) {
+        undoStack.shift();
+    }
+}
+
+// Undo last action
+function undo() {
+    if (undoStack.length === 0) {
+        console.log('Nothing to undo');
+        return false;
+    }
+    
+    const state = JSON.parse(undoStack.pop());
+    
+    // Clear current shapes
+    Object.values(shapes).forEach(shape => canvas.remove(shape));
+    shapes = {};
+    shapeData = {};
+    
+    // Restore shapes from state
+    Object.keys(state).forEach(name => {
+        addShape(name, state[name].points, state[name].stroke);
+    });
+    
+    canvas.discardActiveObject();
+    canvas.renderAll();
+    console.log('Undo applied');
+    return true;
+}
+
+// Copy selected shape to clipboard
+function copyShape() {
+    const shape = getSelectedShape();
+    if (!shape || !shapeData[shape.shapeName]) return false;
+    
+    const data = shapeData[shape.shapeName];
+    if (!data.originalMmPoints) return false;
+    
+    // Deep copy the points
+    clipboard = {
+        points: data.originalMmPoints.map(p => [p[0], p[1]]),
+        stroke: shape.stroke
+    };
+    console.log('Copied shape to clipboard');
+    return true;
+}
+
+// Paste shape from clipboard
+function pasteShape() {
+    if (!clipboard || !clipboard.points) return null;
+    
+    const newName = 'pasted_' + Date.now();
+    
+    // Offset by 10mm up and to the right
+    const newPoints = clipboard.points.map(p => [p[0] + 10, p[1] + 10]);
+    
+    // Pass the original stroke color
+    addShape(newName, newPoints, clipboard.stroke);
+    console.log('Pasted shape:', newName);
+    return newName;
+}
+
+// Rotate shape(s) by exact degrees - supports multi-select
+function rotateByDegrees(degrees) {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+    
+    saveUndoState();
+    
+    // Convert degrees to radians
+    const radians = degrees * Math.PI / 180;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    
+    selectedShapes.forEach(shape => {
+        if (!shapeData[shape.shapeName]) return;
+        
+        const data = shapeData[shape.shapeName];
+        const points = data.originalMmPoints;
+        if (!points) return;
+        
+        // Find center of shape
+        const xVals = points.map(p => p[0]);
+        const yVals = points.map(p => p[1]);
+        const centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+        const centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+        
+        // Rotate points around center
+        data.originalMmPoints = points.map(p => [
+            centerX + (p[0] - centerX) * cos - (p[1] - centerY) * sin,
+            centerY + (p[0] - centerX) * sin + (p[1] - centerY) * cos
+        ]);
+        
+        redrawShapeFromData(shape.shapeName);
+        emitShapeUpdate(shape.shapeName);
+    });
+    
+    return true;
+}
+
+// Keyboard event handler
+function handleKeyDown(e) {
+    // Don't handle if typing in an input field
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    
+    // Cmd/Ctrl + Z = Undo
+    if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        if (undo()) {
+            e.preventDefault();
+        }
+    }
+    
+    // Cmd/Ctrl + A = Select All
+    if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        selectAll();
+        e.preventDefault();
+    }
+    
+    // Cmd/Ctrl + C = Copy
+    if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+        if (copyShape()) {
+            e.preventDefault();
+        }
+    }
+    
+    // Cmd/Ctrl + V = Paste
+    if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+        if (pasteShape()) {
+            e.preventDefault();
+        }
+    }
+    
+    // Delete or Backspace = Delete shape
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (deleteShape()) {
+            e.preventDefault();
+        }
+    }
+}
+
+// Initialize keyboard listeners
+document.addEventListener('keydown', handleKeyDown);
+
+// Save canvas state to JSON
+function saveCanvasState() {
+    const state = {
+        version: 1,
+        timestamp: new Date().toISOString(),
+        shapes: {}
+    };
+    
+    Object.keys(shapeData).forEach(name => {
+        const data = shapeData[name];
+        const shape = shapes[name];
+        if (data && data.originalMmPoints && shape) {
+            state.shapes[name] = {
+                points: data.originalMmPoints,
+                color: shape.stroke || '#42A5F5'
+            };
+        }
+    });
+    
+    return JSON.stringify(state, null, 2);
+}
+
+// Load canvas state from JSON
+function loadCanvasState(jsonString) {
+    try {
+        const state = JSON.parse(jsonString);
+        
+        if (!state.shapes) {
+            throw new Error('Invalid canvas state: no shapes found');
+        }
+        
+        // Clear existing shapes
+        clearShapes();
+        
+        // Add each shape
+        let colorIndex = 0;
+        Object.keys(state.shapes).forEach(name => {
+            const shapeState = state.shapes[name];
+            if (shapeState.points && shapeState.points.length > 0) {
+                addShape(name, shapeState.points, shapeState.color || colorIndex);
+                colorIndex++;
+            }
+        });
+        
+        console.log('Loaded canvas state with', Object.keys(state.shapes).length, 'shapes');
+        return true;
+    } catch (e) {
+        console.error('Failed to load canvas state:', e);
+        throw e;
+    }
+}
+
+// Get all shape data for saving
+function getCanvasData() {
+    const data = {};
+    Object.keys(shapeData).forEach(name => {
+        const shape = shapes[name];
+        if (shapeData[name] && shapeData[name].originalMmPoints && shape) {
+            data[name] = {
+                points: shapeData[name].originalMmPoints,
+                color: shape.stroke || '#42A5F5'
+            };
+        }
+    });
+    return data;
 }
 
 // Export functions for use from Python
@@ -305,5 +1430,30 @@ window.toolpathCanvas = {
     addShape: addShape,
     clearShapes: clearShapes,
     getPositions: getShapePositions,
-    resize: resizeCanvas
+    resize: resizeCanvas,
+    // Transform tools
+    mirrorX: mirrorX,
+    mirrorY: mirrorY,
+    rotate90: rotate90,
+    rotateByDegrees: rotateByDegrees,
+    scaleShape: scaleShape,
+    // Position tools
+    moveToOrigin: moveToOrigin,
+    centerOnBed: centerOnBed,
+    // Pattern tools
+    linearArray: linearArray,
+    gridArray: gridArray,
+    mirrorCopy: mirrorCopy,
+    // Utility
+    duplicate: duplicateShape,
+    deleteShape: deleteShape,
+    selectAll: selectAll,
+    copyShape: copyShape,
+    pasteShape: pasteShape,
+    undo: undo,
+    saveUndoState: saveUndoState,
+    // Save/Load
+    saveCanvasState: saveCanvasState,
+    loadCanvasState: loadCanvasState,
+    getCanvasData: getCanvasData
 };

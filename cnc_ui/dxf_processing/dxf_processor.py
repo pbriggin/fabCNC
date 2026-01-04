@@ -58,8 +58,23 @@ class DXFProcessor:
                         logger.info(f"    Spline degree: {entity.dxf.degree}")
                         logger.info(f"    Control points: {len(entity.control_points)}")
                         
-                        # Basic approximation
-                        spline_points = tool.approximate(segments=50)
+                        # Estimate spline length from control points for adaptive segmentation
+                        ctrl_pts = list(entity.control_points)
+                        if len(ctrl_pts) >= 2:
+                            # Estimate path length as sum of distances between control points
+                            est_length = sum(
+                                math.sqrt((ctrl_pts[i+1][0] - ctrl_pts[i][0])**2 + (ctrl_pts[i+1][1] - ctrl_pts[i][1])**2)
+                                for i in range(len(ctrl_pts) - 1)
+                            )
+                            # Use 1 segment per 0.5 inches of estimated length, min 50, max 500
+                            num_segments = max(50, min(500, int(est_length / 0.5)))
+                        else:
+                            num_segments = 100
+                        
+                        logger.info(f"    Using {num_segments} segments for spline approximation")
+                        
+                        # Adaptive approximation based on spline length
+                        spline_points = tool.approximate(segments=num_segments)
                         points = []
                         for point in spline_points:
                             points.append((point.x, point.y))
@@ -146,8 +161,8 @@ class DXFProcessor:
             # 1. Merge shapes that share points
             merged_shapes = self._merge_connected_shapes(shapes_mm)
             
-            # 2. Position shapes with bottom-left justification (10mm X buffer, 40mm Y buffer)
-            positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=10.0, y_buffer_mm=40.0)
+            # 2. Position shapes with bottom-left justification (no offset)
+            positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=0.0, y_buffer_mm=0.0)
             
             logger.info(f"Processed {len(shapes)} entities with basic approach, merged into {len(merged_shapes)} shapes")
             return positioned_shapes
@@ -158,7 +173,7 @@ class DXFProcessor:
 
     def process_dxf(self, dxf_path: str) -> Dict[str, List[Tuple[float, float]]]:
         """
-        Process a DXF file using the basic approach with 0.1" point spacing.
+        Process a DXF file using the basic approach with 0.01" point spacing.
         
         Args:
             dxf_path: Path to the DXF file
@@ -166,7 +181,7 @@ class DXFProcessor:
         Returns:
             Dictionary mapping shape names to lists of (x, y) coordinate tuples
         """
-        return self.process_dxf_basic(dxf_path, min_distance=0.1)
+        return self.process_dxf_basic(dxf_path, min_distance=0.01)
     
     def _process_line(self, entity) -> List[Tuple[float, float]]:
         """Process a LINE entity."""
@@ -317,8 +332,8 @@ class DXFProcessor:
             is_closed = entity.closed if hasattr(entity, 'closed') else False
             
             # For splines, we'll sample at regular parameter intervals
-            # Use a higher number of segments for smoother splines
-            num_segments = 500  # Increased from 100 for smoother curve approximation
+            # Use moderate number of segments for smooth curves without excessive processing
+            num_segments = 100  # Balanced between smoothness and performance
             
             points = []
             for i in range(num_segments + 1):
@@ -461,7 +476,8 @@ class DXFProcessor:
                            points2: List[Tuple[float, float]], 
                            tolerance: float = 0.1) -> bool:
         """
-        Check if two shapes share any points within tolerance.
+        Check if two shapes share endpoint connectivity within tolerance.
+        Only checks start/end points for performance - shapes connect at endpoints.
         
         Args:
             points1: First shape's points
@@ -469,12 +485,21 @@ class DXFProcessor:
             tolerance: Distance tolerance for considering points the same
             
         Returns:
-            True if shapes share points, False otherwise
+            True if shapes share endpoints, False otherwise
         """
-        for p1 in points1:
-            for p2 in points2:
-                distance = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-                if distance <= tolerance:
+        if len(points1) < 2 or len(points2) < 2:
+            return False
+        
+        # Only check endpoints - shapes connect at their ends, not middle points
+        endpoints1 = [points1[0], points1[-1]]
+        endpoints2 = [points2[0], points2[-1]]
+        
+        tolerance_sq = tolerance * tolerance  # Avoid sqrt for performance
+        
+        for p1 in endpoints1:
+            for p2 in endpoints2:
+                dist_sq = (p1[0] - p2[0])**2 + (p1[1] - p2[1])**2
+                if dist_sq <= tolerance_sq:
                     return True
         return False
     
@@ -844,7 +869,8 @@ class DXFProcessor:
 
     def _reduce_points_by_distance(self, points: List[Tuple[float, float]], min_distance: float = 0.1) -> List[Tuple[float, float]]:
         """
-        Reduce points to only include points that are at least min_distance apart.
+        Reduce points to only include points that are at least min_distance apart,
+        but always preserve corner points (where direction changes significantly).
         
         Args:
             points: Original list of points
@@ -853,21 +879,48 @@ class DXFProcessor:
         Returns:
             Filtered list of points
         """
-        if len(points) <= 1:
+        if len(points) <= 2:
             return points
+        
+        def is_corner(p1, p2, p3, angle_threshold_degrees=15.0):
+            """Check if p2 is a corner point (direction change > threshold)."""
+            # Vector from p1 to p2
+            v1 = (p2[0] - p1[0], p2[1] - p1[1])
+            # Vector from p2 to p3
+            v2 = (p3[0] - p2[0], p3[1] - p2[1])
+            
+            mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
+            mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
+            
+            if mag1 < 0.0001 or mag2 < 0.0001:
+                return False
+            
+            # Dot product
+            dot = v1[0]*v2[0] + v1[1]*v2[1]
+            cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+            angle_change = math.degrees(math.acos(cos_angle))
+            
+            return angle_change > angle_threshold_degrees
         
         reduced_points = [points[0]]  # Always keep first point
         
-        for point in points[1:]:
+        for i in range(1, len(points) - 1):
+            point = points[i]
             last_point = reduced_points[-1]
+            next_point = points[i + 1]
+            
             # Calculate distance to last kept point
             distance = ((point[0] - last_point[0])**2 + (point[1] - last_point[1])**2)**0.5
             
-            # Only add point if it's far enough from the last kept point
-            if distance >= min_distance:
+            # Keep point if it's far enough OR if it's a corner
+            if distance >= min_distance or is_corner(last_point, point, next_point):
                 reduced_points.append(point)
         
-        logger.info(f"Reduced from {len(points)} to {len(reduced_points)} points ({min_distance}\" spacing)")
+        # Always keep last point
+        if len(points) > 1:
+            reduced_points.append(points[-1])
+        
+        logger.info(f"Reduced from {len(points)} to {len(reduced_points)} points ({min_distance}\" spacing, preserving corners)")
         return reduced_points
 
 
