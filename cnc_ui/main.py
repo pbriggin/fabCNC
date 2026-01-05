@@ -96,46 +96,239 @@ async def jog_endpoint(request: Request):
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
     return {'status': 'ok'}
 
+# API endpoint for Packaide nesting
+@app.post('/nest')
+async def nest_endpoint(request: Request):
+    """
+    Handle nesting requests using Packaide library.
+    Expects JSON with:
+    - shapes: list of {name, points: [[x,y], ...], closed: bool}
+    - sheetWidth: number (mm)
+    - sheetHeight: number (mm)
+    - offset: number (mm) - spacing between shapes
+    - rotations: number - how many rotations to try (1=no rotation, 4=90° increments)
+    """
+    import asyncio
+    import concurrent.futures
+    
+    try:
+        data = await request.json()
+        
+        input_shapes = data.get('shapes', [])
+        sheet_width = data.get('sheetWidth', 1375)
+        sheet_height = data.get('sheetHeight', 875)
+        offset = data.get('offset', 2)  # mm spacing
+        rotations = data.get('rotations', 4)  # Try 4 rotations by default
+        
+        if not input_shapes:
+            return {'status': 'error', 'message': 'No shapes provided'}
+        
+        # Run the CPU-intensive nesting in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(
+                executor,
+                run_packaide_nesting,
+                input_shapes, sheet_width, sheet_height, offset, rotations
+            )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Nesting error: {e}")
+        return {'status': 'error', 'message': str(e)}
+
+
+def run_packaide_nesting(input_shapes, sheet_width, sheet_height, offset, rotations):
+    """Run Packaide nesting in a separate thread to avoid blocking the event loop."""
+    try:
+        import packaide
+        from xml.dom import minidom
+        import re
+        
+        # Store original points by name for later transformation
+        original_points = {}
+        
+        # Convert shapes to SVG paths
+        svg_paths = []
+        shape_ids = []
+        for shape in input_shapes:
+            name = shape.get('name', 'shape')
+            points = shape.get('points', [])
+            if len(points) < 2:
+                continue
+            
+            original_points[name] = points
+            
+            # Create SVG path data
+            path_d = f"M {points[0][0]},{points[0][1]}"
+            for pt in points[1:]:
+                path_d += f" L {pt[0]},{pt[1]}"
+            if shape.get('closed', True):
+                path_d += " Z"
+            
+            svg_paths.append(f'<path id="{name}" d="{path_d}" />')
+            shape_ids.append(name)
+        
+        if not svg_paths:
+            return {'status': 'error', 'message': 'No valid shapes to nest'}
+        
+        # Build shapes SVG
+        shapes_svg = f'''<svg viewBox="0 0 {sheet_width} {sheet_height}">
+            {''.join(svg_paths)}
+        </svg>'''
+        
+        # Build empty sheet SVG
+        sheet_svg = f'''<svg width="{sheet_width}" height="{sheet_height}" viewBox="0 0 {sheet_width} {sheet_height}">
+        </svg>'''
+        
+        logger.info(f"Nesting {len(shape_ids)} shapes on {sheet_width}x{sheet_height} sheet with offset={offset}, rotations={rotations}")
+        
+        # Run Packaide
+        result, placed, fails = packaide.pack(
+            [sheet_svg],
+            shapes_svg,
+            tolerance=1.0,  # Curve approximation (lower = more accurate but slower)
+            offset=offset,
+            partial_solution=True,
+            rotations=rotations,
+            persist=True
+        )
+        
+        logger.info(f"Packaide result: placed={placed}, fails={fails}")
+        
+        # Parse the result SVG to extract new positions
+        # Packaide returns SVG with transforms that need to be applied
+        placements = []
+        if result:
+            from xml.dom import minidom
+            import re
+            
+            for sheet_idx, out_svg in result:
+                try:
+                    doc = minidom.parseString(out_svg)
+                    paths = doc.getElementsByTagName('path')
+                    
+                    for path in paths:
+                        path_id = path.getAttribute('id')
+                        transform = path.getAttribute('transform')
+                        
+                        # Get original points for this shape
+                        if path_id not in original_points:
+                            continue
+                        orig_pts = original_points[path_id]
+                        
+                        # Parse transform to get translation and rotation
+                        tx, ty, angle = 0, 0, 0
+                        rot_cx, rot_cy = 0, 0
+                        if transform:
+                            # Parse translate(x, y)
+                            translate_match = re.search(r'translate\(([-\d.]+),\s*([-\d.]+)\)', transform)
+                            if translate_match:
+                                tx = float(translate_match.group(1))
+                                ty = float(translate_match.group(2))
+                            
+                            # Parse rotate(angle, cx, cy) - Packaide uses this format
+                            rotate_match = re.search(r'rotate\(([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\)', transform)
+                            if rotate_match:
+                                angle = float(rotate_match.group(1))
+                                rot_cx = float(rotate_match.group(2))
+                                rot_cy = float(rotate_match.group(3))
+                        
+                        # Apply transformation to original points
+                        # Transform order: translate, then rotate around (rot_cx, rot_cy)
+                        transformed_points = []
+                        rad = math.radians(angle)
+                        cos_a = math.cos(rad)
+                        sin_a = math.sin(rad)
+                        
+                        for px, py in orig_pts:
+                            # First translate
+                            x = px + tx
+                            y = py + ty
+                            
+                            # Then rotate around center (rot_cx, rot_cy) relative to translated position
+                            if angle != 0:
+                                # Rotation center is relative to translated origin
+                                cx = tx + rot_cx
+                                cy = ty + rot_cy
+                                # Rotate point around center
+                                dx = x - cx
+                                dy = y - cy
+                                x = cx + dx * cos_a - dy * sin_a
+                                y = cy + dx * sin_a + dy * cos_a
+                            
+                            transformed_points.append([x, y])
+                        
+                        if transformed_points:
+                            # Calculate bounding box center
+                            xs = [p[0] for p in transformed_points]
+                            ys = [p[1] for p in transformed_points]
+                            center_x = (min(xs) + max(xs)) / 2
+                            center_y = (min(ys) + max(ys)) / 2
+                            
+                            placements.append({
+                                'name': path_id,
+                                'points': transformed_points,
+                                'centerX': center_x,
+                                'centerY': center_y,
+                                'angle': angle
+                            })
+                except Exception as e:
+                    logger.error(f"Error parsing Packaide output: {e}")
+        
+        return {
+            'status': 'ok',
+            'placed': placed,
+            'failed': fails,
+            'placements': placements
+        }
+        
+    except ImportError:
+        return {'status': 'error', 'message': 'Packaide library not installed'}
+    except Exception as e:
+        logger.error(f"Nesting error: {e}")
+        return {'status': 'error', 'message': str(e)}
+
 # Current loaded G-code
 current_gcode = []
 
 
 def create_header():
-    """Create the application header with position, status, connection info and controls."""
+    """Create the application header with tabs, position, status, and controls."""
     pos_labels = {}
+    tabs = None
     
-    with ui.header().classes('items-center justify-between bg-primary text-white py-2 px-4'):
-        # Left side: App name
-        ui.label('fabCNC Controller').classes('text-h4 font-bold')
+    with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap;'):
+        # Left side: App name with icon + Tabs
+        with ui.row().classes('items-center gap-4').style('flex-shrink: 0;'):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('precision_manufacturing', size='24px').classes('text-blue-4')
+                ui.label('fabCNC').classes('text-h6 font-bold')
+            
+            # Tabs in header
+            with ui.tabs().props('dense inline-label').classes('header-tabs').style('background: transparent;') as tabs:
+                job_tab = ui.tab('Toolpath', icon='route').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
+                gcode_tab = ui.tab('GCODE', icon='terminal').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
+                wifi_tab = ui.tab('System', icon='settings').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
         
-        # Center: Position display
-        with ui.row().classes('items-center gap-4'):
+        # Center: Status pill
+        with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
+            with ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded-full').style('background: #2d4a2d; border: 1px solid #3d5a3d;'):
+                ui.icon('radio_button_checked', size='10px').classes('text-green-4')
+                status_label = ui.label('Idle').classes('text-caption font-bold text-green-4')
+        
+        # Right side: Position display + Version
+        with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
             for axis in ['X', 'Y', 'Z', 'A']:
-                with ui.row().classes('items-center gap-1'):
-                    ui.label(f'{axis}:').classes('text-h6 text-white/70')
-                    unit = '°' if axis == 'A' else 'mm'
-                    pos_labels[axis] = ui.label(f'0.00 {unit}').classes('text-h6 font-bold')
+                with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+                    ui.label(f'{axis}').classes('text-caption font-bold').style('color: #888; width: 12px;')
+                    unit = '°' if axis == 'A' else ''
+                    pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
             
-            ui.separator().props('vertical dark').classes('mx-2')
-            
-            # Status display
-            with ui.row().classes('items-center gap-1'):
-                ui.label('Status:').classes('text-h6 text-white/70')
-                status_label = ui.label('Idle').classes('text-h6 font-bold')
-        
-        # Right side: Lock and Version
-        with ui.row().classes('items-center gap-4'):
-            # Lock button
-            def lock_screen():
-                lock_state['locked'] = True
-                ui.navigate.reload()
-            
-            ui.button(icon='lock', on_click=lock_screen).props('flat round color=white').tooltip('Lock Screen')
-            
-            # Version
-            ui.label(APP_VERSION).classes('text-h6')
+            ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
-    return pos_labels, status_label
+    return pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab
 
 
 def create_position_display():
@@ -161,120 +354,316 @@ def create_status_display():
 
 
 def create_jog_controls():
-    """Create jog controls with native buttons in a flexible column-based layout."""
-    btn_step = 'font-size: 18px; opacity: 0.7;'
-    btn_tall = 'font-size: 24px; font-weight: bold;'
-    btn_home_zero = 'font-size: 16px;'
-    btn_xy = 'font-size: 32px; aspect-ratio: 1; width: 100%; height: 100%;'
+    """Create jog controls with circular wheel design like Bambu Studio."""
     
-    # Main container - use 100% height of parent (card) with max-height constraint
-    with ui.row().classes('w-full h-full gap-2 justify-center items-stretch').style('max-height: 520px;'):
-        # Column 1: XY step buttons (1mm, 10mm, 100mm) - blue-grey to match XY grid
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            xy_1 = ui.button('1MM', on_click=lambda: [jog_params.update({'xy_step': 1.0}), update_step_buttons()]) \
-                .props('outline color=blue-grey-6').classes('flex-1 w-full').style(btn_step)
-            xy_10 = ui.button('10MM', on_click=lambda: [jog_params.update({'xy_step': 10.0}), update_step_buttons()]) \
-                .props('unelevated color=blue-grey-6').classes('flex-1 w-full').style(btn_step)
-            xy_100 = ui.button('100MM', on_click=lambda: [jog_params.update({'xy_step': 100.0}), update_step_buttons()]) \
-                .props('outline color=blue-grey-6').classes('flex-1 w-full').style(btn_step)
+    # Add CSS for SVG hover effects and round home button
+    ui.add_head_html('''
+    <style>
+    .jog-segment {
+        cursor: pointer;
+        transition: fill 0.15s ease;
+    }
+    .jog-segment:hover {
+        fill: #4a5a4a !important;
+    }
+    .jog-segment:active {
+        fill: #5a6a5a !important;
+    }
+    .home-btn {
+        border-radius: 50% !important;
+    }
+    .home-btn:hover {
+        background: #4a5a4a !important;
+    }
+    </style>
+    ''')
+    
+    # Main container - inline layout for toolpath panel
+    with ui.column().classes('items-center gap-2'):
         
-        # Column 2-4: XY directional pad (3x3 grid) - fixed square based on available height
-        with ui.element('div').style('display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr); gap: 8px; aspect-ratio: 1; height: 100%; flex: 0 0 auto;'):
-            # Row 1
-            ui.button(icon='north_west').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_diagonal(-1, 1)) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='north').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_axis('Y', jog_params['xy_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='north_east').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_diagonal(1, 1)) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            # Row 2
-            ui.button(icon='west').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_axis('X', -jog_params['xy_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='home').props('color=red-6').style(btn_xy) \
-                .on('click', lambda: home_all()) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='east').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_axis('X', jog_params['xy_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            # Row 3
-            ui.button(icon='south_west').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_diagonal(-1, -1)) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='south').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_axis('Y', -jog_params['xy_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button(icon='south_east').props('color=blue-grey-6').style(btn_xy) \
-                .on('click', lambda: jog_diagonal(1, -1)) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-        
-        # Column 5: Z step buttons (0.1, 1mm, 10mm) - green to match Z+/Z-
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            z_01 = ui.button('0.1', on_click=lambda: [jog_params.update({'z_step': 0.1}), update_step_buttons()]) \
-                .props('outline color=green-6').classes('flex-1 w-full').style(btn_step)
-            z_1 = ui.button('1MM', on_click=lambda: [jog_params.update({'z_step': 1.0}), update_step_buttons()]) \
-                .props('unelevated color=green-6').classes('flex-1 w-full').style(btn_step)
-            z_10 = ui.button('10MM', on_click=lambda: [jog_params.update({'z_step': 10.0}), update_step_buttons()]) \
-                .props('outline color=green-6').classes('flex-1 w-full').style(btn_step)
-        
-        # Column 6: Z+/Z- (2 buttons spanning full height)
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            ui.button('Z+').props('color=green-6').classes('flex-1 w-full').style(btn_tall) \
-                .on('click', lambda: jog_axis('Z', jog_params['z_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Z-').props('color=green-6').classes('flex-1 w-full').style(btn_tall) \
-                .on('click', lambda: jog_axis('Z', -jog_params['z_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-        
-        # Column 7: A step buttons (1°, 45°, 90°) - orange to match A+/A-
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            a_1 = ui.button('1°', on_click=lambda: [jog_params.update({'a_step': 1.0}), update_step_buttons()]) \
-                .props('outline color=orange-6').classes('flex-1 w-full').style(btn_step)
-            a_45 = ui.button('45°', on_click=lambda: [jog_params.update({'a_step': 45.0}), update_step_buttons()]) \
-                .props('unelevated color=orange-6').classes('flex-1 w-full').style(btn_step)
-            a_90 = ui.button('90°', on_click=lambda: [jog_params.update({'a_step': 90.0}), update_step_buttons()]) \
-                .props('outline color=orange-6').classes('flex-1 w-full').style(btn_step)
-        
-        # Column 8: A+/A- (2 buttons spanning full height)
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            ui.button('A+').props('color=orange-6').classes('flex-1 w-full').style(btn_tall) \
-                .on('click', lambda: jog_axis('A', jog_params['a_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('A-').props('color=orange-6').classes('flex-1 w-full').style(btn_tall) \
-                .on('click', lambda: jog_axis('A', -jog_params['a_step'])) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-        
-        # Column 9: Home buttons (4 buttons spanning full height) - icon + axis letter
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            ui.button('X', icon='home', on_click=lambda: home_axis('X')).props('color=red-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Y', icon='home', on_click=lambda: home_axis('Y')).props('color=red-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Z', icon='home', on_click=lambda: home_axis('Z')).props('color=red-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('A', icon='home', on_click=lambda: home_axis('A')).props('color=red-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-        
-        # Column 10: Zero buttons (4 buttons spanning full height)
-        with ui.column().classes('gap-2').style('flex: 1; min-width: 60px;'):
-            ui.button('Zero X', on_click=lambda: cnc_controller.send_command("G92 X0")).props('color=blue-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Zero Y', on_click=lambda: cnc_controller.send_command("G92 Y0")).props('color=blue-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Zero Z', on_click=set_z_zero).props('color=blue-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-            ui.button('Zero A', on_click=set_a_zero).props('color=blue-6').classes('flex-1 w-full').style(btn_home_zero) \
-                .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-        
-        # Store button references for updating
-        jog_params['_buttons'] = {
-            'xy': {1.0: xy_1, 10.0: xy_10, 100.0: xy_100},
-            'z': {0.1: z_01, 1.0: z_1, 10.0: z_10},
-            'a': {1.0: a_1, 45.0: a_45, 90.0: a_90}
-        }
+        # XY Circular Wheel
+        with ui.column().classes('items-center gap-2'):
+            # Circular jog wheel using SVG for proper arcs
+            # Center at 154,154 (scaled 10% from 140). Equal width rings:
+            # Home button: r=31, Inner: r=31-70, Middle: r=70-110, Outer: r=110-151
+            # Each ring ~40px wide for equal visible thickness
+            with ui.element('div').classes('jog-wheel').style('''
+                position: relative;
+                width: 308px;
+                height: 308px;
+            '''):
+                # Create SVG wheel with proper arc segments
+                wheel_svg = ui.element('div').style('position: absolute; top: 0; left: 0;')
+                
+                # SVG paths for each segment - 3 equal-width rings per quadrant (scaled 10%)
+                # Outer ring: 100mm (r=151 to r=110)
+                # Middle ring: 10mm (r=110 to r=70)
+                # Inner ring: 1mm (r=70 to r=31)
+                # Home button: r=31
+                # Diagonal points at 45°: r*0.707
+                # r=151: 106.8 -> (260.8, 47.2)
+                # r=110: 77.8 -> (231.8, 76.2)
+                # r=70: 49.5 -> (203.5, 104.5)
+                # r=31: 21.9 -> (175.9, 132.1)
+                
+                svg_content = '''
+                    <svg width="308" height="308" viewBox="0 0 308 308">
+                        <!-- Background circle -->
+                        <circle cx="154" cy="154" r="152" fill="#2a2a2a" stroke="#4a4a4a" stroke-width="2"/>
+                        
+                        <!-- Y+ OUTER (top, +100) -->
+                        <path id="y-plus-100" class="jog-segment" fill="#3a3a3a"
+                            d="M 154 3
+                               A 151 151 0 0 1 260.8 47.2
+                               L 231.8 76.2
+                               A 110 110 0 0 0 154 44
+                               A 110 110 0 0 0 76.2 76.2
+                               L 47.2 47.2
+                               A 151 151 0 0 1 154 3
+                               Z"/>
+                        
+                        <!-- Y+ MIDDLE (top, +10) -->
+                        <path id="y-plus-10" class="jog-segment" fill="#353535"
+                            d="M 154 44
+                               A 110 110 0 0 1 231.8 76.2
+                               L 203.5 104.5
+                               A 70 70 0 0 0 154 84
+                               A 70 70 0 0 0 104.5 104.5
+                               L 76.2 76.2
+                               A 110 110 0 0 1 154 44
+                               Z"/>
+                        
+                        <!-- Y+ INNER (top, +1) -->
+                        <path id="y-plus-1" class="jog-segment" fill="#303030"
+                            d="M 154 84
+                               A 70 70 0 0 1 203.5 104.5
+                               L 175.9 132.1
+                               A 31 31 0 0 0 154 123
+                               A 31 31 0 0 0 132.1 132.1
+                               L 104.5 104.5
+                               A 70 70 0 0 1 154 84
+                               Z"/>
+                        
+                        <!-- X+ OUTER (right, +100) -->
+                        <path id="x-plus-100" class="jog-segment" fill="#3a3a3a"
+                            d="M 305 154
+                               A 151 151 0 0 1 260.8 260.8
+                               L 231.8 231.8
+                               A 110 110 0 0 0 264 154
+                               A 110 110 0 0 0 231.8 76.2
+                               L 260.8 47.2
+                               A 151 151 0 0 1 305 154
+                               Z"/>
+                        
+                        <!-- X+ MIDDLE (right, +10) -->
+                        <path id="x-plus-10" class="jog-segment" fill="#353535"
+                            d="M 264 154
+                               A 110 110 0 0 1 231.8 231.8
+                               L 203.5 203.5
+                               A 70 70 0 0 0 224 154
+                               A 70 70 0 0 0 203.5 104.5
+                               L 231.8 76.2
+                               A 110 110 0 0 1 264 154
+                               Z"/>
+                        
+                        <!-- X+ INNER (right, +1) -->
+                        <path id="x-plus-1" class="jog-segment" fill="#303030"
+                            d="M 224 154
+                               A 70 70 0 0 1 203.5 203.5
+                               L 175.9 175.9
+                               A 31 31 0 0 0 185 154
+                               A 31 31 0 0 0 175.9 132.1
+                               L 203.5 104.5
+                               A 70 70 0 0 1 224 154
+                               Z"/>
+                        
+                        <!-- Y- OUTER (bottom, -100) -->
+                        <path id="y-minus-100" class="jog-segment" fill="#3a3a3a"
+                            d="M 154 305
+                               A 151 151 0 0 1 47.2 260.8
+                               L 76.2 231.8
+                               A 110 110 0 0 0 154 264
+                               A 110 110 0 0 0 231.8 231.8
+                               L 260.8 260.8
+                               A 151 151 0 0 1 154 305
+                               Z"/>
+                        
+                        <!-- Y- MIDDLE (bottom, -10) -->
+                        <path id="y-minus-10" class="jog-segment" fill="#353535"
+                            d="M 154 264
+                               A 110 110 0 0 1 76.2 231.8
+                               L 104.5 203.5
+                               A 70 70 0 0 0 154 224
+                               A 70 70 0 0 0 203.5 203.5
+                               L 231.8 231.8
+                               A 110 110 0 0 1 154 264
+                               Z"/>
+                        
+                        <!-- Y- INNER (bottom, -1) -->
+                        <path id="y-minus-1" class="jog-segment" fill="#303030"
+                            d="M 154 224
+                               A 70 70 0 0 1 104.5 203.5
+                               L 132.1 175.9
+                               A 31 31 0 0 0 154 185
+                               A 31 31 0 0 0 175.9 175.9
+                               L 203.5 203.5
+                               A 70 70 0 0 1 154 224
+                               Z"/>
+                        
+                        <!-- X- OUTER (left, -100) -->
+                        <path id="x-minus-100" class="jog-segment" fill="#3a3a3a"
+                            d="M 3 154
+                               A 151 151 0 0 1 47.2 47.2
+                               L 76.2 76.2
+                               A 110 110 0 0 0 44 154
+                               A 110 110 0 0 0 76.2 231.8
+                               L 47.2 260.8
+                               A 151 151 0 0 1 3 154
+                               Z"/>
+                        
+                        <!-- X- MIDDLE (left, -10) -->
+                        <path id="x-minus-10" class="jog-segment" fill="#353535"
+                            d="M 44 154
+                               A 110 110 0 0 1 76.2 76.2
+                               L 104.5 104.5
+                               A 70 70 0 0 0 84 154
+                               A 70 70 0 0 0 104.5 203.5
+                               L 76.2 231.8
+                               A 110 110 0 0 1 44 154
+                               Z"/>
+                        
+                        <!-- X- INNER (left, -1) -->
+                        <path id="x-minus-1" class="jog-segment" fill="#303030"
+                            d="M 84 154
+                               A 70 70 0 0 1 104.5 104.5
+                               L 132.1 132.1
+                               A 31 31 0 0 0 123 154
+                               A 31 31 0 0 0 132.1 175.9
+                               L 104.5 203.5
+                               A 70 70 0 0 1 84 154
+                               Z"/>
+                        
+                        <!-- Dividing lines -->
+                        <line x1="47.2" y1="47.2" x2="260.8" y2="260.8" stroke="#4a4a4a" stroke-width="1"/>
+                        <line x1="260.8" y1="47.2" x2="47.2" y2="260.8" stroke="#4a4a4a" stroke-width="1"/>
+                        
+                        <!-- Ring dividers -->
+                        <circle cx="154" cy="154" r="110" fill="none" stroke="#4a4a4a" stroke-width="1"/>
+                        <circle cx="154" cy="154" r="70" fill="none" stroke="#4a4a4a" stroke-width="1"/>
+                        
+                        <!-- Center circle background -->
+                        <circle cx="154" cy="154" r="31" fill="#2a2a2a" stroke="#4a4a4a" stroke-width="2"/>
+                        
+                        <!-- Labels along top-right diagonal only -->
+                        <text x="238" y="63" text-anchor="middle" fill="#666" font-size="11">100</text>
+                        <text x="210" y="91" text-anchor="middle" fill="#666" font-size="11">10</text>
+                        <text x="183" y="118" text-anchor="middle" fill="#666" font-size="11">1</text>
+                        
+                        <!-- Axis labels -->
+                        <text x="154" y="20" text-anchor="middle" fill="#9e9e9e" font-size="15" font-weight="bold">Y</text>
+                        <text x="293" y="159" text-anchor="middle" fill="#9e9e9e" font-size="15" font-weight="bold">X</text>
+                        <text x="154" y="301" text-anchor="middle" fill="#9e9e9e" font-size="15" font-weight="bold">-Y</text>
+                        <text x="15" y="159" text-anchor="middle" fill="#9e9e9e" font-size="15" font-weight="bold">-X</text>
+                    </svg>
+                '''
+                
+                wheel_svg._props['innerHTML'] = svg_content
+                
+                # Add click handlers via JavaScript
+                ui.run_javascript('''
+                    // Y+ handlers
+                    document.getElementById('y-plus-100')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: 100});
+                    });
+                    document.getElementById('y-plus-10')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: 10});
+                    });
+                    document.getElementById('y-plus-1')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: 1});
+                    });
+                    // X+ handlers
+                    document.getElementById('x-plus-100')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: 100});
+                    });
+                    document.getElementById('x-plus-10')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: 10});
+                    });
+                    document.getElementById('x-plus-1')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: 1});
+                    });
+                    // Y- handlers
+                    document.getElementById('y-minus-100')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: -100});
+                    });
+                    document.getElementById('y-minus-10')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: -10});
+                    });
+                    document.getElementById('y-minus-1')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'Y', distance: -1});
+                    });
+                    // X- handlers
+                    document.getElementById('x-minus-100')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: -100});
+                    });
+                    document.getElementById('x-minus-10')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: -10});
+                    });
+                    document.getElementById('x-minus-1')?.addEventListener('click', () => {
+                        emitEvent('jog', {axis: 'X', distance: -1});
+                    });
+                ''')
+                
+                # Register event handler
+                ui.on('jog', lambda e: jog_axis(e.args['axis'], e.args['distance']))
+                
+                # Home button in center (r=31, so diameter=62)
+                with ui.element('div').style('''
+                    position: absolute;
+                    width: 58px;
+                    height: 58px;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 10;
+                '''):
+                    ui.button(icon='home', on_click=home_all).props('flat round').classes('home-btn').style('color: #4caf50; font-size: 22px; width: 54px; height: 54px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+            
+            # Z/A Step buttons below wheel
+            with ui.column().classes('items-center gap-1'):
+                with ui.row().classes('gap-1 items-center'):
+                    ui.button('+10', on_click=lambda: jog_axis('Z', 10)).props('flat dense').style('background: #2a2a2a; color: #4caf50; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.button('+1', on_click=lambda: jog_axis('Z', 1)).props('flat dense').style('background: #2a2a2a; color: #4caf50; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.label('Z').style('color: #4caf50; font-size: 15px; width: 44px; height: 44px; text-align: center; font-weight: bold; display: flex; align-items: center; justify-content: center;')
+                    ui.button('-1', on_click=lambda: jog_axis('Z', -1)).props('flat dense').style('background: #2a2a2a; color: #4caf50; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.button('-10', on_click=lambda: jog_axis('Z', -10)).props('flat dense').style('background: #2a2a2a; color: #4caf50; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                
+                # A controls
+                with ui.row().classes('gap-1 items-center'):
+                    ui.button('+90', on_click=lambda: jog_axis('A', 90)).props('flat dense').style('background: #2a2a2a; color: #ff9800; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.button('+45', on_click=lambda: jog_axis('A', 45)).props('flat dense').style('background: #2a2a2a; color: #ff9800; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.label('A').style('color: #ff9800; font-size: 15px; width: 44px; height: 44px; text-align: center; font-weight: bold; display: flex; align-items: center; justify-content: center;')
+                    ui.button('-45', on_click=lambda: jog_axis('A', -45)).props('flat dense').style('background: #2a2a2a; color: #ff9800; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                    ui.button('-90', on_click=lambda: jog_axis('A', -90)).props('flat dense').style('background: #2a2a2a; color: #ff9800; font-size: 14px; width: 44px; height: 44px;') \
+                        .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+                
+                # XY Zero button - spans full width (5 * 44px + 4 gaps * 4px = 236px)
+                ui.button('XY Zero', on_click=lambda: cnc_controller.send_command("G92 X0 Y0")).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+    
+    # Store button references for updating (unused in new design but kept for compatibility)
+    jog_params['_buttons'] = {}
 
 
 def create_homing_controls():
@@ -319,15 +708,15 @@ def create_homing_controls():
 def create_file_controls():
     """Create the compact file upload and management panel."""
     with ui.column().classes('w-full gap-2'):
-        ui.label('Job File').classes('text-h6 font-bold')
+        ui.label('Job File').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
-        loaded_file_label = ui.label('No file loaded').classes('text-body1 text-grey-7')
+        loaded_file_label = ui.label('No file loaded').classes('text-body2').style('color: #777;')
         
         upload = ui.upload(
             label='Load DXF File',
             auto_upload=True,
             on_upload=lambda e: handle_file_upload(e, loaded_file_label)
-        ).props('accept=.dxf').classes('w-full dxf-upload').style('font-size: 16px;')
+        ).props('accept=.dxf dense').classes('w-full dxf-upload').style('font-size: 13px;')
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -346,10 +735,10 @@ def create_file_controls():
         ''')
         
         # Save/Load canvas buttons
-        with ui.row().classes('w-full gap-2'):
-            ui.button('Save', icon='save', on_click=save_canvas_state).style('flex: 1; background-color: #333;').tooltip('Save canvas to file')
-            ui.button('Load', icon='folder_open', on_click=load_canvas_state).style('flex: 1; background-color: #333;').tooltip('Load saved canvas')
-            ui.button('Clear', icon='delete', on_click=clear_canvas).style('flex: 1; background-color: #333;').tooltip('Clear all shapes')
+        with ui.row().classes('w-full gap-1'):
+            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
+            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
+            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
         
         return loaded_file_label
 
@@ -357,33 +746,38 @@ def create_file_controls():
 def create_job_controls():
     """Create the compact job execution control panel."""
     with ui.column().classes('w-full gap-2'):
-        ui.label('Job Control').classes('text-h6 font-bold')
+        ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
-        ui.button('Start', on_click=start_job, color='positive') \
-            .props('size=lg') \
+        # Progress bar
+        job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px;')
+        job_progress.bind_value_from(machine_state, 'job_progress')
+        
+        ui.button('Start', icon='play_arrow', on_click=start_job) \
+            .props('dense flat') \
             .classes('w-full') \
-            .style('font-size: 18px;') \
+            .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.job_loaded and machine_state.is_idle())
         
-        ui.button('Pause', on_click=pause_job, color='warning') \
-            .props('size=lg') \
-            .classes('w-full') \
-            .style('font-size: 18px;') \
-            .bind_enabled_from(machine_state, '_lock',
-                             backward=lambda _: machine_state.is_running())
+        with ui.row().classes('w-full gap-1'):
+            ui.button('Pause', icon='pause', on_click=pause_job) \
+                .props('dense flat') \
+                .classes('flex-1') \
+                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff;') \
+                .bind_enabled_from(machine_state, '_lock',
+                                 backward=lambda _: machine_state.is_running())
+            
+            ui.button('Resume', icon='play_circle', on_click=resume_job) \
+                .props('dense flat') \
+                .classes('flex-1') \
+                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff;') \
+                .bind_enabled_from(machine_state, '_lock',
+                                 backward=lambda _: machine_state.paused)
         
-        ui.button('Resume', on_click=resume_job, color='positive') \
-            .props('size=lg') \
+        ui.button('Stop', icon='stop', on_click=stop_job) \
+            .props('dense flat') \
             .classes('w-full') \
-            .style('font-size: 18px;') \
-            .bind_enabled_from(machine_state, '_lock',
-                             backward=lambda _: machine_state.paused)
-        
-        ui.button('Stop', on_click=stop_job, color='negative') \
-            .props('size=lg') \
-            .classes('w-full') \
-            .style('font-size: 18px;') \
+            .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.busy)
 
@@ -391,39 +785,8 @@ def create_job_controls():
 # Event handlers
 
 def update_step_buttons():
-    """Update step button styling to show active selection."""
-    if '_buttons' not in jog_params:
-        return
-    
-    # Update XY buttons (blue-grey)
-    for val, btn in jog_params['_buttons']['xy'].items():
-        if val == jog_params['xy_step']:
-            btn.props(remove='outline')
-            btn.props('unelevated color=blue-grey-6')
-        else:
-            btn.props(remove='unelevated')
-            btn.props('outline color=blue-grey-6')
-        btn.update()
-    
-    # Update Z buttons (green)
-    for val, btn in jog_params['_buttons']['z'].items():
-        if val == jog_params['z_step']:
-            btn.props(remove='outline')
-            btn.props('unelevated color=green-6')
-        else:
-            btn.props(remove='unelevated')
-            btn.props('outline color=green-6')
-        btn.update()
-    
-    # Update A buttons (orange)
-    for val, btn in jog_params['_buttons']['a'].items():
-        if val == jog_params['a_step']:
-            btn.props(remove='outline')
-            btn.props('unelevated color=orange-6')
-        else:
-            btn.props(remove='unelevated')
-            btn.props('outline color=orange-6')
-        btn.update()
+    """Update step button styling - simplified for new circular design."""
+    pass  # No longer needed with new design
 
 
 def jog_axis(axis: str, distance: float):
@@ -823,71 +1186,273 @@ def main_page():
     # Enforce dark mode
     ui.dark_mode().enable()
     
-    # Lock screen overlay
-    if lock_state['locked']:
-        with ui.dialog().props('persistent full-width full-height') as lock_dialog:
-            with ui.card().classes('items-center').style('padding: 32px 40px; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);'):
-                ui.icon('lock', size='64px', color='primary').classes('mb-3')
-                ui.label('Enter 4-digit PIN').classes('text-h6 text-grey-7 mb-3')
-                
-                pin_display = ui.label('').classes('text-h4 font-bold mb-1').style('letter-spacing: 10px; min-height: 36px;')
-                entered_pin = {'value': ''}
-                error_label = ui.label('').classes('text-negative text-h6').style('min-height: 24px;')
-                
-                def add_digit(digit):
-                    if len(entered_pin['value']) < 4:
-                        entered_pin['value'] += str(digit)
-                        pin_display.set_text('●' * len(entered_pin['value']))
-                        error_label.set_text('')
-                        
-                        # Check PIN when 4 digits entered
-                        if len(entered_pin['value']) == 4:
-                            if entered_pin['value'] == LOCK_PIN:
-                                lock_state['locked'] = False
-                                lock_dialog.close()
-                                ui.navigate.reload()
-                            else:
-                                error_label.set_text('Incorrect PIN')
-                                entered_pin['value'] = ''
-                                pin_display.set_text('')
-                
-                def clear_pin():
-                    entered_pin['value'] = ''
-                    pin_display.set_text('')
-                    error_label.set_text('')
-                
-                def backspace():
-                    entered_pin['value'] = entered_pin['value'][:-1]
-                    pin_display.set_text('●' * len(entered_pin['value']))
-                    error_label.set_text('')
-                
-                # Number pad - 4 rows x 3 columns
-                with ui.grid(columns=3).classes('gap-2'):
-                    for digit in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
-                        ui.button(str(digit), on_click=lambda d=digit: add_digit(d)) \
-                            .props('size=xl').style('width: 90px; height: 90px; font-size: 32px;')
-                    ui.button('C', on_click=clear_pin) \
-                        .props('size=xl color=negative').style('width: 90px; height: 90px; font-size: 28px;')
-                    ui.button('0', on_click=lambda: add_digit(0)) \
-                        .props('size=xl').style('width: 90px; height: 90px; font-size: 32px;')
-                    ui.button('⌫', on_click=backspace) \
-                        .props('size=xl color=warning').style('width: 90px; height: 90px; font-size: 28px;')
-        
-        lock_dialog.open()
-    
-    # Disable scrolling on body and html
+    # Disable scrolling on body and html + Material Design dark theme
     ui.add_head_html('''
         <style>
+            /* Base Layout - no scroll at normal sizes */
             html, body {
                 overflow: hidden !important;
                 height: 100vh !important;
                 margin: 0 !important;
                 padding: 0 !important;
+                min-width: 1440px;
+            }
+            
+            /* Enable scrolling when window is too small */
+            @media (max-height: 600px) {
+                html, body {
+                    overflow: auto !important;
+                }
+            }
+            @media (max-width: 1440px) {
+                html, body {
+                    overflow-x: auto !important;
+                }
+            }
+            
+            /* Minimum app dimensions - enables scroll below this */
+            .q-page, .q-page-container, .q-layout {
+                min-width: 1440px;
+                overflow: hidden !important;
+            }
+            
+            /* Remove default Quasar tab panel padding to prevent overflow */
+            .q-tab-panels, .q-tab-panel {
+                padding: 0 !important;
+            }
+            
+            /* Single source of truth for tab content spacing */
+            .tab-content {
+                padding: 8px 8px 35px 8px !important;
+                height: 100% !important;
+                box-sizing: border-box !important;
+            }
+            
+            /* Material Design Dark Theme - Bambu Studio Inspired */
+            :root {
+                --md-bg-primary: #1e1e1e;
+                --md-bg-secondary: #252525;
+                --md-bg-elevated: #2d2d2d;
+                --md-bg-card: #333333;
+                --md-border: #404040;
+                --md-border-light: #4a4a4a;
+                --md-text-primary: #e0e0e0;
+                --md-text-secondary: #9e9e9e;
+                --md-accent-blue: #4a9eff;
+                --md-accent-green: #4caf50;
+                --md-accent-orange: #ff9800;
+                --md-accent-red: #f44336;
+            }
+            
+            /* Global Background */
+            body, .q-page, .q-page-container {
+                background-color: var(--md-bg-primary) !important;
+            }
+            
+            /* Compact Header */
+            header.q-header {
+                background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%) !important;
+                border-bottom: 1px solid var(--md-border) !important;
+                min-height: 48px !important;
+                max-height: 48px !important;
+                height: 48px !important;
+                padding: 8px 16px !important;
+            }
+            
+            /* Cards - Subtle and tight */
+            .q-card {
+                background: var(--md-bg-card) !important;
+                border: 1px solid var(--md-border) !important;
+                border-radius: 8px !important;
+                box-shadow: none !important;
+            }
+            
+            /* Dense Buttons - Material Design 3 style */
+            .q-btn {
+                border-radius: 6px !important;
+                text-transform: none !important;
+                font-weight: 500 !important;
+                letter-spacing: 0.01em !important;
+                transition: all 0.15s ease !important;
+            }
+            
+            .q-btn:hover {
+                filter: brightness(1.1) !important;
+            }
+            
+            .q-btn--dense {
+                padding: 4px 12px !important;
+                min-height: 32px !important;
+            }
+            
+            /* Compact Tabs - Match sidebar style */
+            .q-tabs {
+                background: var(--md-bg-secondary) !important;
+                border-radius: 8px !important;
+                padding: 4px !important;
+            }
+            
+            .q-tab {
+                min-height: 40px !important;
+                padding: 0 16px !important;
+                border-radius: 6px !important;
+                margin: 2px !important;
+                text-transform: none !important;
+                font-weight: 500 !important;
+            }
+            
+            .q-tab--active {
+                background: var(--md-bg-elevated) !important;
+            }
+            
+            .q-tab-panels {
+                background: transparent !important;
+            }
+            
+            /* Toolbar input fields - fixed height to match buttons */
+            .toolbar-input .q-field__control {
+                height: 36px !important;
+                min-height: 36px !important;
+            }
+            .toolbar-input .q-field__native {
+                padding-top: 0 !important;
+                padding-bottom: 0 !important;
+            }
+            
+            /* Inputs - Clean and compact */
+            .q-field--outlined .q-field__control {
+                border-radius: 6px !important;
+                background: var(--md-bg-secondary) !important;
+            }
+            
+            .q-field--outlined .q-field__control:before {
+                border-color: var(--md-border) !important;
+            }
+            
+            .q-field--outlined.q-field--focused .q-field__control:after {
+                border-color: var(--md-accent-blue) !important;
+            }
+            
+            /* Upload Component */
+            .q-uploader {
+                background: var(--md-bg-secondary) !important;
+                border: 1px dashed var(--md-border) !important;
+                border-radius: 8px !important;
+            }
+            
+            .q-uploader__header {
+                background: var(--md-bg-elevated) !important;
+                border-bottom: 1px solid var(--md-border) !important;
+            }
+            
+            /* Separators */
+            .q-separator {
+                background: var(--md-border) !important;
+            }
+            
+            /* Header tabs styling */
+            .header-tabs {
+                background: transparent !important;
+                padding: 0 !important;
+                border-radius: 0 !important;
+            }
+            
+            .header-tabs .q-tab {
+                min-height: 36px !important;
+                padding: 0 10px !important;
+                border-radius: 4px !important;
+                margin: 0 2px !important;
+                opacity: 0.7;
+            }
+            
+            .header-tabs .q-tab--active {
+                background: rgba(255,255,255,0.1) !important;
+                opacity: 1;
+            }
+            
+            .header-tabs .q-tabs__content {
+                gap: 4px;
+            }
+            
+            /* Labels styling */
+            .text-h5, .text-h6 {
+                color: var(--md-text-primary) !important;
+            }
+            
+            .text-grey-7 {
+                color: var(--md-text-secondary) !important;
+            }
+            
+            /* Linear Progress */
+            .q-linear-progress {
+                border-radius: 4px !important;
+                background: var(--md-bg-secondary) !important;
+            }
+            
+            /* Dialog styling */
+            .q-dialog__inner > .q-card {
+                background: var(--md-bg-card) !important;
+                border: 1px solid var(--md-border-light) !important;
+            }
+            
+            /* Notification styling */
+            .q-notification {
+                border-radius: 8px !important;
+            }
+            
+            /* Log area */
+            .q-log {
+                background: var(--md-bg-secondary) !important;
+                border: 1px solid var(--md-border) !important;
+                border-radius: 6px !important;
+            }
+            
+            /* Checkbox styling */
+            .q-checkbox__inner {
+                color: var(--md-accent-blue) !important;
+            }
+            
+            /* Scrollbar styling */
+            ::-webkit-scrollbar {
+                width: 8px;
+                height: 8px;
+            }
+            
+            ::-webkit-scrollbar-track {
+                background: var(--md-bg-secondary);
+                border-radius: 4px;
+            }
+            
+            ::-webkit-scrollbar-thumb {
+                background: var(--md-border-light);
+                border-radius: 4px;
+            }
+            
+            ::-webkit-scrollbar-thumb:hover {
+                background: #5a5a5a;
+            }
+            
+            /* Tooltip styling */
+            .q-tooltip {
+                background: #484848 !important;
+                color: var(--md-text-primary) !important;
+                border-radius: 4px !important;
+                font-size: 12px !important;
             }
         </style>
+        <script>
+            // Reset scroll position when window is resized to normal size
+            window.addEventListener('resize', function() {
+                if (window.innerWidth >= 1440 && window.innerHeight >= 600) {
+                    window.scrollTo(0, 0);
+                    document.documentElement.scrollTop = 0;
+                    document.body.scrollTop = 0;
+                }
+            });
+        </script>
     ''')
     
-    pos_labels, status_label = create_header()
+    pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab = create_header()
     
     # Register JavaScript functions for jog control
     ui.run_javascript('''
@@ -900,43 +1465,76 @@ def main_page():
         };
     ''')
     
-    with ui.column().classes('w-full mx-auto gap-2').style('height: calc(100vh - 80px); overflow: hidden; padding: 12px;'):
-        # Tabbed interface for different control sections
-        with ui.tabs().classes('w-full') as tabs:
-            control_tab = ui.tab('Control', icon='gamepad').style('font-size: 16px; min-height: 50px')
-            job_tab = ui.tab('Toolpath', icon='route').style('font-size: 16px; min-height: 50px')
-            gcode_tab = ui.tab('GCODE', icon='terminal').style('font-size: 16px; min-height: 50px')
-            wifi_tab = ui.tab('System', icon='settings').style('font-size: 16px; min-height: 50px')
-        
-        with ui.tab_panels(tabs, value=control_tab).classes('w-full').style('flex: 1; min-height: 0; overflow: hidden;'):
-            # Control tab - Manual jogging and homing
-            with ui.tab_panel(control_tab).classes('w-full').style('height: 100%; overflow: hidden;'):
-                with ui.card().classes('w-full h-full').style('padding: 12px; overflow: hidden;'):
-                    create_jog_controls()
-            
+    # Main content area - 48px header + 1px border = 49px, use 50px for safety
+    with ui.column().classes('w-full mx-auto').style('height: calc(100vh - 50px); min-height: 600px; overflow: hidden;'):
+        with ui.tab_panels(tabs, value=job_tab).classes('w-full').style('height: 100%;'):
             # Job tab - File loading, job execution, and toolpath visualization
-            with ui.tab_panel(job_tab).style('height: 100%; overflow: hidden;'):
-                with ui.card().classes('w-full h-full').style('padding: 12px; overflow: hidden; display: flex; flex-direction: column;'):
-                    with ui.row().classes('gap-3 w-full').style('flex: 1; min-height: 0;'):
-                        # Left column: Job file and controls (flexible width)
-                        with ui.column().classes('gap-2').style('flex: 1; min-width: 180px; max-width: 280px;'):
+            with ui.tab_panel(job_tab).classes('tab-content'):
+                # Card: full height
+                with ui.card().classes('w-full h-full').style('padding: 10px; box-sizing: border-box;'):
+                    with ui.row().classes('gap-2 w-full').style('height: 100%; flex-wrap: nowrap;'):
+                        # Left column: Job file and controls (fixed width)
+                        with ui.column().classes('gap-2').style('flex: 0 0 180px;'):
                             create_file_controls()
                             ui.separator()
                             create_job_controls()
                         
-                        # Center column: Interactive Toolpath Canvas (Fabric.js)
+                        # Center column: Toolbar + Interactive Toolpath Canvas (Fabric.js)
                         global toolpath_canvas
-                        with ui.element('div').style('flex: 0 0 auto; display: flex; flex-direction: column;'):
+                        with ui.column().style('flex: 1 1 0; min-width: 400px; gap: 10px; height: 100%; box-sizing: border-box;'):
+                            # Toolbar row above canvas - no wrap
+                            with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 6px 10px; width: 100%; flex-wrap: nowrap; flex-shrink: 0;'):
+                                # Transform tools
+                                ui.button('⬌', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror X')
+                                ui.button('⬍', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror Y')
+                                
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
+                                
+                                rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
+                                ui.label('°').classes('text-body2').style('margin-right: 2px;')
+                                ui.button('↻', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CW')
+                                ui.button('↺', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CCW')
+                                
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
+                                
+                                scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
+                                ui.label('%').classes('text-body2').style('margin-right: 2px;')
+                                ui.button('Scale', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.scaleShape({scale_input.value / 100})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
+                                
+                                # Pattern tools
+                                grid_x = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                ui.label('×').classes('text-body2')
+                                grid_y = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                ui.button('Grid', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
+                                
+                                keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
+                                nest_offset = ui.number(value=5, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                
+                                async def do_nest():
+                                    offset_val = int(nest_offset.value)
+                                    keep_orient = str(keep_orientation.value).lower()
+                                    result = await ui.run_javascript(f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})')
+                                    if result and not result.get('success'):
+                                        ui.notify(result.get('error', 'Nesting failed'), type='negative')
+                                    elif result and result.get('success'):
+                                        ui.notify(f'Nested to {result["width"]:.0f}×{result["height"]:.0f}mm', type='positive')
+                                
+                                ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                            
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=12"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=21"></script>')
                             
-                            # Create canvas container - fixed aspect ratio based on work area
+                            # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
-                                <div id="canvas-container" style="width: calc((100vh - 224px) * 1.57); height: calc(100vh - 224px); min-height: 400px; background-color: #1e1e1e; border-radius: 4px; overflow: hidden;">
+                                <div id="canvas-container" style="width: 100%; height: 100%; min-width: 400px; background-color: #1e1e1e; border-radius: 4px; overflow: hidden;">
                                     <canvas id="toolpath-canvas"></canvas>
                                 </div>
-                            ''', sanitize=False)
+                            ''', sanitize=False).classes('w-full').style('width: 100%; flex: 1; min-height: 0;')
                             
                             # Initialize canvas after page fully loads
                             async def init_canvas_after_load():
@@ -985,42 +1583,20 @@ def main_page():
                             
                             ui.on('shape_moved', on_shape_moved)
                         
-                        # Right column: Shape Tools (flexible width)
-                        with ui.column().classes('gap-2').style('flex: 1; min-width: 150px; max-width: 220px;'):
-                            ui.label('Transform').classes('text-h6 font-bold')
-                            with ui.grid(columns=2).classes('gap-2 w-full'):
-                                ui.button('⬌', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorX()')).classes('text-h4').style('min-height: 48px; background-color: #333;').tooltip('Mirror X')
-                                ui.button('⬍', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorY()')).classes('text-h4').style('min-height: 48px; background-color: #333;').tooltip('Mirror Y')
-                            
-                            # Rotation input
-                            with ui.row().classes('w-full gap-1 items-center'):
-                                rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 70px;')
-                                ui.label('°').classes('text-body1')
-                                ui.button('↻', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})')).classes('text-h5').style('min-height: 40px; background-color: #333;').tooltip('Rotate CW')
-                                ui.button('↺', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})')).classes('text-h5').style('min-height: 40px; background-color: #333;').tooltip('Rotate CCW')
-                            
-                            # Scale input
-                            with ui.row().classes('w-full gap-1 items-center'):
-                                scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 70px;')
-                                ui.label('%').classes('text-body1')
-                                ui.button('Scale', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.scaleShape({scale_input.value / 100})')).classes('flex-1').style('min-height: 40px; background-color: #333;')
-                            
-                            ui.label('Pattern').classes('text-h6 font-bold mt-3')
-                            # Grid inputs (auto-spacing with 15mm buffer)
-                            with ui.row().classes('w-full gap-1 items-center'):
-                                grid_x = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px;')
-                                ui.label('×').classes('text-body1')
-                                grid_y = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px;')
-                                ui.button('Grid', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})')).classes('flex-1').style('min-height: 40px; background-color: #333;')
+                        # Right column: Jog Controls only (fixed width)
+                        with ui.column().classes('gap-2 items-center').style('flex: 0 0 320px; padding: 0 0 10px 0; box-sizing: border-box;'):
+                            # Control section - Jog wheel and controls
+                            ui.label('Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
+                            create_jog_controls()
             
             # GCODE tab - Manual G-code command interface
-            with ui.tab_panel(gcode_tab).style('height: 100%; overflow: hidden;'):
-                with ui.card().classes('w-full h-full').style('padding: 16px;'):
-                    ui.label('Manual G-code Commands').classes('text-h5 font-bold mb-2')
+            with ui.tab_panel(gcode_tab).classes('tab-content'):
+                with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
+                    ui.label('Manual G-code Commands').classes('text-body1 font-bold mb-2').style('color: #aaa;')
                     
                     # Command input
-                    with ui.row().classes('w-full gap-2 items-center mb-4'):
-                        gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined')
+                    with ui.row().classes('w-full gap-2 items-center mb-3'):
+                        gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined dense')
                         
                         async def send_gcode():
                             cmd = gcode_input.value.strip()
@@ -1031,36 +1607,36 @@ def main_page():
                                     response_log.push(f'<<< {line}')
                                 gcode_input.value = ''
                         
-                        ui.button('Send', on_click=send_gcode, icon='send').props('color=primary')
+                        ui.button('Send', on_click=send_gcode, icon='send').props('color=primary dense')
                     
                     # Common commands
-                    ui.label('Quick Commands:').classes('text-h6 text-grey-7 mb-1')
-                    with ui.row().classes('gap-2 mb-4'):
-                        ui.button('M115 (Firmware)', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('size=md outline')
-                        ui.button('M114 (Position)', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('size=md outline')
-                        ui.button('M503 (Settings)', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('size=md outline')
-                        ui.button('M999 (Reset)', on_click=lambda: [gcode_input.set_value('M999'), send_gcode()]).props('size=md outline color=orange')
+                    ui.label('Quick Commands:').classes('text-body2 mb-1').style('color: #888;')
+                    with ui.row().classes('gap-1 mb-3'):
+                        ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Firmware')
+                        ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Position')
+                        ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Settings')
+                        ui.button('M999', on_click=lambda: [gcode_input.set_value('M999'), send_gcode()]).props('dense outline color=orange').style('font-size: 11px;').tooltip('Reset')
                     
                     # Response log
-                    ui.label('Response Log:').classes('text-h6 text-grey-7 mb-1')
-                    response_log = ui.log().classes('w-full').style('height: 280px; font-family: monospace; font-size: 20px;')
+                    ui.label('Response Log:').classes('text-body2 mb-1').style('color: #888;')
+                    response_log = ui.log().classes('w-full').style('height: 280px; font-family: monospace; font-size: 14px;')
                     
                     # Allow enter key to send command
                     gcode_input.on('keydown.enter', send_gcode)
             
             # System tab - WiFi, connection info, and system controls
-            with ui.tab_panel(wifi_tab).style('height: 100%; overflow: hidden;'):
-                with ui.card().classes('w-full h-full').style('padding: 16px;'):
-                    with ui.row().classes('w-full gap-8'):
+            with ui.tab_panel(wifi_tab).classes('tab-content'):
+                with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
+                    with ui.row().classes('w-full gap-6'):
                         # Left column: Connection info
-                        with ui.column().classes('gap-4').style('flex: 1;'):
-                            ui.label('Connection Info').classes('text-h5 font-bold mb-2')
+                        with ui.column().classes('gap-3').style('flex: 1;'):
+                            ui.label('Connection Info').classes('text-body1 font-bold mb-1').style('color: #aaa;')
                             
                             # Connection status
                             with ui.row().classes('items-center gap-2'):
-                                ui.label('CNC Status:').classes('text-h6 text-grey-7')
-                                sys_connection_icon = ui.icon('check_circle', color='green').classes('text-h5')
-                                sys_connection_label = ui.label('Connected').classes('text-h6 font-bold')
+                                ui.label('CNC Status:').classes('text-body2').style('color: #888;')
+                                sys_connection_icon = ui.icon('check_circle', color='green', size='20px')
+                                sys_connection_label = ui.label('Connected').classes('text-body1 font-bold')
                                 
                                 def update_sys_connection():
                                     if cnc_controller.connected:
@@ -1075,21 +1651,21 @@ def main_page():
                             # IP Address
                             local_ip = get_local_ip()
                             with ui.row().classes('items-center gap-2'):
-                                ui.label('IP Address:').classes('text-h6 text-grey-7')
-                                ui.label(f'http://{local_ip}:8080').classes('text-h6 font-bold bg-grey-2 px-3 py-1 rounded')
+                                ui.label('IP Address:').classes('text-body2').style('color: #888;')
+                                ui.label(f'http://{local_ip}:8080').classes('text-body1 font-bold px-2 py-1 rounded').style('background: #2a2a2a;')
                             
-                            ui.separator().classes('my-4')
+                            ui.separator().classes('my-3')
                             
-                            ui.label('System Controls').classes('text-h5 font-bold mb-2')
+                            ui.label('System Controls').classes('text-body1 font-bold mb-1').style('color: #aaa;')
                             
-                            with ui.row().classes('gap-4'):
+                            with ui.row().classes('gap-2'):
                                 def restart_service():
                                     ui.notify('Restarting service...', type='warning')
                                     subprocess.Popen(['sudo', 'systemctl', 'restart', 'fabcnc.service'], 
                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 
                                 ui.button('Restart Service', icon='refresh', on_click=restart_service) \
-                                    .props('color=warning size=lg').style('font-size: 20px;')
+                                    .props('color=warning dense').style('font-size: 13px;')
                                 
                                 def reboot_system():
                                     ui.notify('Rebooting system...', type='warning')
@@ -1097,7 +1673,7 @@ def main_page():
                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
-                                    .props('color=negative size=lg').style('font-size: 20px;')
+                                    .props('color=negative dense').style('font-size: 13px;')
         
         # Start periodic UI update timer (10 Hz = 100ms)
         ui.timer(0.1, lambda: update_ui(pos_labels, status_label))

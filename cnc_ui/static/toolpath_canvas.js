@@ -12,6 +12,7 @@ const MAX_UNDO = 50;
 // Canvas dimensions and scale
 const WORK_WIDTH = 1375;  // mm
 const WORK_HEIGHT = 875;  // mm
+const CANVAS_PADDING = 30;  // px - absolute padding around work area
 let scale = 1;
 let canvasWidth = 800;
 let canvasHeight = 500;
@@ -44,10 +45,12 @@ function updateCanvasSize() {
     if (canvasWidth < 200) canvasWidth = 800;
     if (canvasHeight < 200) canvasHeight = 520;
     
-    // Recalculate scale
-    const scaleX = canvasWidth / WORK_WIDTH;
-    const scaleY = canvasHeight / WORK_HEIGHT;
-    scale = Math.min(scaleX, scaleY) * 0.95;
+    // Recalculate scale with CANVAS_PADDING on each side
+    const availableWidth = canvasWidth - (CANVAS_PADDING * 2);
+    const availableHeight = canvasHeight - (CANVAS_PADDING * 2);
+    const scaleX = availableWidth / WORK_WIDTH;
+    const scaleY = availableHeight / WORK_HEIGHT;
+    scale = Math.min(scaleX, scaleY);
     
     // Resize canvas
     canvas.setWidth(canvasWidth);
@@ -130,10 +133,12 @@ function initCanvas(elementId) {
     
     console.log('Container size:', canvasWidth, 'x', canvasHeight);
     
-    // Calculate scale to fit work area in canvas
-    const scaleX = canvasWidth / WORK_WIDTH;
-    const scaleY = canvasHeight / WORK_HEIGHT;
-    scale = Math.min(scaleX, scaleY) * 0.95;  // 95% to leave some margin
+    // Calculate scale to fit work area in canvas with CANVAS_PADDING on each side
+    const availableWidth = canvasWidth - (CANVAS_PADDING * 2);
+    const availableHeight = canvasHeight - (CANVAS_PADDING * 2);
+    const scaleX = availableWidth / WORK_WIDTH;
+    const scaleY = availableHeight / WORK_HEIGHT;
+    scale = Math.min(scaleX, scaleY);
     
     // Create Fabric canvas with dark mode
     canvas = new fabric.Canvas(elementId, {
@@ -169,6 +174,9 @@ function initCanvas(elementId) {
         }
     });
     
+    // Constrain shapes to work area during drag
+    canvas.on('object:moving', onShapeMoving);
+    
     // Handle object movement and transforms
     canvas.on('object:moved', onShapeMoved);
     canvas.on('object:scaled', onShapeScaled);
@@ -195,24 +203,28 @@ function initCanvas(elementId) {
 }
 
 function toCanvasX(mmX) {
-    // Convert mm to canvas coordinates (with offset to center)
-    const offsetX = (canvasWidth - WORK_WIDTH * scale) / 2;
+    // Convert mm to canvas coordinates with fixed padding
+    const workAreaWidth = WORK_WIDTH * scale;
+    const offsetX = CANVAS_PADDING + (canvasWidth - CANVAS_PADDING * 2 - workAreaWidth) / 2;
     return mmX * scale + offsetX;
 }
 
 function toCanvasY(mmY) {
-    // Convert mm to canvas coordinates (Y is flipped, with offset to center)
-    const offsetY = (canvasHeight - WORK_HEIGHT * scale) / 2;
+    // Convert mm to canvas coordinates (Y is flipped) with fixed padding
+    const workAreaHeight = WORK_HEIGHT * scale;
+    const offsetY = CANVAS_PADDING + (canvasHeight - CANVAS_PADDING * 2 - workAreaHeight) / 2;
     return canvasHeight - (mmY * scale + offsetY);
 }
 
 function fromCanvasX(canvasX) {
-    const offsetX = (canvasWidth - WORK_WIDTH * scale) / 2;
+    const workAreaWidth = WORK_WIDTH * scale;
+    const offsetX = CANVAS_PADDING + (canvasWidth - CANVAS_PADDING * 2 - workAreaWidth) / 2;
     return (canvasX - offsetX) / scale;
 }
 
 function fromCanvasY(canvasY) {
-    const offsetY = (canvasHeight - WORK_HEIGHT * scale) / 2;
+    const workAreaHeight = WORK_HEIGHT * scale;
+    const offsetY = CANVAS_PADDING + (canvasHeight - CANVAS_PADDING * 2 - workAreaHeight) / 2;
     return (canvasHeight - canvasY - offsetY) / scale;
 }
 
@@ -381,6 +393,15 @@ function clearShapes() {
 function addShape(name, points, colorIndexOrColor) {
     if (!canvas || !points || points.length < 2) return;
     
+    // If shape with this name already exists, generate a unique name
+    let uniqueName = name;
+    let counter = 1;
+    while (shapes[uniqueName]) {
+        uniqueName = name + '_' + counter;
+        counter++;
+    }
+    name = uniqueName;
+    
     // Log what we received
     const xVals = points.map(p => p[0]);
     const yVals = points.map(p => p[1]);
@@ -466,6 +487,64 @@ function addShape(name, points, colorIndexOrColor) {
     console.log('addShape stored:', name,
         'initialLeft:', polyline.left.toFixed(1),
         'initialTop:', polyline.top.toFixed(1));
+}
+
+// Constrain shape to work area during drag (real-time)
+function onShapeMoving(e) {
+    const obj = e.target;
+    if (!obj || !obj.shapeName) return;
+    
+    // Use the work area rect bounds directly
+    if (!workAreaRect) return;
+    
+    // Get the bounding box of the shape
+    const bound = obj.getBoundingRect(true, true); // absolute coords, skip transform
+    const work = workAreaRect.getBoundingRect();
+    
+    // Calculate offset between object origin (left,top) and bounding rect
+    const offsetLeft = obj.left - bound.left;
+    const offsetTop = obj.top - bound.top;
+    
+    // Calculate the allowed range for the bounding rect
+    const minBoundLeft = work.left;
+    const maxBoundLeft = work.left + work.width - bound.width;
+    const minBoundTop = work.top;
+    const maxBoundTop = work.top + work.height - bound.height;
+    
+    // Constrain the bounding rect position
+    let newBoundLeft = Math.max(minBoundLeft, Math.min(maxBoundLeft, bound.left));
+    let newBoundTop = Math.max(minBoundTop, Math.min(maxBoundTop, bound.top));
+    
+    // Convert back to object origin position
+    obj.left = newBoundLeft + offsetLeft;
+    obj.top = newBoundTop + offsetTop;
+}
+
+// Get the current mm points for a shape based on its canvas position
+function getCurrentMmPoints(shape) {
+    if (!shape || !shape.shapeName) return null;
+    
+    const data = shapeData[shape.shapeName];
+    if (!data || !data.originalMmPoints || data.initialLeft === null) return null;
+    
+    // Calculate how much the object moved in canvas pixels from initial position
+    const deltaCanvasX = shape.left - data.initialLeft;
+    const deltaCanvasY = shape.top - data.initialTop;
+    
+    // Convert canvas delta to mm delta
+    const deltaMmX = deltaCanvasX / scale;
+    const deltaMmY = -deltaCanvasY / scale;  // Y is flipped
+    
+    console.log('getCurrentMmPoints:', shape.shapeName, 
+        'shape.left:', shape.left, 'initialLeft:', data.initialLeft,
+        'deltaCanvas:', deltaCanvasX, deltaCanvasY,
+        'deltaMm:', deltaMmX, deltaMmY);
+    
+    // Apply delta to stored mm points
+    return data.originalMmPoints.map(p => [
+        p[0] + deltaMmX,
+        p[1] + deltaMmY
+    ]);
 }
 
 function onShapeMoved(e) {
@@ -751,8 +830,8 @@ function mirrorX() {
     selectedShapes.forEach(shape => {
         if (!shapeData[shape.shapeName]) return;
         
-        const data = shapeData[shape.shapeName];
-        const points = data.originalMmPoints;
+        // Get current mm points based on canvas position
+        const points = getCurrentMmPoints(shape);
         if (!points) return;
         
         // Find center X of shape
@@ -760,10 +839,14 @@ function mirrorX() {
         const centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
         
         // Mirror points around center
+        const data = shapeData[shape.shapeName];
         data.originalMmPoints = points.map(p => [
             2 * centerX - p[0],
             p[1]
         ]);
+        
+        // Reset initial position since we're updating originalMmPoints
+        data.initialLeft = null;
         
         redrawShapeFromData(shape.shapeName);
         emitShapeUpdate(shape.shapeName);
@@ -782,8 +865,8 @@ function mirrorY() {
     selectedShapes.forEach(shape => {
         if (!shapeData[shape.shapeName]) return;
         
-        const data = shapeData[shape.shapeName];
-        const points = data.originalMmPoints;
+        // Get current mm points based on canvas position
+        const points = getCurrentMmPoints(shape);
         if (!points) return;
         
         // Find center Y of shape
@@ -791,10 +874,14 @@ function mirrorY() {
         const centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
         
         // Mirror points around center
+        const data = shapeData[shape.shapeName];
         data.originalMmPoints = points.map(p => [
             p[0],
             2 * centerY - p[1]
         ]);
+        
+        // Reset initial position since we're updating originalMmPoints
+        data.initialLeft = null;
         
         redrawShapeFromData(shape.shapeName);
         emitShapeUpdate(shape.shapeName);
@@ -1013,7 +1100,8 @@ function deleteShape() {
 
 // Select all shapes
 function selectAll() {
-    const objs = Object.values(shapes);
+    const objs = Object.values(shapes).filter(s => s && s.shapeName);
+    console.log('selectAll: found', objs.length, 'shapes:', Object.keys(shapes));
     if (objs.length === 0) return;
     
     canvas.discardActiveObject();
@@ -1056,8 +1144,8 @@ function gridArray(countX, countY) {
     const shape = getSelectedShape();
     if (!shape || !shapeData[shape.shapeName]) return [];
     
-    const data = shapeData[shape.shapeName];
-    const points = data.originalMmPoints;
+    // Get current mm points based on shape's canvas position (not stored data)
+    const points = getCurrentMmPoints(shape);
     if (!points) return [];
     
     // Save state for undo
@@ -1098,13 +1186,470 @@ function gridArray(countX, countY) {
     return newNames;
 }
 
+// Nesting algorithm - pack all shapes tightly to minimize bounding area
+// keepOrientation: if false, will try rotating shapes for better fit
+// Show a notification using NiceGUI/Quasar's notification system
+function showToast(message, type = 'info', duration = 3000) {
+    const colors = {
+        'info': 'info',
+        'success': 'positive', 
+        'warning': 'warning',
+        'error': 'negative'
+    };
+    
+    // Use Quasar's notification system (same as NiceGUI's ui.notify)
+    if (typeof Quasar !== 'undefined' && Quasar.Notify) {
+        Quasar.Notify.create({
+            message: message,
+            type: colors[type] || 'info',
+            position: 'bottom',
+            timeout: duration === 0 ? 0 : duration,
+            actions: duration === 0 ? [{ icon: 'close', color: 'white' }] : []
+        });
+    } else {
+        console.log(`[${type}] ${message}`);
+    }
+}
+
+function nestShapes(keepOrientation = true, spacing = 5) {
+    console.log('=== NESTING START ===');
+    
+    const allShapeNames = Object.keys(shapes).filter(name => shapes[name] && shapes[name].shapeName);
+    if (allShapeNames.length === 0) {
+        showToast('No shapes to nest', 'warning');
+        return { success: false, error: 'No shapes to nest' };
+    }
+    
+    saveUndoState();
+    
+    // Get shape info for each shape
+    const shapeInfos = allShapeNames.map(name => {
+        const shape = shapes[name];
+        const points = getCurrentMmPoints(shape);
+        if (!points || points.length < 2) return null;
+        
+        // Simplify polygon for collision (max 60 points for better accuracy with concave shapes)
+        const simplified = simplifyPolygon(points, 60);
+        
+        const bbox = getPolygonBounds(simplified);
+        const normalizedSimple = simplified.map(p => [p[0] - bbox.minX, p[1] - bbox.minY]);
+        const normalizedFull = points.map(p => [p[0] - bbox.minX, p[1] - bbox.minY]);
+        
+        return {
+            name: name,
+            simplePoints: normalizedSimple,
+            fullPoints: normalizedFull,
+            width: bbox.maxX - bbox.minX,
+            height: bbox.maxY - bbox.minY,
+            area: (bbox.maxX - bbox.minX) * (bbox.maxY - bbox.minY),
+            color: shape.stroke || '#42A5F5'
+        };
+    }).filter(s => s !== null);
+    
+    if (shapeInfos.length === 0) {
+        showToast('No valid shapes', 'warning');
+        return { success: false, error: 'No valid shapes' };
+    }
+    
+    // Show starting notification
+    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);  // Auto-dismiss after 5s
+    
+    // Try Packaide first (async call)
+    nestShapesPackaide(shapeInfos, keepOrientation, spacing);
+    
+    return { success: true, pending: true, message: 'Nesting with Packaide...' };
+}
+
+// Async nesting using Packaide backend
+async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
+    try {
+        // Prepare shapes for Packaide
+        const shapesForNest = shapeInfos.map(info => ({
+            name: info.name,
+            points: info.fullPoints,
+            closed: true
+        }));
+        
+        const response = await fetch('/nest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                shapes: shapesForNest,
+                sheetWidth: WORK_WIDTH,
+                sheetHeight: WORK_HEIGHT,
+                offset: spacing,
+                rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
+            })
+        });
+        
+        const result = await response.json();
+        console.log('Packaide result:', result);
+        
+        if (result.status === 'ok' && result.placements && result.placements.length > 0) {
+            // Apply Packaide placements
+            let maxX = 0, maxY = 0;
+            
+            for (const placement of result.placements) {
+                const data = shapeData[placement.name];
+                if (!data) {
+                    console.warn('Missing shapeData for', placement.name);
+                    continue;
+                }
+                
+                // Update shape with new points from Packaide
+                data.originalMmPoints = placement.points;
+                redrawShapeFromData(placement.name);
+                emitShapeUpdate(placement.name);
+                
+                // Track bounds
+                for (const pt of placement.points) {
+                    if (pt[0] > maxX) maxX = pt[0];
+                    if (pt[1] > maxY) maxY = pt[1];
+                }
+            }
+            
+            console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
+            showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
+            return;
+        }
+        
+        // Fall back to local algorithm if Packaide fails
+        console.log('Packaide returned no placements, falling back to local algorithm');
+        showToast('Using local algorithm...', 'info', 2000);
+        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        
+    } catch (error) {
+        console.error('Packaide error:', error);
+        console.log('Falling back to local nesting algorithm');
+        showToast('Server busy, using local algorithm...', 'warning', 2000);
+        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+    }
+}
+
+// Local nesting algorithm (fallback)
+function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
+    // Try multiple sorting strategies and pick the best result
+    const strategies = [
+        { name: 'area-desc', sort: (a, b) => b.area - a.area },
+        { name: 'height-desc', sort: (a, b) => b.height - a.height },
+        { name: 'width-desc', sort: (a, b) => b.width - a.width },
+        { name: 'perimeter-desc', sort: (a, b) => (b.width + b.height) - (a.width + a.height) },
+        { name: 'maxdim-desc', sort: (a, b) => Math.max(b.width, b.height) - Math.max(a.width, a.height) },
+        { name: 'area-asc', sort: (a, b) => a.area - b.area }
+    ];
+    
+    let bestResult = null;
+    let bestArea = Infinity;
+    
+    for (const strategy of strategies) {
+        const sortedInfos = [...shapeInfos].sort(strategy.sort);
+        const result = tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        
+        if (result.success) {
+            const area = result.width * result.height;
+            console.log(`Strategy ${strategy.name}: ${result.width.toFixed(0)}x${result.height.toFixed(0)} = ${area.toFixed(0)}`);
+            if (area < bestArea) {
+                bestArea = area;
+                bestResult = result;
+            }
+        }
+    }
+    
+    if (!bestResult) {
+        undo();
+        console.log('=== NESTING FAILED ===');
+        showToast('Could not nest shapes - not enough space', 'error', 4000);
+        return;
+    }
+    
+    // Apply the best result
+    for (const p of bestResult.placements) {
+        const data = shapeData[p.info.name];
+        if (!data) {
+            console.error('Missing shapeData for', p.info.name);
+            continue;
+        }
+        data.originalMmPoints = p.full;
+        redrawShapeFromData(p.info.name);
+        emitShapeUpdate(p.info.name);
+    }
+    
+    console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
+    showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
+}
+
+// Try nesting with a specific shape order
+function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
+    const placedShapes = [];
+    
+    for (let i = 0; i < shapeInfos.length; i++) {
+        const info = shapeInfos[i];
+        
+        let bestPos = null, bestRotation = 0;
+        let bestSimple = null, bestFull = null;
+        let bestScore = Infinity;
+        
+        const rotations = keepOrientation ? [0] : [0, 90, 180, 270];
+        
+        for (const rotation of rotations) {
+            const simple = rotateAndNormalize(info.simplePoints, rotation, info.width/2, info.height/2);
+            const full = rotateAndNormalize(info.fullPoints, rotation, info.width/2, info.height/2);
+            const bbox = getPolygonBounds(simple);
+            const w = bbox.maxX, h = bbox.maxY;
+            
+            // Generate candidates from placed shape vertices
+            const candidates = generateCandidates(placedShapes, w, h, spacing);
+            
+            for (const pos of candidates) {
+                if (pos.x + w > WORK_WIDTH || pos.y + h > WORK_HEIGHT) continue;
+                
+                const testPoly = simple.map(p => [p[0] + pos.x, p[1] + pos.y]);
+                const testBBox = { minX: pos.x, maxX: pos.x + w, minY: pos.y, maxY: pos.y + h };
+                
+                // Early collision check before computing score
+                let collides = false;
+                for (const placed of placedShapes) {
+                    if (!bboxOverlap(testBBox, placed.bbox, spacing)) continue;
+                    if (polygonsCollide(testPoly, placed.simple, spacing)) {
+                        collides = true;
+                        break;
+                    }
+                }
+                if (collides) continue;
+                
+                // Score: prioritize minimizing bounding area, with tie-breaker for bottom-left
+                let maxX = pos.x + w, maxY = pos.y + h;
+                for (const placed of placedShapes) {
+                    if (placed.bbox.maxX > maxX) maxX = placed.bbox.maxX;
+                    if (placed.bbox.maxY > maxY) maxY = placed.bbox.maxY;
+                }
+                // Primary: bounding area, Secondary: prefer bottom-left (lower y, then lower x)
+                const score = maxX * maxY + (pos.y * 0.001 + pos.x * 0.0001);
+                
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestPos = pos;
+                    bestRotation = rotation;
+                    bestSimple = testPoly;
+                    bestFull = full.map(p => [p[0] + pos.x, p[1] + pos.y]);
+                }
+            }
+        }
+        
+        if (!bestPos) {
+            return { success: false, error: `Could not place: ${info.name}` };
+        }
+        
+        placedShapes.push({
+            simple: bestSimple,
+            full: bestFull,
+            bbox: getPolygonBounds(bestSimple),
+            info: info
+        });
+    }
+    
+    // Calculate final bounds
+    let maxX = 0, maxY = 0;
+    for (const p of placedShapes) {
+        if (p.bbox.maxX > maxX) maxX = p.bbox.maxX;
+        if (p.bbox.maxY > maxY) maxY = p.bbox.maxY;
+    }
+    
+    if (maxX > WORK_WIDTH || maxY > WORK_HEIGHT) {
+        return { success: false, error: `Need ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm` };
+    }
+    
+    return { success: true, width: maxX, height: maxY, placements: placedShapes };
+}
+
+function simplifyPolygon(points, maxPoints) {
+    if (points.length <= maxPoints) return points.map(p => [p[0], p[1]]);
+    const step = Math.ceil(points.length / maxPoints);
+    const result = [];
+    for (let i = 0; i < points.length; i += step) result.push([points[i][0], points[i][1]]);
+    return result;
+}
+
+function rotateAndNormalize(points, degrees, cx, cy) {
+    if (degrees === 0) return points.map(p => [p[0], p[1]]);
+    const rad = degrees * Math.PI / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const rotated = points.map(p => {
+        const x = p[0] - cx, y = p[1] - cy;
+        return [x * cos - y * sin + cx, x * sin + y * cos + cy];
+    });
+    const bbox = getPolygonBounds(rotated);
+    return rotated.map(p => [p[0] - bbox.minX, p[1] - bbox.minY]);
+}
+
+function generateCandidates(placedShapes, width, height, spacing) {
+    const candidates = [{x: 0, y: 0}];
+    
+    // Add grid positions for first shape or when few candidates
+    if (placedShapes.length === 0) {
+        for (let y = 0; y <= WORK_HEIGHT - height; y += 50) {
+            for (let x = 0; x <= WORK_WIDTH - width; x += 50) {
+                candidates.push({x, y});
+            }
+        }
+    }
+    
+    for (const placed of placedShapes) {
+        const b = placed.bbox;
+        
+        // Standard positions: right of shape, above shape
+        candidates.push({x: b.maxX + spacing, y: 0});
+        candidates.push({x: b.maxX + spacing, y: b.minY});
+        candidates.push({x: b.maxX + spacing, y: b.maxY - height});
+        candidates.push({x: 0, y: b.maxY + spacing});
+        candidates.push({x: b.minX, y: b.maxY + spacing});
+        candidates.push({x: b.maxX - width, y: b.maxY + spacing});
+        
+        // Try positions along right edge of placed shape
+        for (let y = b.minY; y <= b.maxY; y += 25) {
+            candidates.push({x: b.maxX + spacing, y: Math.max(0, y - height)});
+            candidates.push({x: b.maxX + spacing, y: y});
+        }
+        
+        // Try positions along top edge of placed shape
+        for (let x = b.minX; x <= b.maxX; x += 25) {
+            candidates.push({x: x, y: b.maxY + spacing});
+            candidates.push({x: Math.max(0, x - width), y: b.maxY + spacing});
+        }
+        
+        // Add vertex positions for concave fitting
+        for (let i = 0; i < placed.simple.length; i++) {
+            const pt = placed.simple[i];
+            candidates.push({x: pt[0] + spacing, y: 0});
+            candidates.push({x: pt[0] + spacing, y: Math.max(0, pt[1] - height)});
+            candidates.push({x: 0, y: pt[1] + spacing});
+            candidates.push({x: Math.max(0, pt[0] - width), y: pt[1] + spacing});
+            
+            // Position shape corner at vertex + spacing
+            candidates.push({x: pt[0] + spacing, y: pt[1] + spacing});
+            candidates.push({x: pt[0] + spacing, y: Math.max(0, pt[1] - height - spacing)});
+            candidates.push({x: Math.max(0, pt[0] - width - spacing), y: pt[1] + spacing});
+        }
+    }
+    
+    // Dedupe with finer resolution
+    const seen = new Set();
+    return candidates.filter(c => {
+        if (c.x < 0 || c.y < 0) return false;
+        const key = Math.round(c.x / 5) + ',' + Math.round(c.y / 5);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).sort((a, b) => (a.y * 10000 + a.x) - (b.y * 10000 + b.x));
+}
+
+function getPolygonBounds(points) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of points) {
+        if (p[0] < minX) minX = p[0];
+        if (p[0] > maxX) maxX = p[0];
+        if (p[1] < minY) minY = p[1];
+        if (p[1] > maxY) maxY = p[1];
+    }
+    return { minX, maxX, minY, maxY };
+}
+
+function bboxOverlap(a, b, spacing) {
+    return !(a.maxX + spacing <= b.minX || b.maxX + spacing <= a.minX ||
+             a.maxY + spacing <= b.minY || b.maxY + spacing <= a.minY);
+}
+
+function polygonsCollide(poly1, poly2, spacing) {
+    // Edge intersection check
+    for (let i = 0; i < poly1.length; i++) {
+        const a1 = poly1[i], a2 = poly1[(i + 1) % poly1.length];
+        for (let j = 0; j < poly2.length; j++) {
+            const b1 = poly2[j], b2 = poly2[(j + 1) % poly2.length];
+            if (segmentsIntersect(a1, a2, b1, b2)) return true;
+        }
+    }
+    
+    // Containment check - check ALL points, not just some
+    for (const pt of poly1) {
+        if (pointInPolygon(pt, poly2)) return true;
+    }
+    for (const pt of poly2) {
+        if (pointInPolygon(pt, poly1)) return true;
+    }
+    
+    // Spacing check - vertex to edge distance
+    const spacingSq = spacing * spacing;
+    for (const p of poly1) {
+        for (let j = 0; j < poly2.length; j++) {
+            const dist = pointToSegmentDistSq(p, poly2[j], poly2[(j + 1) % poly2.length]);
+            if (dist < spacingSq) return true;
+        }
+    }
+    for (const p of poly2) {
+        for (let j = 0; j < poly1.length; j++) {
+            const dist = pointToSegmentDistSq(p, poly1[j], poly1[(j + 1) % poly1.length]);
+            if (dist < spacingSq) return true;
+        }
+    }
+    
+    return false;
+}
+
+// Squared distance from point to line segment
+function pointToSegmentDistSq(p, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return (p[0] - a[0]) ** 2 + (p[1] - a[1]) ** 2;
+    
+    let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    
+    const cx = a[0] + t * dx, cy = a[1] + t * dy;
+    return (p[0] - cx) ** 2 + (p[1] - cy) ** 2;
+}
+
+function segmentsIntersect(a1, a2, b1, b2) {
+    const d1 = (b2[0]-b1[0])*(a1[1]-b1[1]) - (b2[1]-b1[1])*(a1[0]-b1[0]);
+    const d2 = (b2[0]-b1[0])*(a2[1]-b1[1]) - (b2[1]-b1[1])*(a2[0]-b1[0]);
+    const d3 = (a2[0]-a1[0])*(b1[1]-a1[1]) - (a2[1]-a1[1])*(b1[0]-a1[0]);
+    const d4 = (a2[0]-a1[0])*(b2[1]-a1[1]) - (a2[1]-a1[1])*(b2[0]-a1[0]);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+function pointInPolygon(pt, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        if (((poly[i][1] > pt[1]) !== (poly[j][1] > pt[1])) &&
+            (pt[0] < (poly[j][0] - poly[i][0]) * (pt[1] - poly[i][1]) / (poly[j][1] - poly[i][1]) + poly[i][0])) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Rotate points around a center point
+function rotatePointsAroundCenter(points, degrees, cx, cy) {
+    const rad = degrees * Math.PI / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    
+    return points.map(p => {
+        const x = p[0] - cx;
+        const y = p[1] - cy;
+        return [
+            x * cos - y * sin + cx,
+            x * sin + y * cos + cy
+        ];
+    });
+}
+
 // Mirror copy - duplicate and flip
 function mirrorCopy(axis) {
     const shape = getSelectedShape();
     if (!shape || !shapeData[shape.shapeName]) return null;
     
-    const data = shapeData[shape.shapeName];
-    const points = data.originalMmPoints;
+    // Get current mm points based on shape's canvas position
+    const points = getCurrentMmPoints(shape);
     if (!points) return null;
     
     // Find bounds
@@ -1139,15 +1684,25 @@ function mirrorCopy(axis) {
 
 // Helper: Redraw a single shape from its data
 function redrawShapeFromData(shapeName) {
-    if (!shapes[shapeName] || !shapeData[shapeName]) return;
+    console.log('redrawShapeFromData:', shapeName, 'exists in shapes:', !!shapes[shapeName], 'exists in shapeData:', !!shapeData[shapeName]);
+    
+    if (!shapeData[shapeName]) {
+        console.error('No shapeData for', shapeName);
+        return;
+    }
     
     const data = shapeData[shapeName];
     const oldShape = shapes[shapeName];
     const points = data.originalMmPoints;
-    if (!points) return;
+    if (!points) {
+        console.error('No points for', shapeName);
+        return;
+    }
     
-    const strokeColor = oldShape.stroke || '#42A5F5';
-    canvas.remove(oldShape);
+    const strokeColor = oldShape ? oldShape.stroke : '#42A5F5';
+    if (oldShape) {
+        canvas.remove(oldShape);
+    }
     
     const canvasPoints = points.map(p => ({
         x: toCanvasX(p[0]),
@@ -1180,6 +1735,7 @@ function redrawShapeFromData(shapeName) {
     data.initialLeft = newShape.left;
     data.initialTop = newShape.top;
     
+    console.log('redrawShapeFromData done:', shapeName, 'now in shapes:', !!shapes[shapeName], 'total shapes:', Object.keys(shapes).length);
     canvas.renderAll();
 }
 
@@ -1444,6 +2000,7 @@ window.toolpathCanvas = {
     linearArray: linearArray,
     gridArray: gridArray,
     mirrorCopy: mirrorCopy,
+    nestShapes: nestShapes,
     // Utility
     duplicate: duplicateShape,
     deleteShape: deleteShape,

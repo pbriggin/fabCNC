@@ -590,6 +590,7 @@ class DXFProcessor:
                                 min_distance: float = 0.01) -> List[Tuple[float, float]]:
         """
         Remove duplicate or near-duplicate points from a point list.
+        Always preserves the first and last points for proper shape connectivity.
         
         Args:
             points: List of (x, y) coordinate tuples
@@ -598,12 +599,13 @@ class DXFProcessor:
         Returns:
             Filtered point list with duplicates removed
         """
-        if len(points) <= 1:
+        if len(points) <= 2:
             return points
         
         filtered_points = [points[0]]  # Always keep the first point
         
-        for i in range(1, len(points)):
+        # Process all middle points
+        for i in range(1, len(points) - 1):
             current_point = points[i]
             last_point = filtered_points[-1]
             
@@ -620,6 +622,13 @@ class DXFProcessor:
             # Only add point if it's far enough from the last kept point
             if distance >= min_distance:
                 filtered_points.append(current_point)
+        
+        # Always keep the last point (critical for shape connectivity)
+        last_point = points[-1]
+        # Only add if not exact duplicate of last filtered point
+        if not (abs(last_point[0] - filtered_points[-1][0]) < 1e-10 and 
+                abs(last_point[1] - filtered_points[-1][1]) < 1e-10):
+            filtered_points.append(last_point)
         
         logger.info(f"Removed {len(points) - len(filtered_points)} duplicate points "
                    f"({len(points)} -> {len(filtered_points)})")
