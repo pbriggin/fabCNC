@@ -9,9 +9,14 @@ let workAreaRect = null;
 let undoStack = [];
 const MAX_UNDO = 50;
 
+// Toolpath visualization state
+let toolpathLocked = false;
+let toolpathObjects = [];  // Store toolpath visualization objects (lines, markers, labels)
+let toolheadIndicator = null;  // Realtime toolhead position indicator
+
 // Canvas dimensions and scale
 const WORK_WIDTH = 1375;  // mm
-const WORK_HEIGHT = 875;  // mm
+const WORK_HEIGHT = 850;  // mm
 const CANVAS_PADDING = 30;  // px - absolute padding around work area
 let scale = 1;
 let canvasWidth = 800;
@@ -178,10 +183,16 @@ function initCanvas(elementId) {
     canvas.on('object:moving', onShapeMoving);
     
     // Handle object movement and transforms
-    canvas.on('object:moved', onShapeMoved);
+    canvas.on('object:moved', function(e) {
+        console.log('=== object:moved EVENT FIRED ===', e.target ? e.target.shapeName : 'no target');
+        onShapeMoved(e);
+    });
     canvas.on('object:scaled', onShapeScaled);
     canvas.on('object:rotated', onShapeRotated);
-    canvas.on('object:modified', onShapeModified);
+    canvas.on('object:modified', function(e) {
+        console.log('=== object:modified EVENT FIRED ===', e.target ? e.target.shapeName : 'no target');
+        onShapeModified(e);
+    });
     
     // Add resize listeners
     window.addEventListener('resize', updateCanvasSize);
@@ -237,7 +248,7 @@ function drawGrid() {
     axisLabels.forEach(label => canvas.remove(label));
     axisLabels = [];
     
-    // GCD of 1375 and 875 is 125 - use for major grid
+    // Grid spacing: 125mm major (divides 1375 evenly), 25mm minor
     const majorSpacing = 125;  // mm - major grid lines
     const minorSpacing = 25;   // mm - minor grid lines
     
@@ -549,6 +560,7 @@ function getCurrentMmPoints(shape) {
 
 function onShapeMoved(e) {
     const obj = e.target;
+    console.log('=== onShapeMoved TRIGGERED ===', obj ? obj.shapeName : 'no object');
     if (!obj || !obj.shapeName) return;
     
     const name = obj.shapeName;
@@ -634,8 +646,8 @@ function onShapeMoved(e) {
         'Y(' + Math.min(...newY).toFixed(1) + '-' + Math.max(...newY).toFixed(1) + ')');
     
     // Send update to Python backend
-    if (typeof emitEvent === 'function') {
-        emitEvent('shape_moved', {
+    if (window.emitEvent) {
+        window.emitEvent('shape_moved', {
             shapeName: name,
             newPoints: newPoints
         });
@@ -738,6 +750,22 @@ function onShapeModified(e) {
     const obj = e.target;
     if (!obj || !obj.shapeName) return;
     
+    const name = obj.shapeName;
+    const data = shapeData[name];
+    
+    // Always check for position change first
+    if (data && data.initialLeft !== null) {
+        const deltaCanvasX = obj.left - data.initialLeft;
+        const deltaCanvasY = obj.top - data.initialTop;
+        
+        // If there's a significant position change, treat as move
+        if (Math.abs(deltaCanvasX) > 2 || Math.abs(deltaCanvasY) > 2) {
+            console.log('onShapeModified detected move:', name, 'delta:', deltaCanvasX.toFixed(1), deltaCanvasY.toFixed(1));
+            onShapeMoved(e);
+            return;  // onShapeMoved handles everything
+        }
+    }
+    
     // Reset any remaining transforms
     if (obj.scaleX !== 1 || obj.scaleY !== 1) {
         onShapeScaled(e);
@@ -751,9 +779,16 @@ function getShapePositions() {
     // Return current positions of all shapes in mm
     const positions = {};
     
+    console.log('=== getShapePositions called ===');
     Object.keys(shapeData).forEach(name => {
         const data = shapeData[name];
         if (data && data.originalMmPoints) {
+            const pts = data.originalMmPoints;
+            const minX = Math.min(...pts.map(p => p[0]));
+            const maxX = Math.max(...pts.map(p => p[0]));
+            const minY = Math.min(...pts.map(p => p[1]));
+            const maxY = Math.max(...pts.map(p => p[1]));
+            console.log(`  ${name}: X(${minX.toFixed(1)}-${maxX.toFixed(1)}) Y(${minY.toFixed(1)}-${maxY.toFixed(1)})`);
             positions[name] = data.originalMmPoints.map(p => [p[0], p[1]]);
         }
     });
@@ -2012,5 +2047,329 @@ window.toolpathCanvas = {
     // Save/Load
     saveCanvasState: saveCanvasState,
     loadCanvasState: loadCanvasState,
-    getCanvasData: getCanvasData
+    getCanvasData: getCanvasData,
+    // Toolpath visualization
+    showToolpath: showToolpath,
+    clearToolpath: clearToolpath,
+    isToolpathLocked: isToolpathLocked,
+    updateToolhead: updateToolhead
 };
+
+// ============ TOOLPATH VISUALIZATION ============
+
+// Check if canvas is locked due to toolpath display
+function isToolpathLocked() {
+    return toolpathLocked;
+}
+
+// Lock canvas interactivity - shapes cannot be moved/modified
+function lockCanvas() {
+    toolpathLocked = true;
+    
+    // Hide and disable all shapes
+    Object.values(shapes).forEach(shape => {
+        shape.selectable = false;
+        shape.evented = false;
+        shape.hasControls = false;
+        shape.hasBorders = false;
+        shape.visible = false;  // Hide shapes when toolpath is shown
+    });
+    
+    canvas.discardActiveObject();
+    canvas.selection = false;
+    canvas.renderAll();
+    console.log('Canvas locked for toolpath preview');
+}
+
+// Unlock canvas interactivity - shapes can be moved again
+function unlockCanvas() {
+    toolpathLocked = false;
+    
+    // Re-enable selection and movement for all shapes, and show them again
+    Object.values(shapes).forEach(shape => {
+        shape.selectable = true;
+        shape.evented = true;
+        shape.hasControls = true;
+        shape.hasBorders = true;
+        shape.visible = true;  // Show shapes again
+    });
+    
+    canvas.selection = true;
+    canvas.renderAll();
+    console.log('Canvas unlocked');
+}
+
+// Clear toolpath visualization
+function clearToolpath() {
+    // Remove all toolpath visualization objects
+    toolpathObjects.forEach(obj => {
+        canvas.remove(obj);
+    });
+    toolpathObjects = [];
+    
+    // Unlock canvas
+    unlockCanvas();
+    
+    canvas.renderAll();
+    console.log('Toolpath cleared');
+    return true;
+}
+
+// Show toolpath visualization from toolpath data
+// toolpathData format: { shapes: { shapeName: { segments: [{x1,y1,x2,y2,angle,isCorner,cornerAngle},...] } } }
+function showToolpath(toolpathData) {
+    if (!toolpathData || !toolpathData.shapes) {
+        console.error('Invalid toolpath data');
+        return false;
+    }
+    
+    // Clear any existing toolpath
+    clearToolpathObjects();
+    
+    // Lock the canvas
+    lockCanvas();
+    
+    const TOOLPATH_COLOR = '#3399FF';  // Blue for toolhead path
+    const ARROW_COLOR = '#3399FF';     // Blue for orientation arrows
+    const RAPID_COLOR = '#FF00FF';     // Magenta for rapid/jog moves between shapes
+    const START_COLOR = '#00FF00';     // Green for start point
+    const END_COLOR = '#FF6600';       // Orange for end point
+    
+    // Track position across all shapes for rapid moves between them
+    let globalPrevEndX = null;
+    let globalPrevEndY = null;
+    let globalStartX = null;
+    let globalStartY = null;
+    
+    // Draw toolpath for each shape
+    let shapeIndex = 0;
+    for (const [shapeName, shapeToolpath] of Object.entries(toolpathData.shapes)) {
+        if (!shapeToolpath.segments) continue;
+        
+        const segments = shapeToolpath.segments;
+        
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            
+            // Track the very first point
+            if (globalStartX === null) {
+                globalStartX = seg.x1;
+                globalStartY = seg.y1;
+            }
+            
+            // Draw rapid move to start of this segment if there's a gap from previous position
+            if (globalPrevEndX !== null && (Math.abs(seg.x1 - globalPrevEndX) > 0.1 || Math.abs(seg.y1 - globalPrevEndY) > 0.1)) {
+                // Draw rapid (dashed) line from previous end to this start
+                const rapidLine = new fabric.Line(
+                    [toCanvasX(globalPrevEndX), toCanvasY(globalPrevEndY), toCanvasX(seg.x1), toCanvasY(seg.y1)],
+                    {
+                        stroke: RAPID_COLOR,
+                        strokeWidth: 2,
+                        strokeDashArray: [8, 4],
+                        selectable: false,
+                        evented: false
+                    }
+                );
+                canvas.add(rapidLine);
+                toolpathObjects.push(rapidLine);
+            }
+            
+            // Draw the cutting line
+            const cutLine = new fabric.Line(
+                [toCanvasX(seg.x1), toCanvasY(seg.y1), toCanvasX(seg.x2), toCanvasY(seg.y2)],
+                {
+                    stroke: TOOLPATH_COLOR,
+                    strokeWidth: 1.5,
+                    opacity: 0.7,
+                    selectable: false,
+                    evented: false
+                }
+            );
+            canvas.add(cutLine);
+            toolpathObjects.push(cutLine);
+            
+            // Draw orientation arrow at midpoint of segment
+            // Show arrows every ~20 segments to avoid clutter
+            if (i % 20 === 0 && seg.angle !== undefined) {
+                const midX = (seg.x1 + seg.x2) / 2;
+                const midY = (seg.y1 + seg.y2) / 2;
+                
+                // Calculate direction from segment
+                const dx = seg.x2 - seg.x1;
+                const dy = seg.y2 - seg.y1;
+                const segLength = Math.sqrt(dx * dx + dy * dy);
+                
+                if (segLength > 0.5) {  // Only draw if segment is long enough
+                    // Normalize and scale arrow
+                    const arrowLength = Math.min(15 / scale, segLength * 0.4);  // Arrow length in mm
+                    const nx = dx / segLength;
+                    const ny = dy / segLength;
+                    
+                    const arrowEndX = midX + nx * arrowLength;
+                    const arrowEndY = midY + ny * arrowLength;
+                    
+                    // Arrow shaft
+                    const arrowShaft = new fabric.Line(
+                        [toCanvasX(midX), toCanvasY(midY), toCanvasX(arrowEndX), toCanvasY(arrowEndY)],
+                        {
+                            stroke: ARROW_COLOR,
+                            strokeWidth: 2,
+                            selectable: false,
+                            evented: false
+                        }
+                    );
+                    canvas.add(arrowShaft);
+                    toolpathObjects.push(arrowShaft);
+                    
+                    // Arrow head (triangle)
+                    const headSize = 4 / scale;  // mm
+                    const perpX = -ny;  // Perpendicular direction
+                    const perpY = nx;
+                    
+                    const headPoints = [
+                        { x: toCanvasX(arrowEndX), y: toCanvasY(arrowEndY) },
+                        { x: toCanvasX(arrowEndX - nx * headSize + perpX * headSize * 0.5), 
+                          y: toCanvasY(arrowEndY - ny * headSize + perpY * headSize * 0.5) },
+                        { x: toCanvasX(arrowEndX - nx * headSize - perpX * headSize * 0.5), 
+                          y: toCanvasY(arrowEndY - ny * headSize - perpY * headSize * 0.5) }
+                    ];
+                    
+                    const arrowHead = new fabric.Polygon(headPoints, {
+                        fill: ARROW_COLOR,
+                        stroke: ARROW_COLOR,
+                        strokeWidth: 1,
+                        selectable: false,
+                        evented: false
+                    });
+                    canvas.add(arrowHead);
+                    toolpathObjects.push(arrowHead);
+                }
+            }
+            
+            // Draw small circle at corners
+            if (seg.isCorner) {
+                const cornerMarker = new fabric.Circle({
+                    left: toCanvasX(seg.x1) - 4,
+                    top: toCanvasY(seg.y1) - 4,
+                    radius: 4,
+                    fill: '#FF6600',
+                    stroke: '#FF6600',
+                    strokeWidth: 1,
+                    selectable: false,
+                    evented: false
+                });
+                canvas.add(cornerMarker);
+                toolpathObjects.push(cornerMarker);
+            }
+            
+            // Update global position tracking
+            globalPrevEndX = seg.x2;
+            globalPrevEndY = seg.y2;
+        }
+        
+        shapeIndex++;
+    }
+    
+    // Draw START label at the beginning of toolpath
+    if (globalStartX !== null) {
+        const startLabel = new fabric.Text('START', {
+            left: toCanvasX(globalStartX) + 8,
+            top: toCanvasY(globalStartY) - 6,
+            fontSize: 12,
+            fill: START_COLOR,
+            fontFamily: 'Roboto, sans-serif',
+            fontWeight: 'bold',
+            selectable: false,
+            evented: false
+        });
+        canvas.add(startLabel);
+        toolpathObjects.push(startLabel);
+    }
+    
+    // Draw END label at the end of toolpath
+    if (globalPrevEndX !== null) {
+        const endLabel = new fabric.Text('END', {
+            left: toCanvasX(globalPrevEndX) + 8,
+            top: toCanvasY(globalPrevEndY) - 6,
+            fontSize: 12,
+            fill: END_COLOR,
+            fontFamily: 'Roboto, sans-serif',
+            fontWeight: 'bold',
+            selectable: false,
+            evented: false
+        });
+        canvas.add(endLabel);
+        toolpathObjects.push(endLabel);
+    }
+    
+    // Draw corner count in the center of each shape
+    for (const [shapeName, shapeToolpath] of Object.entries(toolpathData.shapes)) {
+        if (shapeToolpath.cornerCount !== undefined && shapeToolpath.centerX !== undefined) {
+            const cornerLabel = new fabric.Text(String(shapeToolpath.cornerCount), {
+                left: toCanvasX(shapeToolpath.centerX),
+                top: toCanvasY(shapeToolpath.centerY),
+                fontSize: 16,
+                fill: '#FFFFFF',
+                fontFamily: 'Roboto, sans-serif',
+                fontWeight: 'bold',
+                originX: 'center',
+                originY: 'center',
+                selectable: false,
+                evented: false
+            });
+            canvas.add(cornerLabel);
+            toolpathObjects.push(cornerLabel);
+        }
+    }
+    
+    canvas.renderAll();
+    console.log('Toolpath displayed with', toolpathObjects.length, 'objects');
+    return true;
+}
+
+// Helper to clear only toolpath objects without unlocking
+function clearToolpathObjects() {
+    toolpathObjects.forEach(obj => {
+        canvas.remove(obj);
+    });
+    toolpathObjects = [];
+}
+
+// Update toolhead position indicator in realtime
+function updateToolhead(x, y) {
+    if (!canvas) return;
+    
+    const TOOLHEAD_COLOR = '#00BFFF';  // Bright blue for toolhead
+    const TOOLHEAD_RADIUS = 8;
+    
+    // Calculate canvas position
+    const canvasX = toCanvasX(x);
+    const canvasY = toCanvasY(y);
+    
+    if (toolheadIndicator) {
+        // Update existing indicator position
+        toolheadIndicator.set({
+            left: canvasX - TOOLHEAD_RADIUS,
+            top: canvasY - TOOLHEAD_RADIUS
+        });
+        toolheadIndicator.setCoords();
+    } else {
+        // Create new toolhead indicator
+        toolheadIndicator = new fabric.Circle({
+            left: canvasX - TOOLHEAD_RADIUS,
+            top: canvasY - TOOLHEAD_RADIUS,
+            radius: TOOLHEAD_RADIUS,
+            fill: TOOLHEAD_COLOR,
+            stroke: '#FFFFFF',
+            strokeWidth: 2,
+            selectable: false,
+            evented: false,
+            opacity: 0.9
+        });
+        canvas.add(toolheadIndicator);
+    }
+    
+    // Bring toolhead to front
+    canvas.bringToFront(toolheadIndicator);
+    canvas.renderAll();
+}

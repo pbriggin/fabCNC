@@ -65,7 +65,7 @@ lock_state = {'locked': True}  # Start locked
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
-    cutting_height=-26.0,  # Z height when cutting (mm)
+    cutting_height=-27.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=15.0,
     feed_rate=5000.0,      # mm/min (~83 mm/s)
@@ -116,7 +116,7 @@ async def nest_endpoint(request: Request):
         
         input_shapes = data.get('shapes', [])
         sheet_width = data.get('sheetWidth', 1375)
-        sheet_height = data.get('sheetHeight', 875)
+        sheet_height = data.get('sheetHeight', 850)
         offset = data.get('offset', 2)  # mm spacing
         rotations = data.get('rotations', 4)  # Try 4 rotations by default
         
@@ -752,12 +752,18 @@ def create_job_controls():
         job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px;')
         job_progress.bind_value_from(machine_state, 'job_progress')
         
+        # Generate Toolpath / Clear Toolpath toggle button
+        toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
+            .props('dense flat') \
+            .classes('w-full') \
+            .style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
+        
         ui.button('Start', icon='play_arrow', on_click=start_job) \
             .props('dense flat') \
             .classes('w-full') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
-                             backward=lambda _: machine_state.job_loaded and machine_state.is_idle())
+                             backward=lambda _: machine_state.toolpath_generated and machine_state.is_idle())
         
         with ui.row().classes('w-full gap-1'):
             ui.button('Pause', icon='pause', on_click=pause_job) \
@@ -954,8 +960,9 @@ async def handle_file_upload(event, label):
         # This allows importing multiple DXF files
         update_toolpath_plot(shapes, clear_existing=False)
         
-        # Update state
+        # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
+        machine_state.set_toolpath_generated(False)
         label.set_text(f'Loaded: {filename}')
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
@@ -1069,6 +1076,7 @@ async def load_canvas_state():
                     current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
                 
                 machine_state.set_job_loaded(True, os.path.basename(filepath))
+                machine_state.set_toolpath_generated(False)  # Clear toolpath since shapes changed
                 ui.notify(f'Canvas loaded: {os.path.basename(filepath)}', type='positive')
                 dialog.close()
                 
@@ -1105,24 +1113,89 @@ def clear_canvas():
     current_toolpath_shapes = {}
     ui.run_javascript('window.toolpathCanvas.clearShapes()')
     machine_state.set_job_loaded(False)
+    machine_state.set_toolpath_generated(False)
     ui.notify('Canvas cleared', type='info')
 
 
-def start_job():
-    """Handle start job button click - generates toolpath and streams via serial."""
+async def toggle_toolpath(button):
+    """Toggle between Generate Toolpath and Clear Toolpath modes."""
     global current_gcode
     
-    if not current_toolpath_shapes:
-        ui.notify('No shapes loaded', type='warning')
+    if machine_state.toolpath_generated:
+        # Clear toolpath mode
+        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+        machine_state.set_toolpath_generated(False)
+        button.props('icon=route')
+        button.set_text('Generate Toolpath')
+        button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
+        current_gcode = []
+        ui.notify('Toolpath cleared - shapes are now editable', type='info')
+    else:
+        # Generate toolpath mode
+        if not current_toolpath_shapes:
+            ui.notify('No shapes loaded', type='warning')
+            return
+        
+        ui.notify('Generating toolpath...', type='info')
+        
+        # Fetch current shape positions from JavaScript canvas (in case shapes were moved)
+        print("=== FETCHING POSITIONS FROM CANVAS ===")
+        try:
+            positions_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getPositions())')
+            print(f"positions_json type: {type(positions_json)}, value: {str(positions_json)[:200] if positions_json else 'None'}")
+            if positions_json:
+                positions = json.loads(positions_json)
+                print(f"Canvas shapes: {list(positions.keys())}")
+                print(f"Python shapes before update: {list(current_toolpath_shapes.keys())}")
+                # Replace ALL shapes with canvas positions
+                current_toolpath_shapes.clear()
+                for name, points in positions.items():
+                    current_toolpath_shapes[name] = [tuple(p) for p in points]
+                    print(f"  Added '{name}' with {len(points)} points")
+                print(f"Python shapes after update: {list(current_toolpath_shapes.keys())}")
+        except Exception as e:
+            print(f"ERROR fetching positions: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Generate visualization data for the canvas
+        viz_data = toolpath_generator.generate_visualization_data(current_toolpath_shapes)
+        
+        # Send visualization data to JavaScript
+        viz_json = json.dumps(viz_data)
+        await ui.run_javascript(f'window.toolpathCanvas.showToolpath({viz_json})')
+        
+        # Generate actual G-code for later execution
+        gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="preview")
+        current_gcode = gcode_str.split('\n')
+        
+        # Count corners and segments for info
+        total_segments = sum(len(shape['segments']) for shape in viz_data['shapes'].values())
+        total_corners = sum(1 for shape in viz_data['shapes'].values() 
+                          for seg in shape['segments'] if seg.get('isCorner'))
+        
+        machine_state.set_toolpath_generated(True)
+        button.props('icon=close')
+        button.set_text('Clear Toolpath')
+        button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
+        
+        ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
+
+
+def start_job():
+    """Handle start job button click - streams generated gcode via serial."""
+    global current_gcode
+    
+    if not machine_state.toolpath_generated:
+        ui.notify('Please generate toolpath first', type='warning')
         return
     
-    # Generate toolpath from current shape positions
-    ui.notify('Generating toolpath...', type='info')
-    print(f"\n--- Toolpath Generation ---")
-    gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="job")
-    current_gcode = gcode_str.split('\n')
+    if not current_gcode:
+        ui.notify('No toolpath generated', type='warning')
+        return
     
     # Debug: Show gcode summary
+    print(f"\n--- Starting Job ---")
     g0_count = sum(1 for line in current_gcode if line.startswith('G0'))
     g1_count = sum(1 for line in current_gcode if line.startswith('G1'))
     print(f"  Total lines: {len(current_gcode)}")
@@ -1165,6 +1238,9 @@ def update_ui(pos_labels, status_label):
     pos_labels['Y'].set_text(f'{y:.2f} mm')
     pos_labels['Z'].set_text(f'{z:.2f} mm')
     pos_labels['A'].set_text(f'{a:.2f} °')
+    
+    # Update toolhead position on canvas (realtime indicator)
+    ui.run_javascript(f'if(window.toolpathCanvas) window.toolpathCanvas.updateToolhead({x}, {y})')
     
     # Update status
     current_status = machine_state.status_text
@@ -1518,16 +1594,17 @@ def main_page():
                                     offset_val = int(nest_offset.value)
                                     keep_orient = str(keep_orientation.value).lower()
                                     result = await ui.run_javascript(f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})')
-                                    if result and not result.get('success'):
-                                        ui.notify(result.get('error', 'Nesting failed'), type='negative')
-                                    elif result and result.get('success'):
-                                        ui.notify(f'Nested to {result["width"]:.0f}×{result["height"]:.0f}mm', type='positive')
+                                    if result and isinstance(result, dict):
+                                        if not result.get('success'):
+                                            ui.notify(result.get('error', 'Nesting failed'), type='negative')
+                                        elif 'width' in result and 'height' in result:
+                                            ui.notify(f'Nested to {result["width"]:.0f}×{result["height"]:.0f}mm', type='positive')
                                 
                                 ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=21"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=30"></script>')
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
@@ -1582,6 +1659,23 @@ def main_page():
                                     logger.info(f"Shape '{shape_name}' moved to new position")
                             
                             ui.on('shape_moved', on_shape_moved)
+                            
+                            # Handle shape deleted events from JavaScript
+                            def on_shape_deleted(e):
+                                global current_toolpath_shapes
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                shape_name = data.get('shapeName') if isinstance(data, dict) else None
+                                
+                                if shape_name and shape_name in current_toolpath_shapes:
+                                    del current_toolpath_shapes[shape_name]
+                                    logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
+                                    # Clear toolpath if it was generated since shapes changed
+                                    if machine_state.toolpath_generated:
+                                        machine_state.set_toolpath_generated(False)
+                                        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+                                        ui.notify('Toolpath cleared - shape deleted', type='info')
+                            
+                            ui.on('shape_deleted', on_shape_deleted)
                         
                         # Right column: Jog Controls only (fixed width)
                         with ui.column().classes('gap-2 items-center').style('flex: 0 0 320px; padding: 0 0 10px 0; box-sizing: border-box;'):

@@ -32,6 +32,7 @@ class MachineState:
     job_loaded: bool = False
     job_progress: float = 0.0  # 0.0 to 1.0
     status_text: str = "Idle"
+    toolpath_generated: bool = False  # Whether toolpath has been generated and is being previewed
     
     # Job file info
     loaded_filename: Optional[str] = None
@@ -100,6 +101,11 @@ class MachineState:
                 self.status_text = f"Loaded: {self.loaded_filename}"
             else:
                 self.status_text = "Idle"
+    
+    def set_toolpath_generated(self, generated: bool) -> None:
+        """Set whether toolpath has been generated (thread-safe)."""
+        with self._lock:
+            self.toolpath_generated = generated
 
 
 # Global machine state instance

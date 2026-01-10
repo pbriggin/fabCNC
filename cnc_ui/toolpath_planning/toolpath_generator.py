@@ -342,15 +342,15 @@ class ToolpathGenerator:
             prev_idx, prev_angle = all_corners[i-1]
             
             # Check if corners should be merged based on geometric proximity
-            # Only merge if they're physically close (within 0.1 inches)
-            if current_idx - prev_idx <= 5:  # Only check if reasonably close in index
+            # Merge if they're physically close (within 10mm)
+            if current_idx - prev_idx <= 10:  # Only check if reasonably close in index
                 # Calculate distance between corner points
                 current_point = points[current_idx]
                 prev_point = points[prev_idx]
                 distance = math.sqrt((current_point[0] - prev_point[0])**2 + 
                                    (current_point[1] - prev_point[1])**2)
                 
-                if distance <= 0.1:
+                if distance <= 10.0:  # 10mm threshold
                     # Close together - merge corners
                     current_group.append(all_corners[i])
                 else:
@@ -454,6 +454,80 @@ class ToolpathGenerator:
         
         # Round to 2 decimal places for degrees
         return round(a_position_degrees, 2)
+    
+    def generate_visualization_data(self, shapes: Dict[str, List[Tuple[float, float]]]) -> Dict:
+        """
+        Generate toolpath visualization data for the canvas.
+        
+        Args:
+            shapes: Dictionary of shape names to point lists
+            
+        Returns:
+            Dictionary with visualization data for each shape including segments,
+            angles, and corners
+        """
+        result = {'shapes': {}}
+        
+        # Sort shapes by position
+        sorted_shapes = self._sort_shapes_by_position(shapes)
+        
+        for shape_name, points in sorted_shapes:
+            if len(points) < 2:
+                continue
+                
+            # Reset A position tracking for each new shape
+            self.current_a = 0.0
+            
+            # Find best starting point (corner if available)
+            optimized_points = self._optimize_starting_point(points)
+            
+            # Get reduced corners (merges adjacent corners)
+            reduced_corners = self._reduce_adjacent_corners(optimized_points)
+            
+            segments = []
+            
+            # Process each segment
+            for i in range(len(optimized_points) - 1):
+                current_point = optimized_points[i]
+                next_point = optimized_points[i + 1]
+                
+                # Calculate A angle for this segment
+                target_a = self._calculate_z_rotation(current_point, next_point)
+                continuous_a = self._calculate_continuous_a(target_a)
+                
+                # Check for corner at current point (using reduced corners)
+                is_corner = i in reduced_corners
+                corner_angle = None
+                if is_corner and i > 0:
+                    prev_point = optimized_points[i - 1]
+                    corner_angle = self._calculate_line_angle_change(prev_point, current_point, next_point)
+                
+                segments.append({
+                    'x1': current_point[0],
+                    'y1': current_point[1],
+                    'x2': next_point[0],
+                    'y2': next_point[1],
+                    'angle': continuous_a,
+                    'isCorner': is_corner,
+                    'cornerAngle': corner_angle
+                })
+            
+            # Count corners and calculate shape center
+            corner_count = len(reduced_corners)
+            all_x = [p[0] for p in optimized_points]
+            all_y = [p[1] for p in optimized_points]
+            center_x = (min(all_x) + max(all_x)) / 2
+            center_y = (min(all_y) + max(all_y)) / 2
+            
+            result['shapes'][shape_name] = {
+                'segments': segments,
+                'cornerCount': corner_count,
+                'centerX': center_x,
+                'centerY': center_y
+            }
+            logger.info(f"Generated visualization for {shape_name}: {len(segments)} segments, {corner_count} corners")
+        
+        return result
     
     def _calculate_continuous_a(self, target_a: float) -> float:
         """

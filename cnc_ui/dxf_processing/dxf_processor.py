@@ -52,35 +52,17 @@ class DXFProcessor:
                 
                 if entity.dxftype() == "SPLINE":
                     try:
-                        # Get spline construction tool
                         tool = entity.construction_tool()
                         
-                        logger.info(f"    Spline degree: {entity.dxf.degree}")
-                        logger.info(f"    Control points: {len(entity.control_points)}")
+                        # Sample at VERY high resolution to find TRUE corners
+                        high_res = tool.approximate(segments=2000)
+                        high_res_pts = [(p.x, p.y) for p in high_res]
                         
-                        # Estimate spline length from control points for adaptive segmentation
-                        ctrl_pts = list(entity.control_points)
-                        if len(ctrl_pts) >= 2:
-                            # Estimate path length as sum of distances between control points
-                            est_length = sum(
-                                math.sqrt((ctrl_pts[i+1][0] - ctrl_pts[i][0])**2 + (ctrl_pts[i+1][1] - ctrl_pts[i][1])**2)
-                                for i in range(len(ctrl_pts) - 1)
-                            )
-                            # Use 1 segment per 0.5 inches of estimated length, min 50, max 500
-                            num_segments = max(50, min(500, int(est_length / 0.5)))
-                        else:
-                            num_segments = 100
+                        # Find TRUE corner coordinates using window approach
+                        true_corners = self._find_true_corners(high_res_pts)
                         
-                        logger.info(f"    Using {num_segments} segments for spline approximation")
-                        
-                        # Adaptive approximation based on spline length
-                        spline_points = tool.approximate(segments=num_segments)
-                        points = []
-                        for point in spline_points:
-                            points.append((point.x, point.y))
-                        
-                        # Reduce points to specified spacing
-                        reduced_points = self._reduce_points_by_distance(points, min_distance)
+                        # Reduce points while preserving true corner coordinates
+                        reduced_points = self._reduce_points_preserving_corners(high_res_pts, true_corners, min_distance)
                         
                         if reduced_points and len(reduced_points) >= 2:
                             shape_name = f"shape_{shape_counter}"
@@ -878,59 +860,118 @@ class DXFProcessor:
 
     def _reduce_points_by_distance(self, points: List[Tuple[float, float]], min_distance: float = 0.1) -> List[Tuple[float, float]]:
         """
-        Reduce points to only include points that are at least min_distance apart,
-        but always preserve corner points (where direction changes significantly).
-        
-        Args:
-            points: Original list of points
-            min_distance: Minimum distance between points in inches
-            
-        Returns:
-            Filtered list of points
+        Reduce points to specified spacing while preserving TRUE corner points.
         """
         if len(points) <= 2:
             return points
         
-        def is_corner(p1, p2, p3, angle_threshold_degrees=15.0):
-            """Check if p2 is a corner point (direction change > threshold)."""
-            # Vector from p1 to p2
+        def calc_angle(p1, p2, p3):
             v1 = (p2[0] - p1[0], p2[1] - p1[1])
-            # Vector from p2 to p3
             v2 = (p3[0] - p2[0], p3[1] - p2[1])
-            
             mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
             mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
-            
             if mag1 < 0.0001 or mag2 < 0.0001:
-                return False
-            
-            # Dot product
+                return 0.0
             dot = v1[0]*v2[0] + v1[1]*v2[1]
             cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
-            angle_change = math.degrees(math.acos(cos_angle))
-            
-            return angle_change > angle_threshold_degrees
+            return math.degrees(math.acos(cos_angle))
         
-        reduced_points = [points[0]]  # Always keep first point
+        # Find TRUE corners using a window to avoid noise
+        # Window size based on points density
+        window = max(1, len(points) // 100)  # ~1% of points on each side
+        corner_indices = set()
+        
+        for i in range(window, len(points) - window):
+            angle = calc_angle(points[i - window], points[i], points[i + window])
+            if angle > 15.0:
+                corner_indices.add(i)
+        
+        # Reduce: always keep corner points, others by distance
+        reduced = [points[0]]
         
         for i in range(1, len(points) - 1):
-            point = points[i]
-            last_point = reduced_points[-1]
-            next_point = points[i + 1]
-            
-            # Calculate distance to last kept point
-            distance = ((point[0] - last_point[0])**2 + (point[1] - last_point[1])**2)**0.5
-            
-            # Keep point if it's far enough OR if it's a corner
-            if distance >= min_distance or is_corner(last_point, point, next_point):
-                reduced_points.append(point)
+            if i in corner_indices:
+                # Always keep corner points
+                reduced.append(points[i])
+            else:
+                # Keep non-corners only if far enough from last point
+                dist = math.sqrt((points[i][0] - reduced[-1][0])**2 + (points[i][1] - reduced[-1][1])**2)
+                if dist >= min_distance:
+                    reduced.append(points[i])
         
-        # Always keep last point
-        if len(points) > 1:
-            reduced_points.append(points[-1])
+        reduced.append(points[-1])
+        return reduced
+    
+    def _find_true_corners(self, points: List[Tuple[float, float]], angle_threshold: float = 30.0) -> List[Tuple[float, float]]:
+        """
+        Find TRUE corner coordinates from high-resolution point data.
+        Uses a window approach with LOCAL MAXIMA detection to find real corners.
+        """
+        if len(points) < 3:
+            return []
         
-        logger.info(f"Reduced from {len(points)} to {len(reduced_points)} points ({min_distance}\" spacing, preserving corners)")
-        return reduced_points
+        def calc_angle(p1, p2, p3):
+            v1 = (p2[0] - p1[0], p2[1] - p1[1])
+            v2 = (p3[0] - p2[0], p3[1] - p2[1])
+            mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
+            mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
+            if mag1 < 0.0001 or mag2 < 0.0001:
+                return 0.0
+            dot = v1[0]*v2[0] + v1[1]*v2[1]
+            cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+            return math.degrees(math.acos(cos_angle))
+        
+        # Use small window to not average over multiple corners
+        window = max(1, len(points) // 200)
+        
+        # Compute angles for all points
+        angles = []
+        for i in range(window, len(points) - window):
+            angle = calc_angle(points[i - window], points[i], points[i + window])
+            angles.append((i, angle, points[i]))
+        
+        # Find LOCAL MAXIMA above threshold - these are TRUE corners
+        corners = []
+        for i in range(1, len(angles) - 1):
+            idx, angle, pt = angles[i]
+            prev_angle = angles[i-1][1]
+            next_angle = angles[i+1][1]
+            
+            # Local maximum that's above the threshold
+            if angle > angle_threshold and angle >= prev_angle and angle >= next_angle:
+                corners.append(pt)
+        
+        return corners
+    
+    def _reduce_points_preserving_corners(self, points: List[Tuple[float, float]], 
+                                          true_corners: List[Tuple[float, float]], 
+                                          min_distance: float = 0.1) -> List[Tuple[float, float]]:
+        """
+        Reduce points by distance but ensure TRUE corner coordinates are preserved.
+        """
+        if len(points) <= 2:
+            return points
+        
+        # Convert corners to a set for fast lookup (rounded for float comparison)
+        corner_set = set((round(c[0], 6), round(c[1], 6)) for c in true_corners)
+        
+        reduced = [points[0]]
+        
+        for i in range(1, len(points) - 1):
+            pt = points[i]
+            is_corner = (round(pt[0], 6), round(pt[1], 6)) in corner_set
+            
+            if is_corner:
+                # Always keep TRUE corner points
+                reduced.append(pt)
+            else:
+                # Keep non-corners only if far enough from last point
+                dist = math.sqrt((pt[0] - reduced[-1][0])**2 + (pt[1] - reduced[-1][1])**2)
+                if dist >= min_distance:
+                    reduced.append(pt)
+        
+        reduced.append(points[-1])
+        return reduced
 
 
 def main():
