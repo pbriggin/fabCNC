@@ -58,6 +58,9 @@ jog_params = {
     'feed_rate': 4000.0,  # mm/min
 }
 
+# Z cut height parameter (used by toolpath generator)
+z_cut_height = {'value': -30.0}  # Default Z cutting height in mm
+
 # Lock screen configuration
 LOCK_PIN = "1234"  # 4-digit PIN code
 lock_state = {'locked': True}  # Start locked
@@ -65,11 +68,12 @@ lock_state = {'locked': True}  # Start locked
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
-    cutting_height=-27.0,  # Z height when cutting (mm)
+    cutting_height=-30.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
-    corner_angle_threshold=15.0,
-    feed_rate=5000.0,      # mm/min (~83 mm/s)
-    plunge_rate=3000.0     # mm/min
+    corner_angle_threshold=30.0,  # Increased to reduce false corners on curves
+    feed_rate=7500.0,      # mm/min (125 mm/s)
+    plunge_rate=3000.0,    # mm/min
+    rapid_rate=10000.0     # mm/min (167 mm/s) - rapid/jog moves
 )
 
 # Global storage for current toolpath visualization data
@@ -748,6 +752,15 @@ def create_job_controls():
     with ui.column().classes('w-full gap-2'):
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
+        # Z cut height input
+        with ui.row().classes('w-full items-center gap-2'):
+            ui.label('Z Cut Height:').style('color: #aaa; font-size: 13px; white-space: nowrap;')
+            ui.number(value=z_cut_height['value'], format='%.1f', step=0.5, suffix='mm',
+                      on_change=lambda e: z_cut_height.update({'value': e.value})) \
+                .props('dense outlined') \
+                .classes('flex-1') \
+                .style('font-size: 13px;')
+        
         # Progress bar
         job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px;')
         job_progress.bind_value_from(machine_state, 'job_progress')
@@ -824,12 +837,6 @@ def set_xy_zero():
     ui.notify("XY position set to zero", type='positive')
 
 
-def set_z_zero():
-    """Set current Z position + 26 as zero (so current position becomes -26)."""
-    cnc_controller.send_command("G92 Z-26")
-    ui.notify("Z zero set (current = -26)", type='positive')
-
-
 def set_a_zero():
     """Set current A position as zero."""
     cnc_controller.send_command("G92 A0")
@@ -842,6 +849,9 @@ def regenerate_toolpath():
     
     if not current_toolpath_shapes:
         return
+    
+    # Update toolpath generator with current Z cut height
+    toolpath_generator.cutting_height = z_cut_height['value']
     
     logger.info("Regenerating toolpath after shape move...")
     gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="moved_shapes")
@@ -1157,6 +1167,9 @@ async def toggle_toolpath(button):
             print(f"ERROR fetching positions: {e}")
             import traceback
             traceback.print_exc()
+        
+        # Update toolpath generator with current Z cut height
+        toolpath_generator.cutting_height = z_cut_height['value']
         
         # Generate visualization data for the canvas
         viz_data = toolpath_generator.generate_visualization_data(current_toolpath_shapes)

@@ -30,7 +30,8 @@ class ToolpathGenerator:
                  safe_height: float = -15.0,  # Z height when raised (higher)
                  corner_angle_threshold: float = 15.0,  # Increased from 5.0 to be less sensitive to curves
                  feed_rate: float = 12000.0,  # 200 mm/s (firmware max is 300)
-                 plunge_rate: float = 3000.0):
+                 plunge_rate: float = 3000.0,
+                 rapid_rate: float = 10000.0):  # Rapid/jog moves between cuts (mm/min)
         """
         Initialize the toolpath generator.
         
@@ -40,12 +41,14 @@ class ToolpathGenerator:
             corner_angle_threshold: Angle in degrees above which to raise Z at corners
             feed_rate: Feed rate for cutting moves (mm/min)
             plunge_rate: Feed rate for Z plunges (mm/min)
+            rapid_rate: Feed rate for rapid/travel moves (mm/min)
         """
         self.cutting_height = cutting_height
         self.safe_height = safe_height
         self.corner_angle_threshold_radians = math.radians(corner_angle_threshold)
         self.feed_rate = feed_rate
         self.plunge_rate = plunge_rate
+        self.rapid_rate = rapid_rate
         self.current_z = safe_height  # Track current Z position
         self.current_a = 0.0  # Track current A position for continuous rotation
         
@@ -149,8 +152,8 @@ class ToolpathGenerator:
         """Generate GCODE footer for Marlin firmware."""
         return [
             "",
-            f"G0 Z{self.safe_height} ; Return to safe height",
-            "G0 X0 Y0 Z0 A0 ; Return to origin",
+            f"G0 Z{self.safe_height} F{self.plunge_rate} ; Return to safe height",
+            f"G0 X0 Y0 Z0 A0 F{self.rapid_rate} ; Return to origin",
             "M400 ; Wait for moves to finish",
             "",
             "; Restore Z and A speed/accel to firmware defaults (safe for homing)",
@@ -183,15 +186,15 @@ class ToolpathGenerator:
         
         # Move to start point
         first_point = points[0]
-        gcode_lines.append(f"G0 X{first_point[0]:.3f} Y{first_point[1]:.3f} ; Move to start")
+        gcode_lines.append(f"G0 X{first_point[0]:.3f} Y{first_point[1]:.3f} F{self.rapid_rate} ; Move to start")
         
         # Set initial A rotation and plunge
         if len(points) > 1:
             target_a = self._calculate_z_rotation(first_point, points[1])
             self.current_a = self._calculate_continuous_a(target_a)
-            gcode_lines.append(f"G0 A{self.current_a:.2f} ; Set initial blade angle")
+            gcode_lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate} ; Set initial blade angle")
         
-        gcode_lines.append(f"G0 Z{self.cutting_height} ; Plunge to cutting height")
+        gcode_lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate} ; Plunge to cutting height")
         
         # Process each segment
         for i in range(len(points) - 1):
@@ -202,14 +205,15 @@ class ToolpathGenerator:
             if i > 0:
                 prev_point = points[i - 1]
                 angle_change = self._calculate_line_angle_change(prev_point, current_point, next_point)
+                threshold_degrees = math.degrees(self.corner_angle_threshold_radians)
                 
-                if angle_change > 15.0:  # Angle change > 15 degrees
+                if angle_change > threshold_degrees:  # Angle change > threshold
                     # Lift Z, rotate A, lower Z
-                    gcode_lines.append(f"G0 Z{self.safe_height} ; Raise Z for corner")
+                    gcode_lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate} ; Raise Z for corner")
                     target_a = self._calculate_z_rotation(current_point, next_point)
                     self.current_a = self._calculate_continuous_a(target_a)
-                    gcode_lines.append(f"G0 A{self.current_a:.2f} ; Rotate blade for new direction")
-                    gcode_lines.append(f"G0 Z{self.cutting_height} ; Lower Z to cutting height")
+                    gcode_lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate} ; Rotate blade for new direction")
+                    gcode_lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate} ; Lower Z to cutting height")
                 else:
                     # No corner, just update A angle
                     target_a = self._calculate_z_rotation(current_point, next_point)
@@ -223,7 +227,7 @@ class ToolpathGenerator:
             gcode_lines.append(f"G1 X{next_point[0]:.3f} Y{next_point[1]:.3f} A{self.current_a:.2f} F{self.feed_rate} ; Cut to next point")
         
         # Raise tool to safe height
-        gcode_lines.append(f"G0 Z{self.safe_height} ; Raise tool to safe height")
+        gcode_lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate} ; Raise tool to safe height")
         gcode_lines.append("")
         
         return gcode_lines
