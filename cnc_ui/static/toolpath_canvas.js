@@ -15,8 +15,8 @@ let toolpathObjects = [];  // Store toolpath visualization objects (lines, marke
 let toolheadIndicator = null;  // Realtime toolhead position indicator
 
 // Canvas dimensions and scale
-const WORK_WIDTH = 1375;  // mm
-const WORK_HEIGHT = 850;  // mm
+const WORK_WIDTH = 1720;  // mm
+const WORK_HEIGHT = 1660;  // mm
 const CANVAS_PADDING = 30;  // px - absolute padding around work area
 let scale = 1;
 let canvasWidth = 800;
@@ -248,19 +248,17 @@ function drawGrid() {
     axisLabels.forEach(label => canvas.remove(label));
     axisLabels = [];
     
-    // Grid spacing: 125mm major (divides 1375 evenly), 25mm minor
-    const majorSpacing = 125;  // mm - major grid lines
-    const minorSpacing = 25;   // mm - minor grid lines
+    // Grid spacing: 20mm uniform grid, labels every 200mm
+    const gridSpacing = 20;   // mm - uniform grid lines
+    const labelSpacing = 200; // mm - axis labels
     
-    const majorGridColor = GRID_COLOR;
-    const minorGridColor = '#2a2a2a';  // fainter for minor lines
+    const gridColor = '#2a2a2a';
     const labelColor = '#888888';
     
-    // Draw minor vertical lines first (so major lines are on top)
-    for (let x = 0; x <= WORK_WIDTH; x += minorSpacing) {
-        if (x % majorSpacing === 0) continue;  // Skip major line positions
+    // Draw vertical grid lines
+    for (let x = 0; x <= WORK_WIDTH; x += gridSpacing) {
         const line = new fabric.Line([toCanvasX(x), toCanvasY(0), toCanvasX(x), toCanvasY(WORK_HEIGHT)], {
-            stroke: minorGridColor,
+            stroke: gridColor,
             strokeWidth: 1,
             selectable: false,
             evented: false
@@ -269,11 +267,10 @@ function drawGrid() {
         canvas.add(line);
     }
     
-    // Draw minor horizontal lines
-    for (let y = 0; y <= WORK_HEIGHT; y += minorSpacing) {
-        if (y % majorSpacing === 0) continue;  // Skip major line positions
+    // Draw horizontal grid lines
+    for (let y = 0; y <= WORK_HEIGHT; y += gridSpacing) {
         const line = new fabric.Line([toCanvasX(0), toCanvasY(y), toCanvasX(WORK_WIDTH), toCanvasY(y)], {
-            stroke: minorGridColor,
+            stroke: gridColor,
             strokeWidth: 1,
             selectable: false,
             evented: false
@@ -282,18 +279,8 @@ function drawGrid() {
         canvas.add(line);
     }
     
-    // Draw major vertical lines and X labels
-    for (let x = 0; x <= WORK_WIDTH; x += majorSpacing) {
-        const line = new fabric.Line([toCanvasX(x), toCanvasY(0), toCanvasX(x), toCanvasY(WORK_HEIGHT)], {
-            stroke: majorGridColor,
-            strokeWidth: 1,
-            selectable: false,
-            evented: false
-        });
-        gridLines.push(line);
-        canvas.add(line);
-        
-        // X axis label (at bottom)
+    // X axis labels
+    for (let x = 0; x <= WORK_WIDTH; x += labelSpacing) {
         const label = new fabric.Text(Math.round(x).toString(), {
             left: toCanvasX(x),
             top: toCanvasY(0) + 5,
@@ -308,18 +295,8 @@ function drawGrid() {
         canvas.add(label);
     }
     
-    // Draw major horizontal lines and Y labels
-    for (let y = 0; y <= WORK_HEIGHT; y += majorSpacing) {
-        const line = new fabric.Line([toCanvasX(0), toCanvasY(y), toCanvasX(WORK_WIDTH), toCanvasY(y)], {
-            stroke: majorGridColor,
-            strokeWidth: 1,
-            selectable: false,
-            evented: false
-        });
-        gridLines.push(line);
-        canvas.add(line);
-        
-        // Y axis label (at left)
+    // Y axis labels
+    for (let y = 0; y <= WORK_HEIGHT; y += labelSpacing) {
         const label = new fabric.Text(Math.round(y).toString(), {
             left: toCanvasX(0) - 5,
             top: toCanvasY(y),

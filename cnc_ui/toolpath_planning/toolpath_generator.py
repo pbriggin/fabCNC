@@ -31,7 +31,9 @@ class ToolpathGenerator:
                  corner_angle_threshold: float = 15.0,  # Increased from 5.0 to be less sensitive to curves
                  feed_rate: float = 12000.0,  # 200 mm/s (firmware max is 300)
                  plunge_rate: float = 3000.0,
-                 rapid_rate: float = 10000.0):  # Rapid/jog moves between cuts (mm/min)
+                 rapid_rate: float = 10000.0,  # Rapid/jog moves between cuts (mm/min)
+                 min_curve_feed_rate: float = 3000.0,  # Minimum feed rate for tight curves (mm/min)
+                 curve_slowdown_radius: float = 50.0):  # Radius below which to start slowing down (mm)
         """
         Initialize the toolpath generator.
         
@@ -42,6 +44,8 @@ class ToolpathGenerator:
             feed_rate: Feed rate for cutting moves (mm/min)
             plunge_rate: Feed rate for Z plunges (mm/min)
             rapid_rate: Feed rate for rapid/travel moves (mm/min)
+            min_curve_feed_rate: Minimum feed rate for tight curves (mm/min)
+            curve_slowdown_radius: Radius below which to start slowing down (mm)
         """
         self.cutting_height = cutting_height
         self.safe_height = safe_height
@@ -49,6 +53,8 @@ class ToolpathGenerator:
         self.feed_rate = feed_rate
         self.plunge_rate = plunge_rate
         self.rapid_rate = rapid_rate
+        self.min_curve_feed_rate = min_curve_feed_rate
+        self.curve_slowdown_radius = curve_slowdown_radius
         self.current_z = safe_height  # Track current Z position
         self.current_a = 0.0  # Track current A position for continuous rotation
         
@@ -78,8 +84,8 @@ class ToolpathGenerator:
         # Process each shape
         for shape_name, points in sorted_shapes:
             logger.info(f"Generating toolpath for {shape_name} with {len(points)} points")
-            # Reset A position tracking for each new shape
-            self.current_a = 0.0
+            # Don't reset A position - keep continuous tracking so the motor
+            # takes the shortest path from the previous shape's ending angle
             
             # Find best starting point (corner if available)
             optimized_points = self._optimize_starting_point(points)
@@ -137,6 +143,10 @@ class ToolpathGenerator:
             "G17 ; Select XY plane",
             "M17 ; Enable all steppers",
             "",
+            "; Home Z and A axes for safe starting position (preserves XY zero)",
+            "G28 Z ; Home Z",
+            "G28 A ; Home A (rotation)",
+            "",
             "; Set speed/accel for cutting",
             "M203 Z25 ; Max Z speed 25 mm/s (1500 mm/min)",
             "M201 X500 Y500 ; Max XY accel 500 mm/s² (reduced for smoother motion)",
@@ -150,10 +160,14 @@ class ToolpathGenerator:
     
     def _generate_footer(self) -> List[str]:
         """Generate GCODE footer for Marlin firmware."""
+        # Find nearest multiple of 360 to current A position (shortest path to an equivalent of 0°)
+        nearest_a_zero = round(self.current_a / 360.0) * 360.0
         return [
             "",
             f"G0 Z{self.safe_height} F{self.plunge_rate} ; Return to safe height",
-            f"G0 X0 Y0 Z0 A0 F{self.rapid_rate} ; Return to origin",
+            f"G0 A{nearest_a_zero:.2f} F{self.rapid_rate} ; Rotate to nearest 0° equivalent",
+            f"G0 X0 Y0 Z0 F{self.rapid_rate} ; Return to XYZ origin",
+            "G92 A0 ; Reset A axis to 0",
             "M400 ; Wait for moves to finish",
             "",
             "; Restore Z and A speed/accel to firmware defaults (safe for homing)",
@@ -201,6 +215,8 @@ class ToolpathGenerator:
             current_point = points[i]
             next_point = points[i + 1]
             
+            is_corner = False
+            
             # Check for corner at current point (if not first or last point)
             if i > 0:
                 prev_point = points[i - 1]
@@ -208,6 +224,7 @@ class ToolpathGenerator:
                 threshold_degrees = math.degrees(self.corner_angle_threshold_radians)
                 
                 if angle_change > threshold_degrees:  # Angle change > threshold
+                    is_corner = True
                     # Lift Z, rotate A, lower Z
                     gcode_lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate} ; Raise Z for corner")
                     target_a = self._calculate_z_rotation(current_point, next_point)
@@ -223,8 +240,22 @@ class ToolpathGenerator:
                 target_a = self._calculate_z_rotation(current_point, next_point)
                 self.current_a = self._calculate_continuous_a(target_a)
             
-            # Cut to next point
-            gcode_lines.append(f"G1 X{next_point[0]:.3f} Y{next_point[1]:.3f} A{self.current_a:.2f} F{self.feed_rate} ; Cut to next point")
+            # Calculate feed rate based on curve radius (only for non-corner segments)
+            # Sharp corners already lift Z, so no need to slow down there
+            if is_corner:
+                # After a corner, use full feed rate (the corner is handled by Z lift)
+                segment_feed_rate = self.feed_rate
+            elif i > 0 and i < len(points) - 2:
+                # We have enough points to calculate curvature at current_point
+                prev_point = points[i - 1]
+                radius = self._calculate_curve_radius(prev_point, current_point, next_point)
+                segment_feed_rate = self._calculate_feed_rate_for_curve(radius)
+            else:
+                # First or last segment, use full feed rate
+                segment_feed_rate = self.feed_rate
+            
+            # Cut to next point with variable feed rate based on curvature
+            gcode_lines.append(f"G1 X{next_point[0]:.3f} Y{next_point[1]:.3f} A{self.current_a:.2f} F{segment_feed_rate:.0f} ; Cut to next point")
         
         # Raise tool to safe height
         gcode_lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate} ; Raise tool to safe height")
@@ -232,6 +263,66 @@ class ToolpathGenerator:
         
         return gcode_lines
     
+    def _calculate_curve_radius(self, p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float]) -> float:
+        """
+        Calculate the radius of curvature at point p2 using the circumradius formula.
+        This uses the formula: R = (a * b * c) / (4 * Area) where a, b, c are side lengths.
+        
+        Args:
+            p1, p2, p3: Three consecutive points
+            
+        Returns:
+            Radius of curvature in mm. Returns float('inf') for straight lines.
+        """
+        # Calculate side lengths
+        a = math.sqrt((p2[0] - p3[0])**2 + (p2[1] - p3[1])**2)  # p2 to p3
+        b = math.sqrt((p1[0] - p3[0])**2 + (p1[1] - p3[1])**2)  # p1 to p3
+        c = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)  # p1 to p2
+        
+        # Check for degenerate cases (very short segments)
+        if a < 1e-6 or b < 1e-6 or c < 1e-6:
+            return float('inf')
+        
+        # Calculate area using cross product (shoelace formula for triangle)
+        # Area = 0.5 * |cross product of (p2-p1) and (p3-p1)|
+        area = abs((p2[0] - p1[0]) * (p3[1] - p1[1]) - (p3[0] - p1[0]) * (p2[1] - p1[1])) / 2.0
+        
+        # If area is very small, points are nearly collinear (straight line)
+        if area < 1e-6:
+            return float('inf')
+        
+        # Circumradius formula: R = (a * b * c) / (4 * Area)
+        radius = (a * b * c) / (4.0 * area)
+        
+        return radius
+    
+    def _calculate_feed_rate_for_curve(self, radius: float) -> float:
+        """
+        Calculate the appropriate feed rate based on curve radius.
+        Uses linear interpolation between min_curve_feed_rate and feed_rate.
+        
+        Args:
+            radius: The radius of curvature in mm
+            
+        Returns:
+            Feed rate in mm/min
+        """
+        # If radius is infinite or very large, use full feed rate
+        if radius >= self.curve_slowdown_radius:
+            return self.feed_rate
+        
+        # For very tight curves (radius approaching 0), use minimum feed rate
+        if radius <= 0:
+            return self.min_curve_feed_rate
+        
+        # Linear interpolation based on radius
+        # At radius = 0, use min_curve_feed_rate
+        # At radius = curve_slowdown_radius, use feed_rate
+        ratio = radius / self.curve_slowdown_radius
+        adjusted_feed = self.min_curve_feed_rate + ratio * (self.feed_rate - self.min_curve_feed_rate)
+        
+        return adjusted_feed
+
     def _calculate_line_angle_change(self, p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float]) -> float:
         """
         Calculate angle change between two line segments: p1->p2 and p2->p3.

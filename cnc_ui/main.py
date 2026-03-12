@@ -71,9 +71,11 @@ toolpath_generator = ToolpathGenerator(
     cutting_height=-30.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=30.0,  # Increased to reduce false corners on curves
-    feed_rate=7500.0,      # mm/min (125 mm/s)
+    feed_rate=8000.0,      # mm/min (133 mm/s)
     plunge_rate=3000.0,    # mm/min
-    rapid_rate=10000.0     # mm/min (167 mm/s) - rapid/jog moves
+    rapid_rate=10000.0,    # mm/min (167 mm/s) - rapid/jog moves
+    min_curve_feed_rate=1000.0,  # mm/min - slow down for tight curves
+    curve_slowdown_radius=75.0   # Start slowing below this radius (mm)
 )
 
 # Global storage for current toolpath visualization data
@@ -119,8 +121,8 @@ async def nest_endpoint(request: Request):
         data = await request.json()
         
         input_shapes = data.get('shapes', [])
-        sheet_width = data.get('sheetWidth', 1375)
-        sheet_height = data.get('sheetHeight', 850)
+        sheet_width = data.get('sheetWidth', 1720)
+        sheet_height = data.get('sheetHeight', 1660)
         offset = data.get('offset', 2)  # mm spacing
         rotations = data.get('rotations', 4)  # Try 4 rotations by default
         
@@ -780,16 +782,16 @@ def create_job_controls():
         
         with ui.row().classes('w-full gap-1'):
             ui.button('Pause', icon='pause', on_click=pause_job) \
-                .props('dense flat') \
+                .props('dense flat no-wrap') \
                 .classes('flex-1') \
-                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff;') \
+                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_running())
             
-            ui.button('Resume', icon='play_circle', on_click=resume_job) \
-                .props('dense flat') \
+            ui.button('Resume', icon='play_arrow', on_click=resume_job) \
+                .props('dense flat no-wrap') \
                 .classes('flex-1') \
-                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff;') \
+                .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.paused)
         
@@ -1563,7 +1565,7 @@ def main_page():
                 with ui.card().classes('w-full h-full').style('padding: 10px; box-sizing: border-box;'):
                     with ui.row().classes('gap-2 w-full').style('height: 100%; flex-wrap: nowrap;'):
                         # Left column: Job file and controls (fixed width)
-                        with ui.column().classes('gap-2').style('flex: 0 0 180px;'):
+                        with ui.column().classes('gap-2').style('flex: 0 0 200px;'):
                             create_file_controls()
                             ui.separator()
                             create_job_controls()
@@ -1617,7 +1619,7 @@ def main_page():
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=30"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=32"></script>')
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''

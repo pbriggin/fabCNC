@@ -98,16 +98,22 @@ class DXFProcessor:
                 elif entity.dxftype() == 'LWPOLYLINE':
                     points = self._process_lwpolyline(entity)
                     if points:
-                        # Reduce points for polylines too
-                        reduced_points = self._reduce_points_by_distance(points, min_distance)
+                        # Detect corners from original vertices (more reliable than post-interpolation detection)
+                        original_verts = [(v[0], v[1]) for v in entity.get_points()]
+                        true_corners = self._find_polyline_corners(original_verts)
+                        # Reduce points while preserving true corner coordinates
+                        reduced_points = self._reduce_points_preserving_corners(points, true_corners, min_distance)
                         shapes[f"shape_{shape_counter}"] = reduced_points
                         shape_counter += 1
                         
                 elif entity.dxftype() == 'POLYLINE':
                     points = self._process_polyline(entity)
                     if points:
-                        # Reduce points for polylines too
-                        reduced_points = self._reduce_points_by_distance(points, min_distance)
+                        # Detect corners from original vertices
+                        original_verts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                        true_corners = self._find_polyline_corners(original_verts)
+                        # Reduce points while preserving true corner coordinates
+                        reduced_points = self._reduce_points_preserving_corners(points, true_corners, min_distance)
                         shapes[f"shape_{shape_counter}"] = reduced_points
                         shape_counter += 1
                         
@@ -257,12 +263,14 @@ class DXFProcessor:
                 else:
                     num_intermediate = 3  # Default for first segment
                 
-                # Add intermediate points
+                # Add intermediate points (skip any too close to endpoint to preserve vertex positions)
                 for j in range(1, num_intermediate):
                     t = j / num_intermediate
                     x = p1[0] + t * (p2[0] - p1[0])
                     y = p1[1] + t * (p2[1] - p1[1])
-                    interpolated_points.append((x, y))
+                    dist_to_p2 = math.sqrt((x - p2[0])**2 + (y - p2[1])**2)
+                    if dist_to_p2 >= 0.05:  # Don't create points that would cause vertex removal in dedup
+                        interpolated_points.append((x, y))
         
         # Add the last point
         interpolated_points.append(original_points[-1])
@@ -901,6 +909,44 @@ class DXFProcessor:
         
         reduced.append(points[-1])
         return reduced
+    
+    def _find_polyline_corners(self, vertices: List[Tuple[float, float]], angle_threshold: float = 15.0) -> List[Tuple[float, float]]:
+        """
+        Find corner vertices in a polyline from original vertex positions.
+        Uses direct angle calculation at each vertex - no windowing needed since
+        polyline vertices are the actual design-specified points.
+        
+        Args:
+            vertices: Original polyline vertex positions
+            angle_threshold: Minimum angle change in degrees to be considered a corner
+            
+        Returns:
+            List of (x, y) coordinates that are corners
+        """
+        if len(vertices) < 3:
+            return []
+        
+        corners = []
+        for i in range(1, len(vertices) - 1):
+            p0, p1, p2 = vertices[i - 1], vertices[i], vertices[i + 1]
+            
+            v1 = (p1[0] - p0[0], p1[1] - p0[1])
+            v2 = (p2[0] - p1[0], p2[1] - p1[1])
+            mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
+            mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
+            if mag1 < 0.0001 or mag2 < 0.0001:
+                continue
+            
+            dot = v1[0] * v2[0] + v1[1] * v2[1]
+            cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+            angle = math.degrees(math.acos(cos_angle))
+            
+            if angle > angle_threshold:
+                corners.append(p1)
+                logger.info(f"  Polyline corner at vertex {i}: angle={angle:.1f}° at ({p1[0]:.4f}, {p1[1]:.4f})")
+        
+        logger.info(f"Found {len(corners)} corners in polyline with {len(vertices)} vertices")
+        return corners
     
     def _find_true_corners(self, points: List[Tuple[float, float]], angle_threshold: float = 30.0) -> List[Tuple[float, float]]:
         """
