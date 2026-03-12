@@ -71,9 +71,9 @@ toolpath_generator = ToolpathGenerator(
     cutting_height=-30.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
     corner_angle_threshold=30.0,  # Increased to reduce false corners on curves
-    feed_rate=8000.0,      # mm/min (133 mm/s)
+    feed_rate=12000.0,     # mm/min (200 mm/s)
     plunge_rate=3000.0,    # mm/min
-    rapid_rate=10000.0,    # mm/min (167 mm/s) - rapid/jog moves
+    rapid_rate=15000.0,    # mm/min (250 mm/s) - rapid/jog moves
     min_curve_feed_rate=1000.0,  # mm/min - slow down for tight curves
     curve_slowdown_radius=75.0   # Start slowing below this radius (mm)
 )
