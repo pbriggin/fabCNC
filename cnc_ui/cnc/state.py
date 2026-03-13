@@ -34,6 +34,10 @@ class MachineState:
     status_text: str = "Idle"
     toolpath_generated: bool = False  # Whether toolpath has been generated and is being previewed
     
+    # Job timing
+    job_start_time: float = 0.0  # time.time() when job started
+    estimated_job_seconds: float = 0.0  # Estimated total job duration
+    
     # Job file info
     loaded_filename: Optional[str] = None
     
@@ -91,12 +95,21 @@ class MachineState:
         with self._lock:
             return self.busy and not self.paused
     
+    def start_job_timer(self, estimated_seconds: float) -> None:
+        """Set job start time and estimate (thread-safe)."""
+        import time as _time
+        with self._lock:
+            self.job_start_time = _time.time()
+            self.estimated_job_seconds = estimated_seconds
+    
     def reset_job(self) -> None:
         """Reset job state (thread-safe)."""
         with self._lock:
             self.busy = False
             self.paused = False
             self.job_progress = 0.0
+            self.job_start_time = 0.0
+            self.estimated_job_seconds = 0.0
             if self.job_loaded:
                 self.status_text = f"Loaded: {self.loaded_filename}"
             else:
