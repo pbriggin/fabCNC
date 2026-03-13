@@ -55,6 +55,7 @@ class ToolpathGenerator:
         self.rapid_rate = rapid_rate
         self.min_curve_feed_rate = min_curve_feed_rate
         self.curve_slowdown_radius = curve_slowdown_radius
+        self.stealthchop = False  # Enable StealthChop for quiet operation (Slow/Medium speeds)
         self.current_z = safe_height  # Track current Z position
         self.current_a = 0.0  # Track current A position for continuous rotation
         
@@ -154,6 +155,10 @@ class ToolpathGenerator:
             "M201 A3000 ; Max A accel 3000 deg/s² (faster rotation at corners)",
             "M204 P2000 T3000 ; Print accel 2000, Travel accel 3000",
             "",
+        ] + ([
+            "M569 S1 X Y ; Enable StealthChop (quiet mode)",
+            "",
+        ] if self.stealthchop else []) + [
             f"G0 Z{self.safe_height} F{self.plunge_rate} ; Move to safe height",
             ""
         ]
@@ -176,6 +181,10 @@ class ToolpathGenerator:
             "M201 A1000 ; Max A accel 1000 deg/s² (default)",
             "M204 P1000 T1000 ; Reset acceleration",
             "",
+        ] + ([
+            "M569 S0 X Y ; Restore SpreadCycle",
+            "",
+        ] if self.stealthchop else []) + [
             "M18 ; Disable steppers"
         ]
     

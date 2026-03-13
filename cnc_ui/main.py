@@ -59,7 +59,7 @@ jog_params = {
 }
 
 # Z cut height parameter (used by toolpath generator)
-z_cut_height = {'value': -30.0}  # Default Z cutting height in mm
+z_cut_height = {'value': -35.0}  # Default Z cutting height in mm (Medium pressure)
 
 # Lock screen configuration
 LOCK_PIN = "1234"  # 4-digit PIN code
@@ -416,10 +416,15 @@ def estimate_gcode_time(gcode_lines: list) -> float:
         da = abs(new_a - cur_a)
         
         # Compute time for each independent axis group
-        # XY: uses the commanded feed rate and print/travel accel
-        xy_time = trapezoidal_time(xy_dist, feed_speed, xy_accel) if xy_dist > 0.001 else 0.0
+        # G1 (cutting) moves: Marlin's lookahead planner chains them and maintains speed
+        # through corners, so pure cruise time (dist/speed) is accurate.
+        # G0 (rapid) moves: isolated point-to-point, full trapezoidal start/stop applies.
+        if is_rapid:
+            xy_time = trapezoidal_time(xy_dist, feed_speed, xy_accel) if xy_dist > 0.001 else 0.0
+        else:
+            xy_time = (xy_dist / feed_speed) if xy_dist > 0.001 and feed_speed > 0 else 0.0
         
-        # Z: limited by its own max speed and accel
+        # Z: limited by its own max speed and accel (always trapezoidal — Z doesn't chain)
         z_speed = min(feed_speed, Z_MAX_SPEED)
         z_time = trapezoidal_time(dz, z_speed, Z_MAX_ACCEL) if dz > 0.001 else 0.0
         
@@ -452,7 +457,7 @@ def create_header():
     pos_labels = {}
     tabs = None
     
-    with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap;'):
+    with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap; padding-top: 8px;'):
         # Left side: App name with icon + Tabs
         with ui.row().classes('items-center gap-4').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
@@ -861,7 +866,7 @@ def create_homing_controls():
 def create_file_controls():
     """Create the compact file upload and management panel."""
     with ui.column().classes('w-full gap-2'):
-        ui.label('Job File').classes('text-body2 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 4px 10px; border-radius: 4px; height: 32px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
+        ui.label('Job File').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
         loaded_file_label = ui.label('No file loaded').classes('text-body2').style('color: #777;')
         
@@ -900,23 +905,29 @@ def create_job_controls():
     """Create the compact job execution control panel."""
     global job_time_label
     with ui.column().classes('w-full gap-1'):
-        ui.label('Job Control').classes('text-body2 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 4px 10px; border-radius: 4px; height: 32px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
+        ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
-        # Z cut height input
-        with ui.row().classes('w-full items-center gap-2'):
-            ui.label('Z Cut Height:').style('color: #aaa; font-size: 13px; white-space: nowrap;')
-            ui.number(value=z_cut_height['value'], format='%.1f', step=0.5, suffix='mm',
-                      on_change=lambda e: z_cut_height.update({'value': e.value})) \
-                .props('dense outlined') \
-                .classes('flex-1') \
-                .style('font-size: 13px;')
-        
-        # Progress bar
-        job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px;')
-        job_progress.bind_value_from(machine_state, 'job_progress')
-        
-        # Time estimate label
-        job_time_label = ui.label('Job Time: --').classes('w-full text-center').style('color: #66BB6A; font-size: 14px;')
+        # Cut pressure + speed selectors (grid keeps dropdowns aligned)
+        _pressure_map = {'Trace': -25.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
+        _speed_map = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
+        def _set_cut_speed(name):
+            feed, rapid = _speed_map[name]
+            toolpath_generator.feed_rate = feed
+            toolpath_generator.rapid_rate = rapid
+            toolpath_generator.stealthchop = (name in ('Slow', 'Medium'))
+        with ui.grid(columns='auto 1fr').classes('w-full items-center gap-x-2 gap-y-1'):
+            ui.label('Cut Pressure:').style('color: #aaa; font-size: 13px;')
+            ui.select(
+                options=['Trace', 'Light', 'Medium', 'Hard'],
+                value='Medium',
+                on_change=lambda e: z_cut_height.update({'value': _pressure_map[e.value]})
+            ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+            ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
+            ui.select(
+                options=['Slow', 'Medium', 'Fast'],
+                value='Fast',
+                on_change=lambda e: _set_cut_speed(e.value)
+            ).props('dense outlined').classes('w-full').style('font-size: 13px;')
         
         # Generate Toolpath / Clear Toolpath toggle button
         toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
@@ -952,6 +963,13 @@ def create_job_controls():
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.busy)
+
+        # Progress bar
+        job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px; margin-top: 8px;')
+        job_progress.bind_value_from(machine_state, 'job_progress')
+
+        # Time estimate label
+        job_time_label = ui.label('Job Time: --').classes('w-full text-center').style('color: #66BB6A; font-size: 14px;')
 
 
 # Event handlers
@@ -1384,10 +1402,6 @@ def start_job():
     
     ui.notify('Starting job...', type='info')
     
-    # Estimate job time from gcode
-    estimated_seconds = estimate_gcode_time(current_gcode)
-    machine_state.start_job_timer(estimated_seconds)
-    
     # Start job without callback - we'll monitor completion via state
     cnc_controller.start_job(current_gcode)
 
@@ -1440,26 +1454,10 @@ async def update_ui(pos_labels, status_label):
             ui.notify('Job error!', type='negative')
         _previous_status['text'] = current_status
     
-    # Update job time estimate
+    # Update job time estimate — only show static estimate, never countdown
     if job_time_label:
-        import time as _time
-        if machine_state.busy and machine_state.estimated_job_seconds > 0:
-            elapsed = _time.time() - machine_state.job_start_time
-            progress = machine_state.job_progress
-            if progress > 0.01:
-                # Use elapsed/progress to estimate total, then compute remaining
-                estimated_total = elapsed / progress
-                remaining = max(0, estimated_total - elapsed)
-                job_time_label.set_text(f'Job Time: {format_time(remaining)} left')
-            else:
-                est = machine_state.estimated_job_seconds
-                job_time_label.set_text(f'Job Time: {format_time(est)}')
-        elif current_status == 'Complete' and machine_state.job_start_time > 0:
-            elapsed = _time.time() - machine_state.job_start_time
-            job_time_label.set_text(f'Job Time: {format_time(elapsed)}')
-        elif not machine_state.busy:
-            if machine_state.toolpath_generated and machine_state.estimated_job_seconds > 0:
-                job_time_label.set_text(f'Job Time: {format_time(machine_state.estimated_job_seconds)}')
+        if machine_state.estimated_job_seconds > 0:
+            job_time_label.set_text(f'Job Time: {format_time(machine_state.estimated_job_seconds)}')
             elif not machine_state.toolpath_generated:
                 job_time_label.set_text('Job Time: --')
 
@@ -1759,7 +1757,7 @@ def main_page():
                 with ui.card().classes('w-full h-full').style('padding: 10px; box-sizing: border-box;'):
                     with ui.row().classes('gap-2 w-full').style('height: 100%; flex-wrap: nowrap;'):
                         # Left column: Job file and controls (fixed width, scrollable)
-                        with ui.column().classes('gap-2').style('flex: 0 0 200px; overflow-y: auto; max-height: 100%;'):
+                        with ui.column().classes('gap-2').style('flex: 0 0 200px; max-height: 100%; overflow-y: auto;'):
                             create_file_controls()
                             ui.separator()
                             create_job_controls()
@@ -1825,23 +1823,29 @@ def main_page():
                             # Initialize canvas after page fully loads
                             async def init_canvas_after_load():
                                 await ui.context.client.connected()
-                                await ui.run_javascript('''
-                                    // Wait for Fabric.js and our canvas module to be ready
-                                    function initWhenReady() {
-                                        const container = document.getElementById('canvas-container');
-                                        const canvasEl = document.getElementById('toolpath-canvas');
-                                        if (typeof fabric !== 'undefined' && window.toolpathCanvas && container && canvasEl) {
-                                            console.log('Initializing toolpath canvas...');
-                                            window.toolpathCanvas.init("toolpath-canvas");
-                                            return true;
-                                        } else {
-                                            console.log('Waiting for dependencies... fabric:', typeof fabric, 'toolpathCanvas:', !!window.toolpathCanvas, 'container:', !!container);
-                                            setTimeout(initWhenReady, 100);
-                                            return false;
-                                        }
-                                    }
-                                    initWhenReady();
-                                ''')
+                                for _ in range(10):  # retry up to 10x if JS not ready
+                                    try:
+                                        await ui.run_javascript('''
+                                            // Wait for Fabric.js and our canvas module to be ready
+                                            function initWhenReady() {
+                                                const container = document.getElementById('canvas-container');
+                                                const canvasEl = document.getElementById('toolpath-canvas');
+                                                if (typeof fabric !== 'undefined' && window.toolpathCanvas && container && canvasEl) {
+                                                    console.log('Initializing toolpath canvas...');
+                                                    window.toolpathCanvas.init("toolpath-canvas");
+                                                    return true;
+                                                } else {
+                                                    console.log('Waiting for dependencies... fabric:', typeof fabric, 'toolpathCanvas:', !!window.toolpathCanvas, 'container:', !!container);
+                                                    setTimeout(initWhenReady, 100);
+                                                    return false;
+                                                }
+                                            }
+                                            initWhenReady();
+                                        ''', timeout=3.0)
+                                        break  # success
+                                    except Exception:
+                                        import asyncio
+                                        await asyncio.sleep(0.5)
                             
                             # Schedule initialization
                             ui.timer(0.5, init_canvas_after_load, once=True)
@@ -1979,7 +1983,9 @@ def main_page():
                                     .props('color=negative dense').style('font-size: 13px;')
         
         # Start periodic UI update timer (10 Hz = 100ms)
-        ui.timer(0.1, lambda: update_ui(pos_labels, status_label))
+        async def _update_ui_timer():
+            await update_ui(pos_labels, status_label)
+        ui.timer(0.1, _update_ui_timer)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
