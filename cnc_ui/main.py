@@ -301,157 +301,6 @@ def run_packaide_nesting(input_shapes, sheet_width, sheet_height, offset, rotati
 # Current loaded G-code
 current_gcode = []
 
-# UI element references (set during page build)
-job_time_label = None
-
-
-def estimate_gcode_time(gcode_lines: list) -> float:
-    """Estimate job time in seconds using trapezoidal motion profiles.
-    
-    Models acceleration/deceleration for each move using the machine's
-    configured accel values (from M204, M201). Each move accelerates from
-    rest to feed rate (or as fast as the distance allows) then decelerates.
-    
-    Machine parameters (from gcode header):
-      - M204 P2000 T3000: G1 accel 2000 mm/s², G0 accel 3000 mm/s²
-      - M201 Z100: Z max accel 100 mm/s²
-      - M203 Z25: Z max speed 25 mm/s
-      - M201 A3000: A max accel 3000 deg/s²
-    """
-    import re, math
-    
-    # Machine acceleration parameters (mm/s² or deg/s²)
-    ACCEL_G1 = 2000.0    # M204 P2000 - printing/cutting accel (mm/s²)
-    ACCEL_G0 = 3000.0    # M204 T3000 - travel/rapid accel (mm/s²)
-    Z_MAX_ACCEL = 100.0  # M201 Z100 (mm/s²)
-    Z_MAX_SPEED = 25.0   # M203 Z25 (mm/s)
-    A_MAX_ACCEL = 3000.0 # M201 A3000 (deg/s²)
-    
-    def trapezoidal_time(distance, max_speed, accel):
-        """Time for a trapezoidal motion profile: accel to max_speed, cruise, decel to stop.
-        If distance is too short to reach max_speed, uses triangular profile."""
-        if distance < 0.0001 or max_speed < 0.0001 or accel < 0.0001:
-            return 0.0
-        # Distance needed to accel to max_speed and decel back to 0
-        d_accel = max_speed ** 2 / (2.0 * accel)  # distance for one ramp
-        if 2.0 * d_accel >= distance:
-            # Triangular profile — never reaches max_speed
-            # d = v_peak² / accel  →  v_peak = sqrt(d * accel)
-            # t = 2 * v_peak / accel
-            v_peak = math.sqrt(distance * accel)
-            return 2.0 * v_peak / accel
-        else:
-            # Trapezoidal profile
-            t_accel = max_speed / accel  # time to accel (and same to decel)
-            d_cruise = distance - 2.0 * d_accel
-            t_cruise = d_cruise / max_speed
-            return 2.0 * t_accel + t_cruise
-    
-    total_seconds = 0.0
-    cur_x, cur_y, cur_z, cur_a = 0.0, 0.0, 0.0, 0.0
-    cur_feed = 1000.0  # default feed rate mm/min
-    
-    for line in gcode_lines:
-        line = line.strip()
-        if line.startswith(';') or not line:
-            continue
-        
-        # Track M204 accel changes
-        if line.startswith('M204'):
-            for match in re.finditer(r'([PT])(\d+)', line):
-                val = float(match.group(2))
-                if match.group(1) == 'P':
-                    ACCEL_G1 = val
-                elif match.group(1) == 'T':
-                    ACCEL_G0 = val
-            continue
-        
-        # Track M201 per-axis accel changes
-        if line.startswith('M201'):
-            for match in re.finditer(r'([ZA])(\d+)', line):
-                val = float(match.group(2))
-                if match.group(1) == 'Z':
-                    Z_MAX_ACCEL = val
-                elif match.group(1) == 'A':
-                    A_MAX_ACCEL = val
-            continue
-        
-        # Track M203 max speed changes
-        if line.startswith('M203'):
-            m = re.search(r'Z(\d+)', line)
-            if m:
-                Z_MAX_SPEED = float(m.group(1))
-            continue
-        
-        # Only process G0 and G1 moves
-        if not (line.startswith('G0') or line.startswith('G1')):
-            if line.startswith('G28'):
-                total_seconds += 3.0  # rough estimate for homing
-            continue
-        
-        is_rapid = line.startswith('G0')
-        xy_accel = ACCEL_G0 if is_rapid else ACCEL_G1
-        
-        # Parse parameters
-        params = {}
-        for match in re.finditer(r'([XYZAF])([-+]?[0-9]*\.?[0-9]+)', line):
-            params[match.group(1)] = float(match.group(2))
-        
-        new_x = params.get('X', cur_x)
-        new_y = params.get('Y', cur_y)
-        new_z = params.get('Z', cur_z)
-        new_a = params.get('A', cur_a)
-        if 'F' in params:
-            cur_feed = params['F']
-        
-        feed_speed = cur_feed / 60.0  # convert mm/min to mm/s (or deg/s for A)
-        
-        # XY distance
-        dx = new_x - cur_x
-        dy = new_y - cur_y
-        xy_dist = math.sqrt(dx**2 + dy**2)
-        
-        # Z distance (separate axis with its own accel/max speed)
-        dz = abs(new_z - cur_z)
-        
-        # A distance (separate axis with its own accel)
-        da = abs(new_a - cur_a)
-        
-        # Compute time for each independent axis group
-        # G1 (cutting) moves: Marlin's lookahead planner chains them and maintains speed
-        # through corners, so pure cruise time (dist/speed) is accurate.
-        # G0 (rapid) moves: isolated point-to-point, full trapezoidal start/stop applies.
-        if is_rapid:
-            xy_time = trapezoidal_time(xy_dist, feed_speed, xy_accel) if xy_dist > 0.001 else 0.0
-        else:
-            xy_time = (xy_dist / feed_speed) if xy_dist > 0.001 and feed_speed > 0 else 0.0
-        
-        # Z: limited by its own max speed and accel (always trapezoidal — Z doesn't chain)
-        z_speed = min(feed_speed, Z_MAX_SPEED)
-        z_time = trapezoidal_time(dz, z_speed, Z_MAX_ACCEL) if dz > 0.001 else 0.0
-        
-        # A: uses commanded feed rate (deg/s) and A accel
-        a_time = trapezoidal_time(da, feed_speed, A_MAX_ACCEL) if da > 0.01 else 0.0
-        
-        # Axes move simultaneously — total time is the slowest axis
-        move_time = max(xy_time, z_time, a_time)
-        total_seconds += move_time
-        
-        cur_x, cur_y, cur_z, cur_a = new_x, new_y, new_z, new_a
-    
-    return total_seconds
-
-
-def format_time(seconds: float) -> str:
-    """Format seconds into XmXXs."""
-    if seconds < 0:
-        return "0m00s"
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h}h{m:02d}m{s:02d}s"
-    return f"{m}m{s:02d}s"
-
 
 def check_for_updates():
     """Fetch origin and return True if new commits are available on main."""
@@ -476,7 +325,6 @@ def check_for_updates():
 
 def create_header():
     """Create the application header with tabs, position, status, and controls."""
-    global job_time_label
     pos_labels = {}
     tabs = None
     
@@ -907,7 +755,6 @@ def create_file_controls():
 
 def create_job_controls():
     """Create the compact job execution control panel."""
-    global job_time_label
     with ui.column().classes('w-full gap-1'):
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
@@ -972,9 +819,6 @@ def create_job_controls():
         # Progress bar
         job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px; margin-top: 8px;')
         job_progress.bind_value_from(machine_state, 'job_progress')
-
-        # Time estimate label
-        job_time_label = ui.label('Job Time: --').classes('w-full text-center').style('color: #66BB6A; font-size: 14px;')
 
 
 # Event handlers
@@ -1268,14 +1112,11 @@ async def toggle_toolpath(button):
         # Clear toolpath mode
         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
         machine_state.set_toolpath_generated(False)
-        machine_state.estimated_job_seconds = 0.0
         button.props('icon=route')
         button.set_text('Generate Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
         current_gcode = []
         ui.notify('Toolpath cleared - shapes are now editable', type='info')
-        if job_time_label:
-            job_time_label.set_text('Job Time: --')
     else:
         # Generate toolpath mode
         if not current_toolpath_shapes:
@@ -1332,13 +1173,6 @@ async def toggle_toolpath(button):
         button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
         
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
-        
-        # Compute and store time estimate
-        if current_gcode:
-            est = estimate_gcode_time(current_gcode)
-            machine_state.estimated_job_seconds = est
-            if job_time_label:
-                job_time_label.set_text(f'Job Time: {format_time(est)}')
 
 
 def start_job():
@@ -1415,13 +1249,6 @@ async def update_ui(pos_labels, status_label):
         elif current_status == 'Error':
             ui.notify('Job error!', type='negative')
         _previous_status['text'] = current_status
-    
-    # Update job time estimate — only show static estimate, never countdown
-    if job_time_label:
-        if machine_state.estimated_job_seconds > 0:
-            job_time_label.set_text(f'Job Time: {format_time(machine_state.estimated_job_seconds)}')
-        elif not machine_state.toolpath_generated:
-            job_time_label.set_text('Job Time: --')
 
 
 @ui.page('/')
