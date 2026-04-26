@@ -1175,7 +1175,7 @@ async def toggle_toolpath(button):
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
 
 
-def start_job():
+async def start_job():
     """Handle start job button click - streams generated gcode via serial."""
     global current_gcode
     
@@ -1186,7 +1186,29 @@ def start_job():
     if not current_gcode:
         ui.notify('No toolpath generated', type='warning')
         return
-    
+
+    # Safety confirmation dialog
+    confirmed = False
+    with ui.dialog() as dialog, ui.card().classes('w-96'):
+        ui.label('Safety Check').classes('text-h6 font-bold')
+        ui.separator()
+        ui.label('Are all personnel and limbs clear of the cutting table?') \
+            .classes('text-body1').style('margin: 12px 0;')
+        with ui.row().classes('w-full justify-end gap-2').style('margin-top: 8px;'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
+            def _confirm():
+                nonlocal confirmed
+                confirmed = True
+                dialog.close()
+
+            ui.button('Confirm — Begin Cut', on_click=_confirm, icon='play_arrow') \
+                .style('background-color: #e53935; color: white;')
+
+    await dialog
+    if not confirmed:
+        return
+
     # Debug: Show gcode summary
     print(f"\n--- Starting Job ---")
     g0_count = sum(1 for line in current_gcode if line.startswith('G0'))
