@@ -1559,7 +1559,7 @@ def main_page():
         if available:
             update_btn.set_text('Update Software')
             update_btn.props('dense flat no-caps icon=system_update_alt')
-            update_btn.style('font-size: 11px; min-width: 140px; color: #66bb6a;')
+            update_btn.style('font-size: 11px; min-width: 140px; color: #66bb6a; background: #2d4a2d; border: 1px solid #3d5a3d; border-radius: 9999px;')
             update_btn.enable()
         else:
             update_btn.set_text('Software Up To Date')
