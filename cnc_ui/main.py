@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.6"
+APP_VERSION = "v1.0.9"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -786,7 +786,14 @@ def create_job_controls():
             .props('dense flat') \
             .classes('w-full') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
-        
+
+        ui.button('Outline Job', icon='crop_free', on_click=outline_job) \
+            .props('dense flat') \
+            .classes('w-full') \
+            .style('font-size: 14px; background-color: #2a2a2a; color: #FFB300;') \
+            .bind_enabled_from(machine_state, '_lock',
+                             backward=lambda _: machine_state.job_loaded and machine_state.is_idle())
+
         ui.button('Start', icon='play_arrow', on_click=start_job) \
             .props('dense flat') \
             .classes('w-full') \
@@ -1173,6 +1180,54 @@ async def toggle_toolpath(button):
         button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
         
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
+
+
+async def outline_job():
+    """Trace the bounding box of loaded shapes at safe height to show material placement."""
+    global current_toolpath_shapes
+
+    if not current_toolpath_shapes:
+        ui.notify('No shapes loaded', type='warning')
+        return
+
+    # Fetch latest canvas positions (shapes may have been moved)
+    try:
+        positions_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getPositions())')
+        if positions_json:
+            positions = json.loads(positions_json)
+            if positions:
+                current_toolpath_shapes = {name: [tuple(p) for p in pts] for name, pts in positions.items()}
+    except Exception as e:
+        logger.warning(f'Could not fetch canvas positions for outline: {e}')
+
+    # Compute bounding box across all shapes
+    all_x = [p[0] for pts in current_toolpath_shapes.values() for p in pts]
+    all_y = [p[1] for pts in current_toolpath_shapes.values() for p in pts]
+    if not all_x:
+        ui.notify('No shape points found', type='warning')
+        return
+
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+
+    safe_z = toolpath_generator.safe_height
+    rapid = toolpath_generator.rapid_rate
+    plunge = toolpath_generator.plunge_rate
+
+    outline_gcode = [
+        'G90',                                          # absolute positioning
+        f'G0 Z{safe_z:.3f} F{plunge:.0f}',            # raise to safe height
+        f'G0 X{min_x:.3f} Y{min_y:.3f} F{rapid:.0f}', # corner 1 (origin)
+        f'G0 X{max_x:.3f} Y{min_y:.3f}',              # corner 2
+        f'G0 X{max_x:.3f} Y{max_y:.3f}',              # corner 3
+        f'G0 X{min_x:.3f} Y{max_y:.3f}',              # corner 4
+        f'G0 X{min_x:.3f} Y{min_y:.3f}',              # back to start
+    ]
+
+    w = max_x - min_x
+    h = max_y - min_y
+    ui.notify(f'Outlining job area: {w:.0f} x {h:.0f} mm', type='info')
+    cnc_controller.start_job(outline_gcode)
 
 
 async def start_job():
