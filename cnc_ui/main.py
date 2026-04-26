@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.10"
+APP_VERSION = "v1.0.11"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1240,18 +1240,21 @@ async def outline_job():
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
 
+    trace_z = z_cut_height['value']
     safe_z = toolpath_generator.safe_height
     rapid = toolpath_generator.rapid_rate
     plunge = toolpath_generator.plunge_rate
 
     outline_gcode = [
         'G90',                                          # absolute positioning
-        f'G0 Z{safe_z:.3f} F{plunge:.0f}',            # raise to safe height
-        f'G0 X{min_x:.3f} Y{min_y:.3f} F{rapid:.0f}', # corner 1 (origin)
-        f'G0 X{max_x:.3f} Y{min_y:.3f}',              # corner 2
-        f'G0 X{max_x:.3f} Y{max_y:.3f}',              # corner 3
-        f'G0 X{min_x:.3f} Y{max_y:.3f}',              # corner 4
-        f'G0 X{min_x:.3f} Y{min_y:.3f}',              # back to start
+        f'G0 Z{safe_z:.3f} F{plunge:.0f}',            # raise to safe height first
+        f'G0 X{min_x:.3f} Y{min_y:.3f} F{rapid:.0f}', # move to corner 1
+        f'G1 Z{trace_z:.3f} F{plunge:.0f}',           # lower to trace height
+        f'G1 X{max_x:.3f} Y{min_y:.3f} F{rapid:.0f}', # corner 2
+        f'G1 X{max_x:.3f} Y{max_y:.3f}',              # corner 3
+        f'G1 X{min_x:.3f} Y{max_y:.3f}',              # corner 4
+        f'G1 X{min_x:.3f} Y{min_y:.3f}',              # back to start
+        f'G0 Z{safe_z:.3f} F{plunge:.0f}',            # raise before homing
         'G28 X Y',                                     # return home after outline
     ]
 
