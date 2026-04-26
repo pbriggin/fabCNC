@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.9"
+APP_VERSION = "v1.0.10"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -624,7 +624,7 @@ def create_jog_controls():
                     });
                 ''')
                 
-                # Register event handler
+                # Register event handler (jog_axis is async — NiceGUI awaits coroutine results)
                 ui.on('jog', lambda e: jog_axis(e.args['axis'], e.args['distance']))
                 
                 # Home button in center (r=31, so diameter=62)
@@ -830,8 +830,10 @@ def create_job_controls():
 
 # Event handlers
 
-def jog_axis(axis: str, distance: float):
+async def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
+    if not await safety_confirm():
+        return
     print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
 
@@ -1182,12 +1184,40 @@ async def toggle_toolpath(button):
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
 
 
+async def safety_confirm() -> bool:
+    """Show safety check dialog. Returns True if the user confirmed, False if cancelled."""
+    confirmed = False
+    with ui.dialog() as dialog, ui.card().classes('w-96'):
+        with ui.row().classes('items-center gap-2'):
+            ui.icon('warning', size='28px').style('color: #FFA726;')
+            ui.label('Safety Check').classes('text-h6 font-bold')
+        ui.separator()
+        ui.label('Are all personnel and limbs clear of the cutting table?') \
+            .classes('text-body1').style('margin: 12px 0;')
+        with ui.row().classes('w-full justify-end gap-2').style('margin-top: 8px;'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
+            def _confirm():
+                nonlocal confirmed
+                confirmed = True
+                dialog.close()
+
+            ui.button('Confirm', on_click=_confirm, icon='check') \
+                .style('background-color: #e53935; color: white;')
+
+    await dialog
+    return confirmed
+
+
 async def outline_job():
     """Trace the bounding box of loaded shapes at safe height to show material placement."""
     global current_toolpath_shapes
 
     if not current_toolpath_shapes:
         ui.notify('No shapes loaded', type='warning')
+        return
+
+    if not await safety_confirm():
         return
 
     # Fetch latest canvas positions (shapes may have been moved)
@@ -1222,6 +1252,7 @@ async def outline_job():
         f'G0 X{max_x:.3f} Y{max_y:.3f}',              # corner 3
         f'G0 X{min_x:.3f} Y{max_y:.3f}',              # corner 4
         f'G0 X{min_x:.3f} Y{min_y:.3f}',              # back to start
+        'G28 X Y',                                     # return home after outline
     ]
 
     w = max_x - min_x
@@ -1242,28 +1273,7 @@ async def start_job():
         ui.notify('No toolpath generated', type='warning')
         return
 
-    # Safety confirmation dialog
-    confirmed = False
-    with ui.dialog() as dialog, ui.card().classes('w-96'):
-        with ui.row().classes('items-center gap-2'):
-            ui.icon('warning', size='28px').style('color: #FFA726;')
-            ui.label('Safety Check').classes('text-h6 font-bold')
-        ui.separator()
-        ui.label('Are all personnel and limbs clear of the cutting table?') \
-            .classes('text-body1').style('margin: 12px 0;')
-        with ui.row().classes('w-full justify-end gap-2').style('margin-top: 8px;'):
-            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
-
-            def _confirm():
-                nonlocal confirmed
-                confirmed = True
-                dialog.close()
-
-            ui.button('Confirm — Begin Cut', on_click=_confirm, icon='play_arrow') \
-                .style('background-color: #e53935; color: white;')
-
-    await dialog
-    if not confirmed:
+    if not await safety_confirm():
         return
 
     # Debug: Show gcode summary
