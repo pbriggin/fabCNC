@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 # Application version
 APP_VERSION = "v1.0.0"
 
+# Repository root (one level above cnc_ui/)
+REPO_DIR = Path(__file__).parent.parent
+
+# Update check state
+update_state = {'available': False}
+
 # Mount static files directory
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
 
@@ -451,6 +457,27 @@ def format_time(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
+def check_for_updates():
+    """Fetch origin and return True if new commits are available on main."""
+    try:
+        subprocess.run(
+            ['git', '-C', str(REPO_DIR), 'fetch', 'origin', 'main'],
+            capture_output=True, timeout=15
+        )
+        local = subprocess.run(
+            ['git', '-C', str(REPO_DIR), 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        remote = subprocess.run(
+            ['git', '-C', str(REPO_DIR), 'rev-parse', 'origin/main'],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        return bool(local and remote and local != remote)
+    except Exception as e:
+        logger.warning(f"Update check failed: {e}")
+        return False
+
+
 def create_header():
     """Create the application header with tabs, position, status, and controls."""
     global job_time_label
@@ -476,7 +503,7 @@ def create_header():
                 ui.icon('radio_button_checked', size='10px').classes('text-green-4')
                 status_label = ui.label('Idle').classes('text-caption font-bold text-green-4')
         
-        # Right side: Position display + Version
+        # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
             for axis in ['X', 'Y', 'Z', 'A']:
                 with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
@@ -484,9 +511,13 @@ def create_header():
                     unit = '°' if axis == 'A' else ''
                     pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
             
+            update_btn = ui.button('Software Up To Date', icon='check_circle') \
+                .props('dense flat color=grey-6 no-caps') \
+                .style('font-size: 11px; min-width: 140px;')
+            
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
-    return pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab
+    return pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn
 
 
 def create_position_display():
@@ -925,9 +956,10 @@ def create_job_controls():
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
             ui.select(
                 options=['Slow', 'Medium', 'Fast'],
-                value='Fast',
+                value='Medium',
                 on_change=lambda e: _set_cut_speed(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+        _set_cut_speed('Medium')
         
         # Generate Toolpath / Clear Toolpath toggle button
         toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
@@ -1458,8 +1490,8 @@ async def update_ui(pos_labels, status_label):
     if job_time_label:
         if machine_state.estimated_job_seconds > 0:
             job_time_label.set_text(f'Job Time: {format_time(machine_state.estimated_job_seconds)}')
-            elif not machine_state.toolpath_generated:
-                job_time_label.set_text('Job Time: --')
+        elif not machine_state.toolpath_generated:
+            job_time_label.set_text('Job Time: --')
 
 
 @ui.page('/')
@@ -1735,7 +1767,45 @@ def main_page():
         </script>
     ''')
     
-    pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab = create_header()
+    pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn = create_header()
+    
+    # Update button click handler
+    async def do_software_update():
+        import asyncio
+        import concurrent.futures
+        update_btn.set_text('Updating...')
+        update_btn.props('color=orange-7 icon=hourglass_top')
+        update_btn.disable()
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            await loop.run_in_executor(
+                executor,
+                lambda: subprocess.run(
+                    ['git', '-C', str(REPO_DIR), 'pull', 'origin', 'main'],
+                    capture_output=True, timeout=60
+                )
+            )
+        subprocess.Popen(['sudo', 'systemctl', 'restart', 'fabcnc.service'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    update_btn.on_click(do_software_update)
+
+    # Periodic update check (every 30 seconds)
+    async def _check_update_timer():
+        import asyncio
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            available = await loop.run_in_executor(executor, check_for_updates)
+        update_state['available'] = available
+        if available:
+            update_btn.set_text('Update Software')
+            update_btn.props('color=positive icon=system_update_alt')
+            update_btn.enable()
+        else:
+            update_btn.set_text('Software Up To Date')
+            update_btn.props('color=grey-6 icon=check_circle')
+    ui.timer(30.0, _check_update_timer)
     
     # Register JavaScript functions for jog control
     ui.run_javascript('''
@@ -1811,7 +1881,7 @@ def main_page():
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=32"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=33"></script>')
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
