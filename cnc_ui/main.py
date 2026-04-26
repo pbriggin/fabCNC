@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.4"
+APP_VERSION = "v1.0.5"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -332,7 +332,7 @@ def create_header():
         # Left side: App name with icon + Tabs
         with ui.row().classes('items-center gap-4').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
-                ui.icon('precision_manufacturing', size='24px').classes('text-blue-4')
+                ui.image('/static/favicon.svg').style('width: 24px; height: 24px;')
                 ui.label('fabCNC').classes('text-h6 font-bold')
             
             # Tabs in header
