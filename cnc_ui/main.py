@@ -1190,7 +1190,9 @@ async def start_job():
     # Safety confirmation dialog
     confirmed = False
     with ui.dialog() as dialog, ui.card().classes('w-96'):
-        ui.label('Safety Check').classes('text-h6 font-bold')
+        with ui.row().classes('items-center gap-2'):
+            ui.icon('warning', size='28px').style('color: #FFA726;')
+            ui.label('Safety Check').classes('text-h6 font-bold')
         ui.separator()
         ui.label('Are all personnel and limbs clear of the cutting table?') \
             .classes('text-body1').style('margin: 12px 0;')
