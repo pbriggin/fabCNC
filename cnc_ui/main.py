@@ -759,7 +759,7 @@ def create_job_controls():
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
-        _pressure_map = {'Trace': -25.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
+        _pressure_map = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
         _speed_map = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
         def _set_cut_speed(name):
             feed, rapid = _speed_map[name]
