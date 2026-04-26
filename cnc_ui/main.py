@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.1"
+APP_VERSION = "v1.0.2"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -356,8 +356,8 @@ def create_header():
                     pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
-                .props('dense flat no-caps') \
-                .style('font-size: 11px; min-width: 140px; color: #888;')
+                .props('dense flat no-caps color=grey-6') \
+                .style('font-size: 11px; min-width: 140px;')
             
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
@@ -1558,13 +1558,13 @@ def main_page():
         update_state['available'] = available
         if available:
             update_btn.set_text('Update Software')
-            update_btn.props('dense flat no-caps icon=system_update_alt')
-            update_btn.style('font-size: 11px; min-width: 140px; color: #66bb6a; background: #2d4a2d; border: 1px solid #3d5a3d; border-radius: 9999px;')
+            update_btn.props('dense flat no-caps icon=system_update_alt color=green-5')
+            update_btn.style('font-size: 11px; min-width: 140px; background: #2d4a2d; border: 1px solid #3d5a3d; border-radius: 9999px;')
             update_btn.enable()
         else:
             update_btn.set_text('Software Up To Date')
-            update_btn.props('dense flat no-caps icon=check_circle')
-            update_btn.style('font-size: 11px; min-width: 140px; color: #888;')
+            update_btn.props('dense flat no-caps icon=check_circle color=grey-6')
+            update_btn.style('font-size: 11px; min-width: 140px; background: none; border: none;')
     ui.timer(30.0, _check_update_timer)
     
     # Register JavaScript functions for jog control
