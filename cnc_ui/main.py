@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.2"
+APP_VERSION = "v1.0.3"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -746,9 +746,9 @@ def create_file_controls():
         
         # Save/Load canvas buttons
         with ui.row().classes('w-full gap-1'):
-            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
-            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
-            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
+            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
+            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
+            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
         
         return loaded_file_label
 
