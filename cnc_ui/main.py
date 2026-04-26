@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.3"
+APP_VERSION = "v1.0.4"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1825,7 +1825,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         host='0.0.0.0',
         port=8080,
         title='fabCNC Controller',
-        favicon='🔧',
+        favicon=Path(__file__).parent / 'static' / 'favicon.svg',
         dark=None,  # Auto-detect system preference
         reload=False,
         show=False  # Don't auto-open browser (for kiosk mode)
