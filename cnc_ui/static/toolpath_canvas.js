@@ -174,8 +174,17 @@ function initCanvas(elementId) {
     
     // Save undo state before any transform starts
     canvas.on('mouse:down', function(e) {
-        if (e.target && e.target.shapeName) {
+        if (e.target && (e.target.shapeName || e.target.type === 'activeSelection')) {
             saveUndoState();
+        }
+    });
+
+    // Capture start position of a multi-selection before any drag begins
+    canvas.on('before:transform', function(e) {
+        const obj = e.transform && e.transform.target;
+        if (obj && obj.type === 'activeSelection') {
+            obj.__startLeft = obj.left;
+            obj.__startTop  = obj.top;
         }
     });
     
@@ -184,14 +193,26 @@ function initCanvas(elementId) {
     
     // Handle object movement and transforms
     canvas.on('object:moved', function(e) {
-        console.log('=== object:moved EVENT FIRED ===', e.target ? e.target.shapeName : 'no target');
-        onShapeMoved(e);
+        const obj = e.target;
+        if (obj && obj.type === 'activeSelection') {
+            console.log('=== object:moved (activeSelection) ===');
+            onGroupMoved(obj);
+        } else {
+            console.log('=== object:moved EVENT FIRED ===', obj ? obj.shapeName : 'no target');
+            onShapeMoved(e);
+        }
     });
     canvas.on('object:scaled', onShapeScaled);
     canvas.on('object:rotated', onShapeRotated);
     canvas.on('object:modified', function(e) {
-        console.log('=== object:modified EVENT FIRED ===', e.target ? e.target.shapeName : 'no target');
-        onShapeModified(e);
+        const obj = e.target;
+        if (obj && obj.type === 'activeSelection') {
+            console.log('=== object:modified (activeSelection) ===');
+            onGroupMoved(obj);
+        } else {
+            console.log('=== object:modified EVENT FIRED ===', obj ? obj.shapeName : 'no target');
+            onShapeModified(e);
+        }
     });
     
     // Add resize listeners
@@ -533,6 +554,67 @@ function getCurrentMmPoints(shape) {
         p[0] + deltaMmX,
         p[1] + deltaMmY
     ]);
+}
+
+// Handle a multi-select (activeSelection) drag — apply group delta to every shape
+function onGroupMoved(group) {
+    if (!group || group.type !== 'activeSelection') return;
+
+    const startLeft = group.__startLeft !== undefined ? group.__startLeft : group.left;
+    const startTop  = group.__startTop  !== undefined ? group.__startTop  : group.top;
+
+    const deltaCanvasX = group.left - startLeft;
+    const deltaCanvasY = group.top  - startTop;
+
+    // Clean up stored start coords
+    delete group.__startLeft;
+    delete group.__startTop;
+
+    if (Math.abs(deltaCanvasX) < 2 && Math.abs(deltaCanvasY) < 2) {
+        console.log('onGroupMoved: ignoring tiny delta', deltaCanvasX, deltaCanvasY);
+        return;
+    }
+
+    const deltaMmX =  deltaCanvasX / scale;
+    const deltaMmY = -deltaCanvasY / scale;  // canvas Y is flipped
+
+    console.log('onGroupMoved: deltaCanvas', deltaCanvasX.toFixed(1), deltaCanvasY.toFixed(1),
+        'deltaMm', deltaMmX.toFixed(1), deltaMmY.toFixed(1));
+
+    group.getObjects().forEach(subObj => {
+        const name = subObj.shapeName;
+        if (!name) return;
+
+        const data = shapeData[name];
+        if (!data || !data.originalMmPoints) return;
+
+        let newPoints = data.originalMmPoints.map(p => [p[0] + deltaMmX, p[1] + deltaMmY]);
+
+        // Constrain to work area
+        const xs = newPoints.map(p => p[0]);
+        const ys = newPoints.map(p => p[1]);
+        let cx = 0, cy = 0;
+        if (Math.min(...xs) < 0)            cx = -Math.min(...xs);
+        else if (Math.max(...xs) > WORK_WIDTH)  cx = WORK_WIDTH - Math.max(...xs);
+        if (Math.min(...ys) < 0)            cy = -Math.min(...ys);
+        else if (Math.max(...ys) > WORK_HEIGHT) cy = WORK_HEIGHT - Math.max(...ys);
+        if (cx !== 0 || cy !== 0) {
+            newPoints = newPoints.map(p => [p[0] + cx, p[1] + cy]);
+        }
+
+        data.originalMmPoints = newPoints;
+        // initialLeft/Top will be refreshed by redrawShapeFromData below
+        emitShapeUpdate(name);
+        console.log('  updated', name, 'mm X(' +
+            Math.min(...newPoints.map(p=>p[0])).toFixed(1) + '-' +
+            Math.max(...newPoints.map(p=>p[0])).toFixed(1) + ')'
+        );
+    });
+
+    // Redraw each shape so initialLeft/Top are reset to their true canvas positions
+    group.getObjects().forEach(subObj => {
+        if (subObj.shapeName) redrawShapeFromData(subObj.shapeName);
+    });
 }
 
 function onShapeMoved(e) {

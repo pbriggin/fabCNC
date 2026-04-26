@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.0.1"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -508,8 +508,8 @@ def create_header():
                     pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
-                .props('dense flat color=grey-6 no-caps') \
-                .style('font-size: 11px; min-width: 140px;')
+                .props('dense flat no-caps') \
+                .style('font-size: 11px; min-width: 140px; color: #888;')
             
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
@@ -1704,7 +1704,8 @@ def main_page():
         import asyncio
         import concurrent.futures
         update_btn.set_text('Updating...')
-        update_btn.props('color=orange-7 icon=hourglass_top')
+        update_btn.props('dense flat no-caps icon=hourglass_top')
+        update_btn.style('font-size: 11px; min-width: 140px; color: #ffa726;')
         update_btn.disable()
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -1730,11 +1731,13 @@ def main_page():
         update_state['available'] = available
         if available:
             update_btn.set_text('Update Software')
-            update_btn.props('color=positive icon=system_update_alt')
+            update_btn.props('dense flat no-caps icon=system_update_alt')
+            update_btn.style('font-size: 11px; min-width: 140px; color: #66bb6a;')
             update_btn.enable()
         else:
             update_btn.set_text('Software Up To Date')
-            update_btn.props('color=grey-6 icon=check_circle')
+            update_btn.props('dense flat no-caps icon=check_circle')
+            update_btn.style('font-size: 11px; min-width: 140px; color: #888;')
     ui.timer(30.0, _check_update_timer)
     
     # Register JavaScript functions for jog control

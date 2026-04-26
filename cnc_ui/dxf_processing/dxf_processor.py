@@ -54,9 +54,11 @@ class DXFProcessor:
                     try:
                         tool = entity.construction_tool()
                         
-                        # Sample at VERY high resolution to find TRUE corners
-                        high_res = tool.approximate(segments=2000)
-                        high_res_pts = [(p.x, p.y) for p in high_res]
+                        # Use adaptive flattening (max 0.05mm deviation) instead of
+                        # approximate(segments=N) which samples in parameter space and
+                        # piles up hundreds of near-duplicate points at repeated/clamped knots.
+                        flat_pts = list(tool.flattening(distance=0.05))
+                        high_res_pts = [(p.x, p.y) for p in flat_pts]
                         
                         # Find TRUE corner coordinates using window approach
                         true_corners = self._find_true_corners(high_res_pts)
@@ -321,16 +323,11 @@ class DXFProcessor:
             # Check if the spline is closed
             is_closed = entity.closed if hasattr(entity, 'closed') else False
             
-            # For splines, we'll sample at regular parameter intervals
-            # Use moderate number of segments for smooth curves without excessive processing
-            num_segments = 100  # Balanced between smoothness and performance
-            
-            points = []
-            for i in range(num_segments + 1):
-                # Use parameter t from 0 to 1
-                t = i / num_segments
-                point = spline.point(t)
-                points.append((point.x, point.y))
+            # Use adaptive flattening (max 0.05mm deviation) — avoids stacking hundreds of
+            # near-duplicate points at repeated/clamped knots that occur with uniform
+            # parameter-space sampling.
+            flat_pts = list(spline.flattening(distance=0.05))
+            points = [(p.x, p.y) for p in flat_pts]
             
             # If we have control points, ensure sharp corners are preserved
             if len(control_points) >= 3:
