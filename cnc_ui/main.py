@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.11"
+APP_VERSION = "v1.0.12"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1240,7 +1240,7 @@ async def outline_job():
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
 
-    trace_z = z_cut_height['value']
+    trace_z = -20.0  # Fixed trace height for outline (never cuts material)
     safe_z = toolpath_generator.safe_height
     rapid = toolpath_generator.rapid_rate
     plunge = toolpath_generator.plunge_rate
