@@ -1,27 +1,33 @@
-# fabCNC - Raspberry Pi CNC Web Controller
+# fabCNC - Fabric CNC Web Controller
 
-A clean, Material Design web-based CNC controller built with Python and NiceGUI for Raspberry Pi 5.
+A web-based controller for a 4-axis fabric CNC cutting machine, built with Python and NiceGUI. Designed to run on a Raspberry Pi 5 with Marlin firmware over serial, and optionally deployed in Chromium kiosk mode.
 
 ## Features
 
-- **Manual Jogging**: Control X, Y, Z linear axes and A rotary axis with adjustable step sizes
-- **Homing**: Individual axis homing and home-all functionality
-- **File Management**: Upload and load DXF files for job execution
-- **Job Control**: Start, pause, resume, and stop job execution
-- **Real-time Status**: Live position display and job progress tracking
-- **Network Access**: Accessible from any device on your local network
+- **Manual Jogging**: Control X, Y, Z linear axes and A rotary (blade angle) axis with configurable step sizes and feed rate
+- **Homing**: Individual axis and home-all functionality via Marlin `G28`
+- **DXF Processing**: Upload DXF files; shapes are extracted and converted to point lists using `ezdxf`
+- **Toolpath Generation**: Converts DXF shapes to G-code with Z-height management, corner handling (raise/rotate/lower), and adaptive curve feed rate slowdown
+- **Shape Nesting**: Optimally pack multiple DXF shapes onto a sheet using the Packaide library (configurable spacing and rotation increments)
+- **Toolpath Preview**: Interactive 2D canvas visualization of the generated toolpath with tool orientation (A-axis) overlay
+- **Job Control**: Start, pause, resume, and stop G-code job execution with real-time progress tracking
+- **Real-time Status**: Live position display (X, Y, Z in mm; A in degrees), job progress bar, and estimated time remaining
+- **Network Access**: Accessible from any device on your local network; local IP shown in the UI
+- **Auto-Update**: Git-based update checking built into the UI
 
 ## Requirements
 
 - Python 3.10 or higher
-- Raspberry Pi 5 (or any Linux/macOS/Windows for development)
+- Raspberry Pi 5 (or any Linux/macOS for development)
+- Marlin-based CNC controller connected via USB serial (auto-detected at 115200 baud)
 - Network connection
 
 ## Installation
 
-1. Clone or download this repository:
+1. Clone this repository:
 ```bash
-cd /Users/peterbriggs/Code/fabCNC
+git clone <repo-url>
+cd fabCNC
 ```
 
 2. Install dependencies:
@@ -29,9 +35,14 @@ cd /Users/peterbriggs/Code/fabCNC
 pip install -r requirements.txt
 ```
 
+Additional runtime dependencies (not in `requirements.txt`):
+- `ezdxf` — DXF file parsing
+- `numpy`, `matplotlib` — toolpath math and visualization
+- `pyserial` — serial communication with Marlin
+- `packaide` — shape nesting (optional; required for nesting feature)
+
 ## Running the Application
 
-Start the web server:
 ```bash
 cd cnc_ui
 python main.py
@@ -39,113 +50,94 @@ python main.py
 
 The application will be available at:
 - Local access: http://localhost:8080
-- Network access: http://<raspberry-pi-ip>:8080
+- Network access: http://\<raspberry-pi-ip\>:8080
 
 ## Project Structure
 
 ```
 cnc_ui/
-├── main.py              # NiceGUI application entry point
+├── main.py                        # NiceGUI application entry point; UI layout and API endpoints
 ├── cnc/
-│   ├── controller.py    # CNC command interface (stubbed for simulation)
-│   ├── state.py         # Shared machine and job state
-│   └── files.py         # File handling and storage
-├── uploads/             # Uploaded DXF files storage
-└── system/              # System configuration (for auto-start)
+│   ├── controller.py              # Marlin serial controller (auto-connects, streams G-code)
+│   ├── controller_sim.py          # Simulation controller for development without hardware
+│   ├── state.py                   # Thread-safe MachineState (position, status, job progress)
+│   └── files.py                   # DXF file upload and storage management
+├── dxf_processing/
+│   └── dxf_processor.py           # DXF → point-list conversion using ezdxf
+├── toolpath_planning/
+│   ├── toolpath_generator.py      # Point lists → G-code with Z/A axis management
+│   └── gcode_visualizer.py        # G-code → matplotlib 2D toolpath visualization
+├── static/
+│   └── toolpath_canvas.js         # Client-side canvas rendering for toolpath preview
+├── uploads/                       # Uploaded DXF files
+└── system/                        # Raspberry Pi kiosk and systemd configuration
 ```
 
 ## Usage
 
 ### Manual Jogging
 
-1. Adjust jog parameters (step size and feed rate) as needed
-2. Use the X+/X-, Y+/Y-, Z+/Z-, A+/A- buttons to move axes
-3. All jog controls are disabled during job execution
+1. Set step size (XY, Z, A) and feed rate in the jog controls panel
+2. Use the axis buttons (X+/X−, Y+/Y−, Z+/Z−, A+/A−) to move
+3. Jogging is disabled during job execution
 
-### Homing
+### Loading and Running a Job
 
-1. Use individual axis home buttons (Home X, Home Y, Home Z, Home A)
-2. Or use "Home All" to home all axes sequentially
-3. Homing sets the axis position to zero
+1. Upload a DXF file via the file picker
+2. The DXF is processed into shapes and a toolpath is generated automatically
+3. Review the toolpath in the 2D canvas preview
+4. Optionally use the nesting panel to arrange multiple shapes on the sheet
+5. Click **Start** to stream G-code to the machine
+6. Use **Pause** / **Resume** to hold or continue; **Stop** to abort immediately
 
-### Job Execution
+### Shape Nesting
 
-1. Click "Load DXF File" and select a DXF file
-2. File is uploaded and stub G-code is generated
-3. Click "Start" to begin job execution
-4. Use "Pause"/"Resume" to control job flow
-5. Click "Stop" to immediately halt the job
+- Open the nesting panel and select the shapes to nest
+- Configure sheet dimensions (default 1720 × 1660 mm), spacing (mm), and rotation increments
+- Click **Nest** to run Packaide; the nested layout is shown in the preview
+- Proceed to generate the toolpath from the nested arrangement
 
-### Position Display
+### Toolpath Parameters
 
-Real-time display of all axis positions:
-- X, Y, Z in millimeters (mm)
-- A in degrees (°)
+The toolpath generator uses the following defaults (configurable in `main.py`):
 
-### Status Display
-
-Shows current machine status:
-- Idle
-- Loaded: [filename]
-- Running
-- Paused
-- Complete
-- Stopped
-
-Progress bar displays job completion percentage.
-
-## Auto-Start on Raspberry Pi (Kiosk Mode)
-
-To configure the application to auto-start in Chromium kiosk mode on boot:
-
-1. Create a systemd service for the Python application
-2. Configure Chromium to launch in kiosk mode at http://localhost:8080
-3. See `system/` directory for configuration templates
-
-## Development Notes
-
-### Current Implementation
-
-This is a **simulation/stub implementation** with the following characteristics:
-
-- CNC commands are simulated (no actual hardware control)
-- DXF parsing is stubbed (returns sample G-code)
-- G-code execution is simulated with a simple progress loop
-- File uploads are saved to the `uploads/` directory
-
-### Production Integration
-
-To integrate with actual CNC hardware:
-
-1. **Replace `cnc/controller.py`**: Implement actual GRBL or other CNC protocol communication
-2. **Add DXF parsing**: Integrate a DXF parsing library and CAM toolpath generation
-3. **Real G-code execution**: Send commands to CNC controller and track actual position
-4. **Add limit switches**: Implement limit switch monitoring and E-stop handling
-5. **Position feedback**: Read actual position from CNC controller
+| Parameter | Default | Description |
+|---|---|---|
+| Cutting height (Z) | −30 mm | Z when blade is down |
+| Safe height (Z) | −15 mm | Z when blade is raised |
+| Corner angle threshold | 30° | Angle above which Z raises at corners |
+| Feed rate | 15,000 mm/min | Cutting speed |
+| Plunge rate | 12,000 mm/min | Z plunge speed |
+| Rapid rate | 18,000 mm/min | Travel moves |
+| Min curve feed rate | 1,000 mm/min | Speed floor for tight curves |
+| Curve slowdown radius | 75 mm | Start slowing below this arc radius |
 
 ## Architecture
 
-### Thread-Safe State Management
+### Marlin Serial Communication
 
-The application uses a thread-safe `MachineState` object that:
-- Stores current machine position (X, Y, Z, A)
-- Tracks machine status (busy, paused, job_loaded)
-- Provides job progress updates
-- Uses threading locks for safe concurrent access
+`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`. G-code jobs are streamed with flow control: the controller tracks the firmware command buffer and waits for `ok` responses before sending the next line. Position is polled continuously from `M114` responses.
 
-### Non-Blocking UI
+### Thread-Safe State
 
-- All CNC operations run in background threads
-- UI updates at 10 Hz using NiceGUI timers
-- No blocking operations in UI callbacks
+`MachineState` uses a `threading.Lock` to guard all reads and writes. Background threads handle serial I/O and job streaming; the NiceGUI UI reads state at ~10 Hz via timers without blocking the event loop.
 
-### Material Design
+### DXF → G-code Pipeline
 
-The interface follows Material Design principles with:
-- Clean card-based layout
-- Consistent spacing and typography
-- Responsive grid layout
-- Color-coded action buttons (positive/warning/negative)
+1. `DXFProcessor` reads a DXF file and converts all entities (splines, polylines, arcs, etc.) into lists of `(x, y)` points sampled at a configurable angular resolution
+2. `ToolpathGenerator` iterates the point lists, computes segment angles, and emits G-code with:
+   - `G0` rapid moves between shapes
+   - `G1` cutting moves with adaptive feed rate based on local curve radius
+   - Z raise/lower sequences at corners exceeding the angle threshold
+   - Continuous A-axis rotation to keep the cutting blade tangent to the path
+
+## Auto-Start on Raspberry Pi (Kiosk Mode)
+
+See `system/README.md` for full setup instructions. Summary:
+
+- `system/fabcnc.service` — systemd unit that starts the web server on boot
+- `system/kiosk-setup.sh` — configures Chromium to open `http://localhost:8080` in kiosk mode on login
+- Boot target is set to `multi-user.target` (console mode) with auto-login on tty1
 
 ## Units
 
@@ -155,14 +147,9 @@ The interface follows Material Design principles with:
 
 ## Safety
 
-- No software E-stop implemented (physical E-stop required)
-- Job controls disabled during manual operations
-- Manual controls disabled during job execution
+- Physical E-stop required; no software E-stop is implemented
+- Job controls are disabled during manual operations and vice versa
 
 ## License
 
-MIT License - Feel free to modify and use for your CNC projects.
-
-## Support
-
-For issues or questions, please refer to the project repository.
+MIT License

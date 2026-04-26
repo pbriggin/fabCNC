@@ -67,10 +67,6 @@ jog_params = {
 # Z cut height parameter (used by toolpath generator)
 z_cut_height = {'value': -35.0}  # Default Z cutting height in mm (Medium pressure)
 
-# Lock screen configuration
-LOCK_PIN = "1234"  # 4-digit PIN code
-lock_state = {'locked': True}  # Start locked
-
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
@@ -520,28 +516,6 @@ def create_header():
     return pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn
 
 
-def create_position_display():
-    """Create the compact position display."""
-    pos_labels = {}
-    for axis in ['X', 'Y', 'Z', 'A']:
-        with ui.row().classes('items-center gap-1'):
-            ui.label(f'{axis}:').classes('text-h6 text-grey-7 font-bold')
-            unit = '°' if axis == 'A' else 'mm'
-            pos_labels[axis] = ui.label(f'0.00 {unit}').classes('text-h6 font-bold')
-    
-    return pos_labels
-
-
-def create_status_display():
-    """Create the compact status and progress display."""
-    with ui.row().classes('items-center gap-2'):
-        ui.label('Status:').classes('text-h6 text-grey-7 font-bold')
-        status_label = ui.label('Idle').classes('text-h6 font-bold')
-    progress_bar = ui.linear_progress(value=0.0, show_value=False).style('height: 8px')
-    
-    return status_label, progress_bar
-
-
 def create_jog_controls():
     """Create jog controls with circular wheel design like Bambu Studio."""
     
@@ -851,8 +825,7 @@ def create_jog_controls():
                 ui.button('XY Zero', on_click=lambda: cnc_controller.send_command("G92 X0 Y0")).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
                     .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
     
-    # Store button references for updating (unused in new design but kept for compatibility)
-    jog_params['_buttons'] = {}
+
 
 
 def create_homing_controls():
@@ -1006,22 +979,10 @@ def create_job_controls():
 
 # Event handlers
 
-def update_step_buttons():
-    """Update step button styling - simplified for new circular design."""
-    pass  # No longer needed with new design
-
-
 def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
     print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
-
-
-def jog_diagonal(x_dir: int, y_dir: int):
-    """Handle diagonal jog (X and Y simultaneously)."""
-    x_distance = x_dir * jog_params['xy_step']
-    y_distance = y_dir * jog_params['xy_step']
-    cnc_controller.jog_xy(x_distance, y_distance, jog_params['feed_rate'])
 
 
 def home_axis(axis: str):
@@ -1032,37 +993,6 @@ def home_axis(axis: str):
 def home_all():
     """Handle home all button click."""
     cnc_controller.home_all()
-
-
-def set_xy_zero():
-    """Set current XY position as zero."""
-    cnc_controller.send_command("G92 X0 Y0")
-    ui.notify("XY position set to zero", type='positive')
-
-
-def set_a_zero():
-    """Set current A position as zero."""
-    cnc_controller.send_command("G92 A0")
-    ui.notify("A position set to zero", type='positive')
-
-
-def regenerate_toolpath():
-    """Regenerate gcode from current shape positions after shapes have been moved."""
-    global current_gcode, current_toolpath_shapes
-    
-    if not current_toolpath_shapes:
-        return
-    
-    # Update toolpath generator with current Z cut height
-    toolpath_generator.cutting_height = z_cut_height['value']
-    
-    logger.info("Regenerating toolpath after shape move...")
-    gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="moved_shapes")
-    current_gcode = gcode_str.split('\n')
-    
-    # Update state using the correct method
-    machine_state.set_job_loaded(True, "shapes (repositioned)")
-    ui.notify("Toolpath regenerated with new positions", type='positive')
 
 
 def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0):
