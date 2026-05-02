@@ -394,6 +394,23 @@
     }).join('');
   }
 
+  // ── XHR helper (macOS CNA doesn't support fetch) ────────────────────────────
+  function xhr(method, url, body, onSuccess, onError) {
+    var req = new XMLHttpRequest();
+    req.open(method, url, true);
+    if (body) req.setRequestHeader('Content-Type', 'application/json');
+    req.onreadystatechange = function() {
+      if (req.readyState !== 4) return;
+      if (req.status >= 200 && req.status < 300) {
+        onSuccess(req.responseText);
+      } else {
+        onError(new Error(req.responseText || 'HTTP ' + req.status));
+      }
+    };
+    req.onerror = function() { onError(new Error('Network error')); };
+    req.send(body ? JSON.stringify(body) : null);
+  }
+
   // ── Load networks from API ─────────────────────────────────────────────────
   function loadNetworks() {
     var list = document.getElementById('network-list');
@@ -405,17 +422,17 @@
     hideForm();
     hideStatus();
 
-    fetch('/v1/networks')
-      .then(function(r) { return r.json(); })
-      .then(function(data) { renderNetworks(data); })
-      .catch(function() {
-        list.innerHTML =
-          '<li><div class="placeholder">' +
-            '<span style="color:var(--accent-red)">Could not reach device.<br>' +
-            'Reconnect to the <strong>fabCNC Setup</strong> network and reload.</span>' +
-            '<button class="btn btn-ghost" onclick="loadNetworks()">Retry</button>' +
-          '</div></li>';
-      });
+    xhr('GET', '/v1/networks', null, function(text) {
+      try { renderNetworks(JSON.parse(text)); }
+      catch(e) { renderNetworks([]); }
+    }, function() {
+      list.innerHTML =
+        '<li><div class="placeholder">' +
+          '<span style="color:var(--accent-red)">Could not reach device.<br>' +
+          'Reconnect to the <strong>fabCNC Setup</strong> network and reload.</span>' +
+          '<button class="btn btn-ghost" onclick="loadNetworks()">Retry</button>' +
+        '</div></li>';
+    });
   }
 
   // ── Select a network ───────────────────────────────────────────────────────
@@ -485,29 +502,22 @@
     btn.disabled = true;
     showStatus('Connecting…', 'info');
 
-    fetch('/v1/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ssid: selectedSSID, passphrase: passphrase })
-    })
-    .then(function(r) {
-      if (r.ok) {
+    xhr('POST', '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
+      function() {
         showStatus('Connected! The device is joining your network. You can close this page.', 'success');
         hideForm();
-      } else {
-        return r.text().then(function(t) { throw new Error(t || 'Connection failed.'); });
+      },
+      function(err) {
+        // If the AP shuts down mid-request it counts as success
+        if (err.message === 'Network error') {
+          showStatus('Connected! The device is joining your network.', 'success');
+          hideForm();
+        } else {
+          showStatus(esc(err.message), 'error');
+          btn.disabled = false;
+        }
       }
-    })
-    .catch(function(err) {
-      // If the AP shuts down immediately the fetch errors — that means it worked
-      if (err.name === 'TypeError' || err.message === 'Failed to fetch') {
-        showStatus('Connected! The device is joining your network.', 'success');
-        hideForm();
-      } else {
-        showStatus(esc(err.message), 'error');
-        btn.disabled = false;
-      }
-    });
+    );
   }
 
   // Enter key submits
