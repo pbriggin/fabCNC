@@ -395,6 +395,10 @@
   }
 
   // ── XHR helper (macOS CNA doesn't support fetch) ────────────────────────────
+  // Always use absolute URL to the Pi gateway — CNA may load the page via a
+  // captive.apple.com redirect, making relative URLs resolve to Apple's servers.
+  var PORTAL_HOST = 'http://192.168.42.1';
+
   function xhr(method, url, body, onSuccess, onError) {
     var req = new XMLHttpRequest();
     req.open(method, url, true);
@@ -422,7 +426,7 @@
     hideForm();
     hideStatus();
 
-    xhr('GET', '/v1/networks', null, function(text) {
+    xhr('GET', PORTAL_HOST + '/v1/networks', null, function(text) {
       try { renderNetworks(JSON.parse(text)); }
       catch(e) { renderNetworks([]); }
     }, function() {
@@ -502,7 +506,7 @@
     btn.disabled = true;
     showStatus('Connecting…', 'info');
 
-    xhr('POST', '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
+    xhr('POST', PORTAL_HOST + '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
       function() {
         showStatus('Connected! The device is joining your network. You can close this page.', 'success');
         hideForm();
