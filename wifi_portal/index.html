@@ -392,10 +392,11 @@
     }).join('');
   }
 
-  // ── XHR helper (macOS CNA doesn't support fetch) ────────────────────────────
-  // Always use absolute URL to the Pi gateway — CNA may load the page via a
-  // captive.apple.com redirect, making relative URLs resolve to Apple's servers.
-  var PORTAL_HOST = 'http://192.168.42.1';
+  // ── XHR helper ────────────────────────────────────────────────────────────
+  // Use RELATIVE URLs so requests work in both Safari (same-origin to
+  // 192.168.42.1) and the macOS Captive Network Assistant (where the page
+  // origin is captive.apple.com, but wifi-connect's DNS redirects ALL
+  // hostnames on the AP to 192.168.42.1 — so relative paths reach the Pi).
 
   function xhr(method, url, body, onSuccess, onError) {
     var req = new XMLHttpRequest();
@@ -424,7 +425,7 @@
     hideForm();
     hideStatus();
 
-    xhr('GET', PORTAL_HOST + '/v1/networks', null, function(text) {
+    xhr('GET', '/v1/networks', null, function(text) {
       try { renderNetworks(JSON.parse(text)); }
       catch(e) { renderNetworks([]); }
     }, function(err) {
@@ -505,7 +506,7 @@
     btn.disabled = true;
     showStatus('Connecting…', 'info');
 
-    xhr('POST', PORTAL_HOST + '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
+    xhr('POST', '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
       function() {
         showStatus('Connected! The device is joining your network. You can close this page.', 'success');
         hideForm();
