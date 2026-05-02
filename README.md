@@ -129,13 +129,25 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 
 ## Auto-Start on Raspberry Pi
 
-On Linux, `setup.sh` automatically installs and enables the systemd service — no extra steps needed. The web server will start on every boot and is accessible at `http://<pi-ip>:8080` from any device on the network.
+On Linux, `setup.sh` automatically installs and enables two systemd services — no extra steps needed.
+
+### WiFi Provisioning
+
+If the Pi has no saved WiFi credentials on boot, it creates a hotspot called **`fabCNC Setup`**. Connect to it from any phone or laptop and a captive portal lets you select a network and enter the password. Once connected, the hotspot closes and the app starts.
+
+This uses [wifi-connect](https://github.com/balena-os/wifi-connect) (by balena.io), which requires NetworkManager — `setup.sh` handles that automatically.
+
+### Web Server
+
+Once WiFi is up, the `fabcnc` service starts the NiceGUI app. It's accessible at `http://<pi-ip>:8080` from any device on the network.
 
 Useful commands:
 ```bash
-sudo systemctl start fabcnc      # start now
-sudo systemctl status fabcnc     # check status
-journalctl -u fabcnc -f          # view logs
+sudo systemctl start fabcnc          # start app now
+sudo systemctl status fabcnc         # check app status
+sudo systemctl status wifi-provision # check WiFi provisioning status
+journalctl -u fabcnc -f              # view app logs
+journalctl -u wifi-provision -f      # view provisioning logs
 ```
 
 ## Units

@@ -82,7 +82,7 @@ if [ "$SKIP_PACKAIDE" -eq 0 ]; then
           -DCMAKE_INSTALL_PREFIX="$VENV_PREFIX" \
           -DPython3_EXECUTABLE="$VENV_PYTHON" \
           -DPYTHON_EXECUTABLE="$VENV_PYTHON" \
-          --quiet
+          > /dev/null 2>&1
 
     CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
     cmake --build "$PACKAIDE_TMP/Packaide/build" --parallel "$CPU_COUNT"
@@ -108,6 +108,86 @@ echo "==> Verifying install..."
     && echo "    packaide: OK" \
     || echo "    packaide: not available (nesting feature will be disabled)"
 
+# ── wifi-connect (Linux only) ────────────────────────────────────────────────
+if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
+    echo ""
+    echo "==> Installing wifi-connect (WiFi provisioning)..."
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        aarch64) WC_ARCH="aarch64-unknown-linux-gnu" ;;
+        armv7l)  WC_ARCH="armv7-unknown-linux-gnueabihf" ;;
+        x86_64)  WC_ARCH="x86_64-unknown-linux-gnu" ;;
+        *)       WC_ARCH="" ;;
+    esac
+
+    if [ -z "$WC_ARCH" ]; then
+        echo "    WARNING: Unsupported arch '$ARCH', skipping wifi-connect."
+    else
+        WC_VERSION="4.11.84"
+        WC_BASE="https://github.com/balena-os/wifi-connect/releases/download/v${WC_VERSION}"
+        WC_TMP=$(mktemp -d)
+
+        echo "    Downloading wifi-connect ${WC_VERSION} (${WC_ARCH})..."
+        curl -sL "${WC_BASE}/wifi-connect-${WC_ARCH}.tar.gz" -o "$WC_TMP/wifi-connect.tar.gz"
+        curl -sL "${WC_BASE}/wifi-connect-ui.tar.gz"          -o "$WC_TMP/wifi-connect-ui.tar.gz"
+
+        tar -xzf "$WC_TMP/wifi-connect.tar.gz" -C "$WC_TMP"
+        sudo mv "$WC_TMP/wifi-connect" /usr/local/bin/wifi-connect
+        sudo chmod +x /usr/local/bin/wifi-connect
+
+        sudo mkdir -p /usr/local/share/wifi-connect/ui
+        tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP"
+        sudo cp -r "$WC_TMP/build/." /usr/local/share/wifi-connect/ui/
+
+        rm -rf "$WC_TMP"
+
+        # wifi-connect requires NetworkManager
+        if ! systemctl is-active --quiet NetworkManager 2>/dev/null; then
+            echo "    Enabling NetworkManager (required by wifi-connect)..."
+            sudo apt-get install -y network-manager --quiet
+            # Disable dhcpcd if present (conflicts with NetworkManager)
+            sudo systemctl disable dhcpcd 2>/dev/null || true
+            sudo systemctl stop dhcpcd 2>/dev/null || true
+            sudo systemctl enable NetworkManager
+            sudo systemctl start NetworkManager
+        fi
+
+        # Install wifi-provision service (runs before fabcnc, opens AP if offline)
+        sudo tee /etc/systemd/system/wifi-provision.service > /dev/null <<'WCSVC'
+[Unit]
+Description=WiFi Provisioning (wifi-connect)
+Before=fabcnc.service
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '\
+    for i in $(seq 1 15); do \
+        if nmcli -t -f STATE g 2>/dev/null | grep -q "^connected"; then \
+            echo "Network connected, skipping provisioning."; \
+            exit 0; \
+        fi; \
+        sleep 1; \
+    done; \
+    echo "No network found, starting WiFi provisioning AP..."; \
+    UI_PATH=/usr/local/share/wifi-connect/ui \
+    wifi-connect --portal-ssid "fabCNC Setup"'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+WCSVC
+
+        sudo systemctl daemon-reload
+        sudo systemctl enable wifi-provision
+        echo "    wifi-provision service enabled."
+    fi
+fi
+
 # ── Systemd auto-start (Linux only) ─────────────────────────────────────────
 if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
     echo ""
@@ -116,12 +196,12 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
     CURRENT_USER="$(whoami)"
     VENV_ABS="${REPO_DIR}/${VENV_DIR}"
-    SERVICE_FILE="/etc/systemd/system/fabcnc.service"
 
-    sudo tee "$SERVICE_FILE" > /dev/null <<EOF
+    sudo tee /etc/systemd/system/fabcnc.service > /dev/null <<EOF
 [Unit]
 Description=fabCNC Web Controller
-After=network.target
+After=network.target wifi-provision.service
+Wants=wifi-provision.service
 
 [Service]
 Type=simple
