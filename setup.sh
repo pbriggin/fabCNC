@@ -137,14 +137,16 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
 
         echo "    Downloading wifi-connect ${WC_VERSION} (${WC_ARCH})..."
         curl -sL "${WC_BASE}/wifi-connect-${WC_ARCH}.tar.gz" -o "$WC_TMP/wifi-connect.tar.gz"
+        curl -sL "${WC_BASE}/wifi-connect-ui.tar.gz"          -o "$WC_TMP/wifi-connect-ui.tar.gz"
 
         tar -xzf "$WC_TMP/wifi-connect.tar.gz" -C "$WC_TMP"
         sudo mv "$WC_TMP/wifi-connect" /usr/local/bin/wifi-connect
         sudo chmod +x /usr/local/bin/wifi-connect
 
-        # Install custom portal UI (matches fabCNC app design)
         sudo mkdir -p /usr/local/share/wifi-connect/ui
-        sudo cp "$SCRIPT_DIR/wifi_portal/index.html" /usr/local/share/wifi-connect/ui/index.html
+        mkdir -p "$WC_TMP/ui"
+        tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP/ui"
+        sudo cp -r "$WC_TMP/ui/." /usr/local/share/wifi-connect/ui/
 
         rm -rf "$WC_TMP"
 
