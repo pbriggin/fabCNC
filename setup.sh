@@ -5,6 +5,7 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR=".venv"
 PYTHON_MIN="3.10"
 PACKAIDE_REPO="https://github.com/DanielLiamAnderson/Packaide.git"
@@ -136,16 +137,14 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
 
         echo "    Downloading wifi-connect ${WC_VERSION} (${WC_ARCH})..."
         curl -sL "${WC_BASE}/wifi-connect-${WC_ARCH}.tar.gz" -o "$WC_TMP/wifi-connect.tar.gz"
-        curl -sL "${WC_BASE}/wifi-connect-ui.tar.gz"          -o "$WC_TMP/wifi-connect-ui.tar.gz"
 
         tar -xzf "$WC_TMP/wifi-connect.tar.gz" -C "$WC_TMP"
         sudo mv "$WC_TMP/wifi-connect" /usr/local/bin/wifi-connect
         sudo chmod +x /usr/local/bin/wifi-connect
 
+        # Install custom portal UI (matches fabCNC app design)
         sudo mkdir -p /usr/local/share/wifi-connect/ui
-        mkdir -p "$WC_TMP/ui"
-        tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP/ui"
-        sudo cp -r "$WC_TMP/ui/." /usr/local/share/wifi-connect/ui/
+        sudo cp "$SCRIPT_DIR/wifi_portal/index.html" /usr/local/share/wifi-connect/ui/index.html
 
         rm -rf "$WC_TMP"
 
@@ -180,7 +179,7 @@ ExecStart=/bin/bash -c '\
         sleep 1; \
     done; \
     echo "No network found, starting WiFi provisioning AP..."; \
-    UI_PATH=/usr/local/share/wifi-connect/ui \
+    UI_DIRECTORY=/usr/local/share/wifi-connect/ui \
     wifi-connect --portal-ssid "fabCNC Setup"'
 StandardOutput=journal
 StandardError=journal
