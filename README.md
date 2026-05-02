@@ -1,6 +1,6 @@
 # fabCNC - Fabric CNC Web Controller
 
-A web-based controller for a 4-axis fabric CNC cutting machine, built with Python and NiceGUI. Designed to run on a Raspberry Pi 5 with Marlin firmware over serial, and optionally deployed in Chromium kiosk mode.
+A web-based controller for a 4-axis fabric CNC cutting machine, built with Python and NiceGUI. Designed to run on a Raspberry Pi 5 with Marlin firmware over serial.
 
 ## Features
 
@@ -30,22 +30,20 @@ git clone <repo-url>
 cd fabCNC
 ```
 
-2. Install dependencies:
+2. Run the setup script:
 ```bash
-pip install -r requirements.txt
+./setup.sh
 ```
 
-Additional runtime dependencies (not in `requirements.txt`):
-- `ezdxf` — DXF file parsing
-- `numpy`, `matplotlib` — toolpath math and visualization
-- `pyserial` — serial communication with Marlin
-- `packaide` — shape nesting (optional; required for nesting feature)
+This creates a `.venv` virtual environment, installs all dependencies, and verifies the install. Run it once after cloning.
+
+> **Note:** `packaide` (shape nesting) is a C++ library built from source. The setup script handles this automatically, but requires `cmake`, `boost`, and `cgal` — installed via Homebrew on macOS or `apt` on Linux. If the build fails, the app still works; only the nesting feature will be unavailable.
 
 ## Running the Application
 
 ```bash
-cd cnc_ui
-python main.py
+source .venv/bin/activate
+cd cnc_ui && python main.py
 ```
 
 The application will be available at:
@@ -59,7 +57,6 @@ cnc_ui/
 ├── main.py                        # NiceGUI application entry point; UI layout and API endpoints
 ├── cnc/
 │   ├── controller.py              # Marlin serial controller (auto-connects, streams G-code)
-│   ├── controller_sim.py          # Simulation controller for development without hardware
 │   ├── state.py                   # Thread-safe MachineState (position, status, job progress)
 │   └── files.py                   # DXF file upload and storage management
 ├── dxf_processing/
@@ -69,8 +66,7 @@ cnc_ui/
 │   └── gcode_visualizer.py        # G-code → matplotlib 2D toolpath visualization
 ├── static/
 │   └── toolpath_canvas.js         # Client-side canvas rendering for toolpath preview
-├── uploads/                       # Uploaded DXF files
-└── system/                        # Raspberry Pi kiosk and systemd configuration
+└── uploads/                       # Uploaded DXF files
 ```
 
 ## Usage
@@ -131,13 +127,16 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
    - Z raise/lower sequences at corners exceeding the angle threshold
    - Continuous A-axis rotation to keep the cutting blade tangent to the path
 
-## Auto-Start on Raspberry Pi (Kiosk Mode)
+## Auto-Start on Raspberry Pi
 
-See `system/README.md` for full setup instructions. Summary:
+On Linux, `setup.sh` automatically installs and enables the systemd service — no extra steps needed. The web server will start on every boot and is accessible at `http://<pi-ip>:8080` from any device on the network.
 
-- `system/fabcnc.service` — systemd unit that starts the web server on boot
-- `system/kiosk-setup.sh` — configures Chromium to open `http://localhost:8080` in kiosk mode on login
-- Boot target is set to `multi-user.target` (console mode) with auto-login on tty1
+Useful commands:
+```bash
+sudo systemctl start fabcnc      # start now
+sudo systemctl status fabcnc     # check status
+journalctl -u fabcnc -f          # view logs
+```
 
 ## Units
 
