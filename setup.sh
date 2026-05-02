@@ -87,11 +87,17 @@ if [ "$SKIP_PACKAIDE" -eq 0 ]; then
     CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
     cmake --build "$PACKAIDE_TMP/Packaide/build" --parallel "$CPU_COUNT"
 
-    # Copy the built Python extension directly into venv site-packages
+    # Install packaide as a proper Python package into venv site-packages
+    # The C++ extension is built as PackaideBindings.so; __init__.py wraps it as 'packaide'
     SITE_PACKAGES=$("$VENV_PYTHON" -c "import site; print(site.getsitepackages()[0])")
-    SO_FILE=$(find "$PACKAIDE_TMP/Packaide/build" -name "packaide*.so" | head -n 1)
+    SO_FILE=$(find "$PACKAIDE_TMP/Packaide/build" -name "*.so" | head -n 1)
     if [ -n "$SO_FILE" ]; then
-        cp "$SO_FILE" "$SITE_PACKAGES/"
+        PACKAIDE_PKG="${SITE_PACKAGES}/packaide"
+        mkdir -p "$PACKAIDE_PKG"
+        # Copy __init__.py from the repo's python package
+        cp "$PACKAIDE_TMP/Packaide/python/packaide/__init__.py" "$PACKAIDE_PKG/"
+        # Copy the C extension, named so __init__.py can import it as '.packaide'
+        cp "$SO_FILE" "$PACKAIDE_PKG/packaide.so"
         echo "    packaide installed successfully."
     else
         echo "    WARNING: packaide .so not found after build. Check the build output above."
@@ -137,8 +143,9 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
         sudo chmod +x /usr/local/bin/wifi-connect
 
         sudo mkdir -p /usr/local/share/wifi-connect/ui
-        tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP"
-        sudo cp -r "$WC_TMP/build/." /usr/local/share/wifi-connect/ui/
+        mkdir -p "$WC_TMP/ui"
+        tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP/ui"
+        sudo cp -r "$WC_TMP/ui/." /usr/local/share/wifi-connect/ui/
 
         rm -rf "$WC_TMP"
 
