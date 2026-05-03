@@ -41,10 +41,10 @@ for js_path in js_files:
     original = js_path.read_text(encoding='utf-8', errors='replace')
     patched = original
 
-    # Replace Navbar default bg prop: bg:"gray.dark" -> bg:"#1e1e1e"
+    # Replace Navbar default bg prop: bg:"gray.dark" -> bg:"#2a2a2a"
     # This is the setDefaultProps call in Rendition's Navbar component
-    patched = re.sub(r'bg:"gray\.dark"', 'bg:"#1e1e1e"', patched)
-    patched = re.sub(r"bg:'gray\.dark'", "bg:'#1e1e1e'", patched)
+    patched = re.sub(r'bg:"gray\.dark"', 'bg:"#2a2a2a"', patched)
+    patched = re.sub(r"bg:'gray\.dark'", "bg:'#2a2a2a'", patched)
 
     # Replace "balena" brand label text (not identifiers/URLs)
     patched = re.sub(r'(?<![a-zA-Z])["\']balena["\'](?![a-zA-Z-])',
@@ -65,7 +65,7 @@ css = (
     '<style>'
     'button[type="submit"]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
     'button[type="submit"]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
-    'nav,nav>div,nav>div>div{background-color:#1e1e1e!important;background:#1e1e1e!important;}'
+    'nav,nav>div,nav>div>div{background-color:#2a2a2a!important;background:#2a2a2a!important;}'
     '</style>'
 )
 

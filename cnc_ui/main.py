@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.31"
+APP_VERSION = "v1.0.32"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1914,7 +1914,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # Run the NiceGUI app
     # Bind to 0.0.0.0 to allow access from other computers on the network
     ui.run(
-        host='0.0.0.0',
+        host='::',
         port=8080,
         title='fabCNC Controller',
         favicon=Path(__file__).parent / 'static' / 'favicon.svg',
