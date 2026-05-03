@@ -33,7 +33,22 @@ if logo_files:
 else:
     print('WARNING: no static/media/logo*.svg found — logo not replaced')
 
-# 2. Patch <title> in index.html
+# 2. Replace "balena" brand text in JS bundles
+#    Only replace the display string, not technical identifiers like
+#    "balena-os", "BalenaCloud", module names, URLs etc.
+js_files = list(ui_dir.glob('static/js/*.js'))
+for js_path in js_files:
+    original = js_path.read_text(encoding='utf-8', errors='replace')
+    # Match quoted "balena" or 'balena' standing alone as a brand label,
+    # but not balena- prefixed identifiers or balena inside longer words.
+    patched = re.sub(r'(?<![a-zA-Z])["\']balena["\'](?![a-zA-Z-])',
+                     lambda m: m.group(0)[0] + 'fabCNC' + m.group(0)[0],
+                     original)
+    if patched != original:
+        js_path.write_text(patched, encoding='utf-8')
+        print(f'Patched JS: {js_path.name}')
+
+# 3. Patch <title> in index.html
 html = index_path.read_text()
 html = re.sub(r'<title>[^<]*</title>', '<title>fabCNC \u2014 WiFi Setup</title>', html)
 index_path.write_text(html)
