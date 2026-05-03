@@ -48,9 +48,17 @@ for js_path in js_files:
         js_path.write_text(patched, encoding='utf-8')
         print(f'Patched JS: {js_path.name}')
 
-# 3. Patch <title> in index.html
+# 3. Patch <title> and inject button color override in index.html
 html = index_path.read_text()
 html = re.sub(r'<title>[^<]*</title>', '<title>fabCNC \u2014 WiFi Setup</title>', html)
+# Override Rendition primary button color to match logo blue
+css = (
+    '<style>'
+    'button[class]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
+    'button[class]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
+    '</style>'
+)
+html = html.replace('</head>', css + '</head>', 1)
 index_path.write_text(html)
-print(f'Patched title in {index_path}')
+print(f'Patched title + button color in {index_path}')
 
