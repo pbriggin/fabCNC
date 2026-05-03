@@ -48,17 +48,35 @@ for js_path in js_files:
         js_path.write_text(patched, encoding='utf-8')
         print(f'Patched JS: {js_path.name}')
 
-# 3. Patch <title> and inject button color override in index.html
+# 3. Patch <title> and inject overrides in index.html
 html = index_path.read_text()
 html = re.sub(r'<title>[^<]*</title>', '<title>fabCNC \u2014 WiFi Setup</title>', html)
-# Override Rendition primary button color to match logo blue
+
+# CSS: only target submit button, not dropdowns
 css = (
     '<style>'
-    'button[class]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
-    'button[class]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
+    'button[type="submit"]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
+    'button[type="submit"]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
     '</style>'
 )
+
+# Script: add "fabCNC Setup" brand text next to the logo in the navbar
+script = (
+    '<script>'
+    'document.addEventListener("DOMContentLoaded",function(){'
+    '  var img=document.querySelector("nav img[alt=\'logo\']");'
+    '  if(img){'
+    '    var t=document.createElement("span");'
+    '    t.textContent="fabCNC Setup";'
+    '    t.style.cssText="margin-left:10px;font-weight:600;font-size:18px;color:#fff;vertical-align:middle;";'
+    '    img.parentNode.insertBefore(t,img.nextSibling);'
+    '  }'
+    '});'
+    '</script>'
+)
+
 html = html.replace('</head>', css + '</head>', 1)
+html = html.replace('</body>', script + '</body>', 1)
 index_path.write_text(html)
-print(f'Patched title + button color in {index_path}')
+print(f'Patched title + styles + brand text in {index_path}')
 
