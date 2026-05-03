@@ -1914,7 +1914,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # Run the NiceGUI app
     # Bind to 0.0.0.0 to allow access from other computers on the network
     ui.run(
-        host='::',
+        host='0.0.0.0',
         port=8080,
         title='fabCNC Controller',
         favicon=Path(__file__).parent / 'static' / 'favicon.svg',
