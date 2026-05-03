@@ -35,17 +35,22 @@ if logo_files:
 else:
     print('WARNING: no static/media/logo*.svg found — logo not replaced')
 
-# 2. Replace "balena" brand text in JS bundles
-#    Only replace the display string, not technical identifiers like
-#    "balena-os", "BalenaCloud", module names, URLs etc.
+# 2. Patch JS bundle: replace Navbar default background and balena brand text
 js_files = list(ui_dir.glob('static/js/*.js'))
 for js_path in js_files:
     original = js_path.read_text(encoding='utf-8', errors='replace')
-    # Match quoted "balena" or 'balena' standing alone as a brand label,
-    # but not balena- prefixed identifiers or balena inside longer words.
+    patched = original
+
+    # Replace Navbar default bg prop: bg:"gray.dark" -> bg:"#1e1e1e"
+    # This is the setDefaultProps call in Rendition's Navbar component
+    patched = re.sub(r'bg:"gray\.dark"', 'bg:"#1e1e1e"', patched)
+    patched = re.sub(r"bg:'gray\.dark'", "bg:'#1e1e1e'", patched)
+
+    # Replace "balena" brand label text (not identifiers/URLs)
     patched = re.sub(r'(?<![a-zA-Z])["\']balena["\'](?![a-zA-Z-])',
                      lambda m: m.group(0)[0] + 'fabCNC' + m.group(0)[0],
-                     original)
+                     patched)
+
     if patched != original:
         js_path.write_text(patched, encoding='utf-8')
         print(f'Patched JS: {js_path.name}')
