@@ -146,6 +146,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
         sudo mkdir -p /usr/local/share/wifi-connect/ui
         mkdir -p "$WC_TMP/ui"
         tar -xzf "$WC_TMP/wifi-connect-ui.tar.gz" -C "$WC_TMP/ui"
+        python3 "$SCRIPT_DIR/wifi_portal/patch_ui.py" "$WC_TMP/ui/index.html"
         sudo cp -r "$WC_TMP/ui/." /usr/local/share/wifi-connect/ui/
 
         rm -rf "$WC_TMP"

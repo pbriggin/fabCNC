@@ -425,7 +425,7 @@
     hideForm();
     hideStatus();
 
-    xhr('GET', '/v1/networks', null, function(text) {
+    xhr('GET', '/networks', null, function(text) {
       try { renderNetworks(JSON.parse(text)); }
       catch(e) { renderNetworks([]); }
     }, function(err) {
@@ -506,7 +506,7 @@
     btn.disabled = true;
     showStatus('Connecting…', 'info');
 
-    xhr('POST', '/v1/connect', { ssid: selectedSSID, passphrase: passphrase },
+    xhr('POST', '/connect', { ssid: selectedSSID, passphrase: passphrase },
       function() {
         showStatus('Connected! The device is joining your network. You can close this page.', 'success');
         hideForm();
