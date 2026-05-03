@@ -47,8 +47,9 @@ cd cnc_ui && python main.py
 ```
 
 The application will be available at:
-- Local access: http://localhost:8080
-- Network access: http://\<raspberry-pi-ip\>:8080
+- Local access: http://127.0.0.1:8080
+- Network access (by hostname): http://fabcnc.local:8080
+- Network access (by IP): http://\<raspberry-pi-ip\>:8080
 
 ## Project Structure
 
@@ -139,7 +140,7 @@ This uses [wifi-connect](https://github.com/balena-os/wifi-connect) (by balena.i
 
 ### Web Server
 
-Once WiFi is up, the `fabcnc` service starts the NiceGUI app. It's accessible at `http://<pi-ip>:8080` from any device on the network.
+Once WiFi is up, the `fabcnc` service starts the NiceGUI app. It's accessible at `http://fabcnc.local:8080` from any Mac/iOS device on the network (via mDNS/Bonjour), or by IP at `http://<pi-ip>:8080`.
 
 Useful commands:
 ```bash
