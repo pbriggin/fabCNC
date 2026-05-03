@@ -55,15 +55,18 @@ html = index_path.read_text()
 html = re.sub(r'<title>[^<]*</title>', '<title>fabCNC \u2014 WiFi Setup</title>', html)
 
 # CSS: style submit button + darken navbar
+# Injected before </body> (not </head>) so it loads AFTER styled-components
 css = (
     '<style>'
     'button[type="submit"]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
     'button[type="submit"]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
-    'nav{background-color:#1e1e1e!important;background:#1e1e1e!important;}'
+    'nav,nav>div,nav>div>div{background-color:#1e1e1e!important;background:#1e1e1e!important;}'
     '</style>'
 )
 
 html = html.replace('</head>', css + '</head>', 1)
+# Also inject after </body> open so it beats styled-components runtime injection
+html = html.replace('</body>', css + '</body>', 1)
 # Remove any previously injected DOMContentLoaded scripts
 import re as _re
 html = _re.sub(r'<script>document\.addEventListener\("DOMContentLoaded".*?</script>', '', html, flags=_re.DOTALL)
