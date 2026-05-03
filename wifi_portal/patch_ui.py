@@ -11,9 +11,12 @@ import re
 from pathlib import Path
 
 FABCNC_SVG = """\
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <path fill="#5b9bd5" fill-rule="evenodd"
-    d="M50 0a50 50 0 1 1 0 100A50 50 0 0 1 50 0zm0 35a15 15 0 1 0 0 30 15 15 0 0 0 0-30z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40">
+  <circle cx="20" cy="20" r="20" fill="#5b9bd5"/>
+  <path fill="#fff" fill-rule="evenodd"
+    d="M20 6a14 14 0 1 1 0 28A14 14 0 0 1 20 6zm0 9a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/>
+  <text x="48" y="27" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
+    font-size="18" font-weight="600" fill="#ffffff">fabCNC Setup</text>
 </svg>
 """
 
@@ -52,31 +55,19 @@ for js_path in js_files:
 html = index_path.read_text()
 html = re.sub(r'<title>[^<]*</title>', '<title>fabCNC \u2014 WiFi Setup</title>', html)
 
-# CSS: only target submit button, not dropdowns
+# CSS: style submit button + darken navbar
 css = (
     '<style>'
     'button[type="submit"]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
     'button[type="submit"]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
+    'nav,[class*="Navbar"],[class*="navbar"]{background-color:#2a2a2a!important;}'
     '</style>'
 )
 
-# Script: add "fabCNC Setup" brand text next to the logo in the navbar
-script = (
-    '<script>'
-    'document.addEventListener("DOMContentLoaded",function(){'
-    '  var img=document.querySelector("nav img[alt=\'logo\']");'
-    '  if(img){'
-    '    var t=document.createElement("span");'
-    '    t.textContent="fabCNC Setup";'
-    '    t.style.cssText="margin-left:10px;font-weight:600;font-size:18px;color:#fff;vertical-align:middle;";'
-    '    img.parentNode.insertBefore(t,img.nextSibling);'
-    '  }'
-    '});'
-    '</script>'
-)
-
 html = html.replace('</head>', css + '</head>', 1)
-html = html.replace('</body>', script + '</body>', 1)
+# Remove any previously injected DOMContentLoaded scripts
+import re as _re
+html = _re.sub(r'<script>document\.addEventListener\("DOMContentLoaded".*?</script>', '', html, flags=_re.DOTALL)
 index_path.write_text(html)
-print(f'Patched title + styles + brand text in {index_path}')
+print(f'Patched title + styles in {index_path}')
 
