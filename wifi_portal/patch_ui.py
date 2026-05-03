@@ -12,9 +12,8 @@ from pathlib import Path
 
 FABCNC_SVG = """\
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40">
-  <circle cx="20" cy="20" r="20" fill="#5b9bd5"/>
-  <path fill="#fff" fill-rule="evenodd"
-    d="M20 6a14 14 0 1 1 0 28A14 14 0 0 1 20 6zm0 9a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/>
+  <path fill="#5b9bd5" fill-rule="evenodd"
+    d="M20 0a20 20 0 1 1 0 40A20 20 0 0 1 20 0zm0 14a6 6 0 1 0 0 12 6 6 0 0 0 0-12z"/>
   <text x="48" y="27" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
     font-size="18" font-weight="600" fill="#ffffff">fabCNC Setup</text>
 </svg>
@@ -60,7 +59,7 @@ css = (
     '<style>'
     'button[type="submit"]{background-color:#5b9bd5!important;border-color:#5b9bd5!important;}'
     'button[type="submit"]:hover{background-color:#4a8ec5!important;border-color:#4a8ec5!important;}'
-    'nav,[class*="Navbar"],[class*="navbar"]{background-color:#2a2a2a!important;}'
+    'nav{background-color:#1e1e1e!important;background:#1e1e1e!important;}'
     '</style>'
 )
 
