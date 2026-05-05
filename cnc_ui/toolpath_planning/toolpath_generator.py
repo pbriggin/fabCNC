@@ -752,9 +752,10 @@ class ToolpathGenerator:
             reordered = points[best_start_idx:-1] + points[:best_start_idx] + [points[best_start_idx]]
             logger.info(f"Reordered closed shape: original start ({points[0][0]:.3f},{points[0][1]:.3f}) -> new start ({reordered[0][0]:.3f},{reordered[0][1]:.3f})")
         else:
-            # For open shapes, just start from the best point
-            reordered = points[best_start_idx:] + points[:best_start_idx]
-            logger.info(f"Reordered open shape: original start ({points[0][0]:.3f},{points[0][1]:.3f}) -> new start ({reordered[0][0]:.3f},{reordered[0][1]:.3f})")
+            # For open shapes, do NOT wrap — wrapping joins end back to start
+            # creating a false closed loop. Just return as-is.
+            reordered = points
+            logger.info(f"Open shape: keeping original point order (start={points[0][0]:.3f},{points[0][1]:.3f})")
         
         return reordered
     
