@@ -230,6 +230,13 @@ EOF
     sudo systemctl enable fabcnc
     echo "    fabcnc service enabled — will start on next boot."
     echo "    To start now: sudo systemctl start fabcnc"
+
+    # Allow the service user to restart fabcnc without a password
+    # (needed for the in-app "Update Software" button)
+    echo "${CURRENT_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart fabcnc.service, /usr/bin/systemctl restart fabcnc.service" \
+        | sudo tee /etc/sudoers.d/fabcnc-restart > /dev/null
+    sudo chmod 0440 /etc/sudoers.d/fabcnc-restart
+    echo "    Sudoers rule added: ${CURRENT_USER} can restart fabcnc without password."
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
