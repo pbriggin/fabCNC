@@ -761,6 +761,8 @@ def create_job_controls():
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
         _pressure_map = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
         _speed_map = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
+        def _set_cut_pressure(name):
+            z_cut_height.update({'value': _pressure_map[name]})
         def _set_cut_speed(name):
             feed, rapid = _speed_map[name]
             toolpath_generator.feed_rate = feed
@@ -771,7 +773,7 @@ def create_job_controls():
             ui.select(
                 options=['Trace', 'Light', 'Medium', 'Hard'],
                 value='Medium',
-                on_change=lambda e: z_cut_height.update({'value': _pressure_map[e.value]})
+                on_change=lambda e: _set_cut_pressure(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
             ui.select(
@@ -779,6 +781,7 @@ def create_job_controls():
                 value='Medium',
                 on_change=lambda e: _set_cut_speed(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+        _set_cut_pressure('Medium')
         _set_cut_speed('Medium')
         
         # Generate Toolpath / Clear Toolpath toggle button
