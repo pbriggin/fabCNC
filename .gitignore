@@ -41,3 +41,4 @@ Thumbs.db
 cnc_ui/uploads/*.dxf
 cnc_ui/uploads/*.gcode
 *.log
+cnc_ui/.nicegui/
