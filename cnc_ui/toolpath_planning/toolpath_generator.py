@@ -28,7 +28,7 @@ class ToolpathGenerator:
     def __init__(self, 
                  cutting_height: float = -20.0,  # Z height when cutting (lower)
                  safe_height: float = -15.0,  # Z height when raised (higher)
-                 corner_angle_threshold: float = 15.0,  # Increased from 5.0 to be less sensitive to curves
+                 corner_angle_threshold: float = 20.0,  # Standardized threshold across all corner detection
                  feed_rate: float = 12000.0,  # 200 mm/s (firmware max is 300)
                  plunge_rate: float = 3000.0,
                  rapid_rate: float = 10000.0,  # Rapid/jog moves between cuts (mm/min)
@@ -56,6 +56,7 @@ class ToolpathGenerator:
         self.min_curve_feed_rate = min_curve_feed_rate
         self.curve_slowdown_radius = curve_slowdown_radius
         self.stealthchop = False  # Enable StealthChop for quiet operation (Slow/Medium speeds)
+        self.home_all = True  # Home all axes (X, Y, Z, A) before toolpath; False = Z and A only
         self.current_z = safe_height  # Track current Z position
         self.current_a = 0.0  # Track current A position for continuous rotation
         
@@ -63,13 +64,14 @@ class ToolpathGenerator:
         self.output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads', 'gcode_output')
         os.makedirs(self.output_dir, exist_ok=True)
         
-    def generate_toolpath(self, shapes: Dict[str, List[Tuple[float, float]]], source_filename: str = None) -> str:
+    def generate_toolpath(self, shapes: Dict[str, List[Tuple[float, float]]], source_filename: str = None, notches: dict = None) -> str:
         """
         Generate GCODE from DXF shapes.
         
         Args:
             shapes: Dictionary of shape names to point lists from DXF processor
             source_filename: Optional source filename for naming the output file
+            notches: Optional dict of shape_name -> list of notch dicts {apex, e1, e2}
             
         Returns:
             GCODE string
@@ -78,6 +80,14 @@ class ToolpathGenerator:
         
         # Add header
         gcode_lines.extend(self._generate_header())
+        
+        # --- Cut all notches FIRST, before any shape outlines ---
+        if notches:
+            gcode_lines.append("; === NOTCH CUTS (cut before outlines) ===")
+            for shape_name, shape_notch_list in notches.items():
+                for notch in shape_notch_list:
+                    gcode_lines.extend(self._generate_notch_gcode(shape_name, notch))
+            gcode_lines.append("")
         
         # Sort shapes by position (left to right, top to bottom)
         sorted_shapes = self._sort_shapes_by_position(shapes)
@@ -120,6 +130,8 @@ class ToolpathGenerator:
         if source_filename:
             # Remove extension and create output filename
             base_name = os.path.splitext(os.path.basename(source_filename))[0]
+            # Suffix is "_YYYYMMDD_HHMMSS.gcode" = 22 chars; cap base to stay under NAME_MAX (255)
+            base_name = base_name[:233]
             output_filename = f"{base_name}_{timestamp}.gcode"
         else:
             output_filename = f"toolpath_{timestamp}.gcode"
@@ -144,9 +156,15 @@ class ToolpathGenerator:
             "G17 ; Select XY plane",
             "M17 ; Enable all steppers",
             "",
+        ] + ([
+            "; Home all axes for safe starting position",
+            "G28 ; Home X, Y, Z",
+            "G28 A ; Home A (rotation)",
+        ] if self.home_all else [
             "; Home Z and A axes for safe starting position (preserves XY zero)",
             "G28 Z ; Home Z",
             "G28 A ; Home A (rotation)",
+        ]) + [
             "",
             "; Set speed/accel for cutting",
             "M203 Z25 ; Max Z speed 25 mm/s (1500 mm/min)",
@@ -188,6 +206,47 @@ class ToolpathGenerator:
             "M18 ; Disable steppers"
         ]
     
+    def _generate_notch_gcode(self, shape_name: str, notch: dict) -> list:
+        """
+        Generate GCODE for a single V-notch cut.
+
+        The V has two arms, each 4 mm, meeting at an apex 3 mm inside the shape
+        boundary.  We cut arm-1 endpoint → apex, retract, then arm-2 endpoint → apex.
+
+        Args:
+            shape_name: Name of the parent shape (used for comments)
+            notch: Dict with keys 'apex', 'e1', 'e2' — each a [x, y] list in mm
+
+        Returns:
+            List of GCODE lines
+        """
+        apex = notch['apex']
+        e1   = notch['e1']
+        e2   = notch['e2']
+        lines = [f"; Notch on {shape_name}"]
+
+        # --- Arm 1: e1 → apex ---
+        # Set blade parallel to this arm before plunging
+        target_a = self._calculate_z_rotation(e1, apex)
+        self.current_a = self._calculate_continuous_a(target_a)
+        lines.append(f"G0 X{e1[0]:.3f} Y{e1[1]:.3f} F{self.rapid_rate:.0f} ; Move to notch arm 1")
+        lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate:.0f} ; Align blade for notch arm 1")
+        lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
+        lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
+        lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
+
+        # --- Arm 2: e2 → apex ---
+        target_a = self._calculate_z_rotation(e2, apex)
+        self.current_a = self._calculate_continuous_a(target_a)
+        lines.append(f"G0 X{e2[0]:.3f} Y{e2[1]:.3f} F{self.rapid_rate:.0f} ; Move to notch arm 2")
+        lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate:.0f} ; Align blade for notch arm 2")
+        lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
+        lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
+        lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
+        lines.append("")
+
+        return lines
+
     def _generate_shape_toolpath(self, shape_name: str, points: List[Tuple[float, float]]) -> List[str]:
         """
         Generate GCODE for a single shape with simple corner detection.

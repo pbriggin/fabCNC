@@ -45,11 +45,11 @@ class DXFProcessor:
             
             shapes = {}
             shape_counter = 0
-            
+
             logger.info("Processing entities with basic approach:")
             for entity in msp:
                 logger.info(f"  - {entity.dxftype()}")
-                
+
                 if entity.dxftype() == "SPLINE":
                     try:
                         tool = entity.construction_tool()
@@ -149,29 +149,28 @@ class DXFProcessor:
             
             # Apply the same post-processing as the full processor
             # 1. Merge shapes that share points
+            # merged_shapes: {name: {'points': [...], 'breaks': [...]}}
             merged_shapes = self._merge_connected_shapes(shapes_mm)
-            
+
             # 2. Position shapes with bottom-left justification (no offset)
             positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=0.0, y_buffer_mm=0.0)
-            
+
             logger.info(f"Processed {len(shapes)} entities with basic approach, merged into {len(merged_shapes)} shapes")
-            return positioned_shapes
+            # Return flat dicts: {name: points} and {name: breaks}
+            result_points = {k: v['points'] for k, v in positioned_shapes.items()}
+            result_breaks = {k: v['breaks'] for k, v in positioned_shapes.items()}
+            return result_points, result_breaks
                 
         except Exception as e:
             logger.error(f"Error processing DXF file with basic approach: {e}")
-            return {}
+            return {}, {}
 
     def process_dxf(self, dxf_path: str) -> Dict[str, List[Tuple[float, float]]]:
         """
         Process a DXF file using the basic approach with 0.01" point spacing.
-        
-        Args:
-            dxf_path: Path to the DXF file
-            
-        Returns:
-            Dictionary mapping shape names to lists of (x, y) coordinate tuples
         """
-        return self.process_dxf_basic(dxf_path, min_distance=0.01)
+        shapes, _ = self.process_dxf_basic(dxf_path, min_distance=0.01)
+        return shapes
     
     def _process_line(self, entity) -> List[Tuple[float, float]]:
         """Process a LINE entity."""
@@ -405,60 +404,81 @@ class DXFProcessor:
             except:
                 return []
     
-    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]]) -> Dict[str, List[Tuple[float, float]]]:
+    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]]) -> Dict[str, any]:
         """
-        Merge shapes that share points into single shapes.
-        
-        Args:
-            shapes: Dictionary of shape names to point lists
-            
+        Merge shapes that share endpoints into longer chains.
+
         Returns:
-            Dictionary of merged shapes
+            Dict mapping merged shape name to a dict with:
+              'points': List[Tuple[float,float]]
+              'breaks': List[int]  — indices in points[] where each original segment starts
         """
         if len(shapes) <= 1:
-            return shapes
-        
-        # Convert to list for easier processing
+            # Single shape: one segment starting at 0
+            name, pts = next(iter(shapes.items()))
+            return {name: {'points': pts, 'breaks': [0]}}
+
         shape_list = list(shapes.items())
         merged_shapes = {}
         used_indices = set()
-        
+
         for i, (name1, points1) in enumerate(shape_list):
             if i in used_indices:
                 continue
-                
-            # Start with this shape
+
             current_points = points1.copy()
+            # Each original entity gets a break index; start with entity i at index 0
+            current_breaks = [0]   # break[k] = start index of k-th original segment
+            current_lengths = [len(points1)]   # parallel: how many points each entity contributed
             used_indices.add(i)
-            
-            # Look for shapes that share points with current shape
+
             changed = True
             while changed:
                 changed = False
                 for j, (name2, points2) in enumerate(shape_list):
                     if j in used_indices:
                         continue
-                    
-                    # Check if shapes share any points
+
                     if self._shapes_share_points(current_points, points2):
-                        # Try to merge the shapes
                         merged_result = self._merge_point_lists(current_points, points2)
                         if merged_result is not None:
+                            # Figure out where the new segment was appended/prepended
+                            # and record its break index
+                            p1_end  = current_points[-1]
+                            p2_start = points2[0]
+                            p2_end   = points2[-1]
+                            p1_start = current_points[0]
+
+                            tol = 0.1
+                            def close(a, b):
+                                return math.sqrt((a[0]-b[0])**2+(a[1]-b[1])**2) < tol
+
+                            if close(p1_end, p2_start) or close(p1_end, p2_end):
+                                # new entity appended at the end — its first point is at len(current_points)-1
+                                new_break = len(current_points) - 1
+                                current_breaks.append(new_break)
+                            else:
+                                # new entity prepended — shift all existing breaks by (len(points2)-1)
+                                shift = len(points2) - 1
+                                current_breaks = [b + shift for b in current_breaks]
+                                current_breaks.insert(0, 0)
+
                             current_points = merged_result
                             used_indices.add(j)
                             changed = True
                             logger.info(f"Merged shapes {name1} and {name2}")
                         else:
-                            logger.info(f"Shapes {name1} and {name2} share points but cannot be merged properly")
-            
-            # Add merged shape
+                            logger.info(f"Shapes {name1} and {name2} share points but cannot be merged")
+
             merged_name = f"merged_shape_{len(merged_shapes)}"
-            # Remove duplicates from the merged shape
             current_points = self._remove_duplicate_points(current_points, min_distance=0.05)
-            merged_shapes[merged_name] = current_points
-        
+            # Clamp breaks to valid range after dedup (dedup may shorten the list slightly)
+            n = len(current_points)
+            current_breaks = sorted(set(min(b, n - 1) for b in current_breaks))
+            merged_shapes[merged_name] = {'points': current_points, 'breaks': current_breaks}
+
         return merged_shapes
-    
+
     def _shapes_share_points(self, points1: List[Tuple[float, float]], 
                            points2: List[Tuple[float, float]], 
                            tolerance: float = 0.1) -> bool:
@@ -637,8 +657,8 @@ class DXFProcessor:
         if len(control_points) < 3:
             return spline_points
         
-        # Find sharp corners in control points (angle changes > 45 degrees)
-        corner_threshold = math.radians(45.0)
+        # Find sharp corners in control points (angle changes > 20 degrees)
+        corner_threshold = math.radians(20.0)
         sharp_corners = []
         
         for i in range(1, len(control_points) - 1):
@@ -726,15 +746,15 @@ class DXFProcessor:
         
         return corrected_shapes
     
-    def _position_shapes_bottom_left(self, shapes: Dict[str, List[Tuple[float, float]]], 
+    def _position_shapes_bottom_left(self, shapes: Dict[str, any],
                                     x_buffer_mm: float = 10.0, 
-                                    y_buffer_mm: float = 10.0) -> Dict[str, List[Tuple[float, float]]]:
+                                    y_buffer_mm: float = 10.0) -> Dict[str, any]:
         """
         Position all shapes so they are bottom-left justified with separate X and Y buffers.
         Note: All values are in millimeters.
         
         Args:
-            shapes: Dictionary mapping shape names to lists of (x, y) coordinate tuples in mm
+            shapes: Dictionary mapping shape names to {'points': [...], 'breaks': [...]}
             x_buffer_mm: Buffer distance in mm from the left edge (default 10mm)
             y_buffer_mm: Buffer distance in mm from the bottom edge (default 10mm)
             
@@ -746,8 +766,8 @@ class DXFProcessor:
         
         # Calculate the overall bounding box of all shapes
         all_points = []
-        for points in shapes.values():
-            all_points.extend(points)
+        for entry in shapes.values():
+            all_points.extend(entry['points'])
         
         if not all_points:
             return shapes
@@ -766,16 +786,16 @@ class DXFProcessor:
         
         logger.info(f"Translating by: X={translate_x:.3f}, Y={translate_y:.3f}")
         
-        # Apply translation to all shapes
+        # Apply translation to all shapes (breaks are indices, no translation needed)
         positioned_shapes = {}
-        for shape_name, points in shapes.items():
-            translated_points = [(p[0] + translate_x, p[1] + translate_y) for p in points]
-            positioned_shapes[shape_name] = translated_points
+        for shape_name, entry in shapes.items():
+            translated_points = [(p[0] + translate_x, p[1] + translate_y) for p in entry['points']]
+            positioned_shapes[shape_name] = {'points': translated_points, 'breaks': entry['breaks']}
         
         # Log the new bounds
         new_all_points = []
-        for points in positioned_shapes.values():
-            new_all_points.extend(points)
+        for entry in positioned_shapes.values():
+            new_all_points.extend(entry['points'])
         
         new_min_x = min(p[0] for p in new_all_points)
         new_max_x = max(p[0] for p in new_all_points)
@@ -907,7 +927,7 @@ class DXFProcessor:
         reduced.append(points[-1])
         return reduced
     
-    def _find_polyline_corners(self, vertices: List[Tuple[float, float]], angle_threshold: float = 15.0) -> List[Tuple[float, float]]:
+    def _find_polyline_corners(self, vertices: List[Tuple[float, float]], angle_threshold: float = 20.0) -> List[Tuple[float, float]]:
         """
         Find corner vertices in a polyline from original vertex positions.
         Uses direct angle calculation at each vertex - no windowing needed since
@@ -945,7 +965,7 @@ class DXFProcessor:
         logger.info(f"Found {len(corners)} corners in polyline with {len(vertices)} vertices")
         return corners
     
-    def _find_true_corners(self, points: List[Tuple[float, float]], angle_threshold: float = 30.0) -> List[Tuple[float, float]]:
+    def _find_true_corners(self, points: List[Tuple[float, float]], angle_threshold: float = 20.0) -> List[Tuple[float, float]]:
         """
         Find TRUE corner coordinates from high-resolution point data.
         Uses a window approach with LOCAL MAXIMA detection to find real corners.
