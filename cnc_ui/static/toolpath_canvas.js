@@ -14,6 +14,17 @@ let toolpathLocked = false;
 let toolpathObjects = [];  // Store toolpath visualization objects (lines, markers, labels)
 let toolheadIndicator = null;  // Realtime toolhead position indicator
 
+// Notch tool state
+let notchMode = false;
+let shapeNotches = {};       // shapeName -> Map<edgeIdx, {edgeIdx, x, y}> of active notches
+let notchNodeObjects = [];   // Clickable node circles on canvas (all shapes)
+let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
+
+// Viewport zoom/pan state (separate from the mm→px scale)
+let viewZoom = 1;            // Current viewport zoom level
+let isPanning = false;       // True while alt+drag pan is active
+let lastPanPoint = null;     // Last mouse position during pan
+
 // Canvas dimensions and scale
 const WORK_WIDTH = 1720;  // mm
 const WORK_HEIGHT = 1660;  // mm
@@ -112,6 +123,9 @@ function redrawAllShapes() {
             data.initialTop = newShape.top;
         }
     });
+    
+    // Redraw notch marks at new scale
+    redrawAllNotchMarks();
 }
 
 function initCanvas(elementId) {
@@ -217,6 +231,46 @@ function initCanvas(elementId) {
     
     // Add resize listeners
     window.addEventListener('resize', updateCanvasSize);
+
+    // ── Zoom: scroll wheel zooms toward cursor ──────────────────────────────
+    canvas.on('mouse:wheel', function(opt) {
+        const delta = opt.e.deltaY;
+        let zoom = canvas.getZoom();
+        zoom *= 0.999 ** delta;
+        zoom = Math.min(Math.max(zoom, 0.5), 20);
+        canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
+        viewZoom = zoom;
+        opt.e.preventDefault();
+        opt.e.stopPropagation();
+    });
+
+    // ── Pan: Alt+drag (or middle-mouse drag) pans the viewport ──────────────
+    canvas.on('mouse:down', function(opt) {
+        if (opt.e.altKey || opt.e.button === 1) {
+            isPanning = true;
+            lastPanPoint = { x: opt.e.clientX, y: opt.e.clientY };
+            canvas.defaultCursor = 'grabbing';
+            canvas.discardActiveObject();
+        }
+    });
+    canvas.on('mouse:move', function(opt) {
+        if (!isPanning || !lastPanPoint) return;
+        const dx = opt.e.clientX - lastPanPoint.x;
+        const dy = opt.e.clientY - lastPanPoint.y;
+        canvas.relativePan({ x: dx, y: dy });
+        lastPanPoint = { x: opt.e.clientX, y: opt.e.clientY };
+        canvas.requestRenderAll();
+    });
+    canvas.on('mouse:up', function(opt) {
+        if (isPanning) {
+            isPanning = false;
+            lastPanPoint = null;
+            canvas.defaultCursor = 'default';
+        }
+    });
+    // Prevent page scroll while cursor is over canvas
+    canvas.upperCanvasEl.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
+    // ────────────────────────────────────────────────────────────────────────
     
     // Use ResizeObserver for more reliable container resize detection
     if (typeof ResizeObserver !== 'undefined') {
@@ -388,6 +442,12 @@ function clearShapes() {
     undoStack = [];  // Clear undo history
     clipboard = null;  // Clear clipboard
     
+    // Clear all notch data
+    shapeNotches = {};
+    notchNodeObjects.forEach(obj => canvas.remove(obj));
+    notchNodeObjects = [];
+    Object.values(notchMarkObjects).forEach(arr => arr.forEach(obj => canvas.remove(obj)));
+    notchMarkObjects = {};
     // Also remove any other objects that aren't grid/work area
     const objectsToRemove = canvas.getObjects().filter(obj => 
         obj !== workAreaRect && !gridLines.includes(obj) && !axisLabels.includes(obj)
@@ -399,7 +459,7 @@ function clearShapes() {
     console.log('Canvas cleared');
 }
 
-function addShape(name, points, colorIndexOrColor) {
+function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     if (!canvas || !points || points.length < 2) return;
     
     // If shape with this name already exists, generate a unique name
@@ -436,6 +496,7 @@ function addShape(name, points, colorIndexOrColor) {
     // Store original mm points in separate object (deep copy)
     shapeData[name] = {
         originalMmPoints: points.map(p => [p[0], p[1]]),
+        segmentBreaks: (segmentBreaks && segmentBreaks.length > 0) ? segmentBreaks.slice() : [0],
         initialLeft: null,
         initialTop: null
     };
@@ -1177,6 +1238,10 @@ function deleteShape() {
         canvas.remove(shape);
         delete shapes[name];
         delete shapeData[name];
+        // Clean up notch data for this shape
+        delete shapeNotches[name];
+        clearNotchMarksForShape(name);
+        delete notchMarkObjects[name];
         deletedNames.push(name);
     });
     
@@ -1325,17 +1390,20 @@ function nestShapes(keepOrientation = true, spacing = 5) {
         // Simplify polygon for collision (max 60 points for better accuracy with concave shapes)
         const simplified = simplifyPolygon(points, 60);
         
-        const bbox = getPolygonBounds(simplified);
-        const normalizedSimple = simplified.map(p => [p[0] - bbox.minX, p[1] - bbox.minY]);
-        const normalizedFull = points.map(p => [p[0] - bbox.minX, p[1] - bbox.minY]);
+        // Use full points bbox so normalizedFull always starts at 0,0 and has correct dimensions.
+        // Using the simplified bbox could drop extreme vertices, giving normalizedFull negative
+        // coordinates and underestimating width/height — causing collision checks to miss overlaps.
+        const bboxFull = getPolygonBounds(points);
+        const normalizedSimple = simplified.map(p => [p[0] - bboxFull.minX, p[1] - bboxFull.minY]);
+        const normalizedFull = points.map(p => [p[0] - bboxFull.minX, p[1] - bboxFull.minY]);
         
         return {
             name: name,
             simplePoints: normalizedSimple,
             fullPoints: normalizedFull,
-            width: bbox.maxX - bbox.minX,
-            height: bbox.maxY - bbox.minY,
-            area: (bbox.maxX - bbox.minX) * (bbox.maxY - bbox.minY),
+            width: bboxFull.maxX - bboxFull.minX,
+            height: bboxFull.maxY - bboxFull.minY,
+            area: (bboxFull.maxX - bboxFull.minX) * (bboxFull.maxY - bboxFull.minY),
             color: shape.stroke || '#42A5F5'
         };
     }).filter(s => s !== null);
@@ -1488,8 +1556,9 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
         for (const rotation of rotations) {
             const simple = rotateAndNormalize(info.simplePoints, rotation, info.width/2, info.height/2);
             const full = rotateAndNormalize(info.fullPoints, rotation, info.width/2, info.height/2);
-            const bbox = getPolygonBounds(simple);
-            const w = bbox.maxX, h = bbox.maxY;
+            // Use full polygon bounds for w/h — simple can drop extreme vertices and underestimate size
+            const bboxFull = getPolygonBounds(full);
+            const w = bboxFull.maxX - bboxFull.minX, h = bboxFull.maxY - bboxFull.minY;
             
             // Generate candidates from placed shape vertices
             const candidates = generateCandidates(placedShapes, w, h, spacing);
@@ -1497,14 +1566,17 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
             for (const pos of candidates) {
                 if (pos.x + w > WORK_WIDTH || pos.y + h > WORK_HEIGHT) continue;
                 
-                const testPoly = simple.map(p => [p[0] + pos.x, p[1] + pos.y]);
+                // Use full polygon for collision detection — simplified polygon can miss extreme
+                // vertices (stride-based simplification skips them), causing undetected overlaps.
+                const testFull = full.map(p => [p[0] + pos.x, p[1] + pos.y]);
+                const testSimple = simple.map(p => [p[0] + pos.x, p[1] + pos.y]);
                 const testBBox = { minX: pos.x, maxX: pos.x + w, minY: pos.y, maxY: pos.y + h };
                 
                 // Early collision check before computing score
                 let collides = false;
                 for (const placed of placedShapes) {
                     if (!bboxOverlap(testBBox, placed.bbox, spacing)) continue;
-                    if (polygonsCollide(testPoly, placed.simple, spacing)) {
+                    if (polygonsCollide(testFull, placed.full, spacing)) {
                         collides = true;
                         break;
                     }
@@ -1524,8 +1596,8 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
                     bestScore = score;
                     bestPos = pos;
                     bestRotation = rotation;
-                    bestSimple = testPoly;
-                    bestFull = full.map(p => [p[0] + pos.x, p[1] + pos.y]);
+                    bestSimple = testSimple;  // kept for vertex-based candidate generation
+                    bestFull = testFull;
                 }
             }
         }
@@ -1537,7 +1609,7 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
         placedShapes.push({
             simple: bestSimple,
             full: bestFull,
-            bbox: getPolygonBounds(bestSimple),
+            bbox: getPolygonBounds(bestFull),  // Use full polygon bbox — simple can miss extreme vertices
             info: info
         });
     }
@@ -1829,6 +1901,11 @@ function redrawShapeFromData(shapeName) {
     data.initialLeft = newShape.left;
     data.initialTop = newShape.top;
     
+    // Redraw notch marks for this shape (they move with the shape)
+    drawNotchMarksForShape(shapeName);
+    // If in notch mode, refresh the node circles
+    if (notchMode) showNotchNodes();
+    
     console.log('redrawShapeFromData done:', shapeName, 'now in shapes:', !!shapes[shapeName], 'total shapes:', Object.keys(shapes).length);
     canvas.renderAll();
 }
@@ -1854,13 +1931,19 @@ let clipboard = null;
 
 // Save current state to undo stack
 function saveUndoState() {
-    const state = {};
+    const state = { shapes: {}, notches: {} };
     Object.keys(shapeData).forEach(name => {
         if (shapeData[name] && shapeData[name].originalMmPoints) {
-            state[name] = {
+            state.shapes[name] = {
                 points: shapeData[name].originalMmPoints.map(p => [p[0], p[1]]),
                 stroke: shapes[name] ? shapes[name].stroke : '#42A5F5'
             };
+        }
+    });
+    // Save notch edge keys
+    Object.keys(shapeNotches).forEach(name => {
+        if (shapeNotches[name] && shapeNotches[name].size > 0) {
+            state.notches[name] = [...shapeNotches[name].values()];
         }
     });
     undoStack.push(JSON.stringify(state));
@@ -1876,18 +1959,32 @@ function undo() {
         return false;
     }
     
-    const state = JSON.parse(undoStack.pop());
+    const saved = JSON.parse(undoStack.pop());
+    const state = saved.shapes || saved;  // backwards compat if state is just shapes
+    const notchState = saved.notches || {};
     
-    // Clear current shapes
+    // Clear current shapes and notch marks
     Object.values(shapes).forEach(shape => canvas.remove(shape));
+    Object.values(notchMarkObjects).forEach(arr => arr.forEach(obj => canvas.remove(obj)));
     shapes = {};
     shapeData = {};
+    shapeNotches = {};
+    notchMarkObjects = {};
     
     // Restore shapes from state
     Object.keys(state).forEach(name => {
         addShape(name, state[name].points, state[name].stroke);
     });
     
+    // Restore notch edge keys and redraw marks
+    Object.keys(notchState).forEach(name => {
+        if (notchState[name] && notchState[name].length > 0) {
+            shapeNotches[name] = new Map(notchState[name].map(k => [k.edgeIdx, k]));
+            drawNotchMarksForShape(name);
+        }
+    });
+    
+    if (notchMode) showNotchNodes();
     canvas.discardActiveObject();
     canvas.renderAll();
     console.log('Undo applied');
@@ -2010,9 +2107,10 @@ document.addEventListener('keydown', handleKeyDown);
 // Save canvas state to JSON
 function saveCanvasState() {
     const state = {
-        version: 1,
+        version: 2,
         timestamp: new Date().toISOString(),
-        shapes: {}
+        shapes: {},
+        notches: {}
     };
     
     Object.keys(shapeData).forEach(name => {
@@ -2023,6 +2121,13 @@ function saveCanvasState() {
                 points: data.originalMmPoints,
                 color: shape.stroke || '#42A5F5'
             };
+        }
+    });
+    
+    // Save notch edge keys
+    Object.keys(shapeNotches).forEach(name => {
+        if (shapeNotches[name] && shapeNotches[name].size > 0) {
+            state.notches[name] = [...shapeNotches[name].values()];
         }
     });
     
@@ -2038,7 +2143,7 @@ function loadCanvasState(jsonString) {
             throw new Error('Invalid canvas state: no shapes found');
         }
         
-        // Clear existing shapes
+        // Clear existing shapes and notch data
         clearShapes();
         
         // Add each shape
@@ -2046,11 +2151,22 @@ function loadCanvasState(jsonString) {
         Object.keys(state.shapes).forEach(name => {
             const shapeState = state.shapes[name];
             if (shapeState.points && shapeState.points.length > 0) {
-                addShape(name, shapeState.points, shapeState.color || colorIndex);
+                addShape(name, shapeState.points, shapeState.color || colorIndex, shapeState.segmentBreaks || [0]);
                 colorIndex++;
             }
         });
         
+        // Restore notch edge keys and draw marks
+        if (state.notches) {
+            Object.keys(state.notches).forEach(name => {
+                if (state.notches[name] && state.notches[name].length > 0) {
+                    shapeNotches[name] = new Map(state.notches[name].map(k => [k.edgeIdx, k]));
+                    drawNotchMarksForShape(name);
+                }
+            });
+        }
+        
+        if (notchMode) showNotchNodes();
         console.log('Loaded canvas state with', Object.keys(state.shapes).length, 'shapes');
         return true;
     } catch (e) {
@@ -2067,11 +2183,422 @@ function getCanvasData() {
         if (shapeData[name] && shapeData[name].originalMmPoints && shape) {
             data[name] = {
                 points: shapeData[name].originalMmPoints,
+                segmentBreaks: shapeData[name].segmentBreaks || [0],
                 color: shape.stroke || '#42A5F5'
             };
         }
     });
     return data;
+}
+
+// ============ NOTCH TOOL ============
+
+// Compute signed polygon area (shoelace formula, mm coords)
+// Positive = CCW in standard math coords (Y up)
+function signedPolygonArea(points) {
+    let area = 0;
+    const n = points.length;
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        area += points[i][0] * points[j][1];
+        area -= points[j][0] * points[i][1];
+    }
+    return area / 2;
+}
+
+// Get the unit tangent and inward normal at a path node (mm coords)
+function getShapeTangentAndNormal(points, nodeIdx) {
+    const n = points.length;
+    const prev = points[(nodeIdx - 1 + n) % n];
+    const next = points[(nodeIdx + 1) % n];
+
+    let tx = next[0] - prev[0];
+    let ty = next[1] - prev[1];
+    const len = Math.sqrt(tx * tx + ty * ty);
+    if (len < 1e-9) { tx = 1; ty = 0; } else { tx /= len; ty /= len; }
+
+    // For CCW polygon (area > 0), interior is to the LEFT of travel: inward = (-ty, tx)
+    // For CW  polygon (area < 0), interior is to the RIGHT:           inward = ( ty,-tx)
+    const area = signedPolygonArea(points);
+    let nx, ny;
+    if (area >= 0) {
+        nx = -ty; ny = tx;
+    } else {
+        nx = ty; ny = -tx;
+    }
+    return { tangent: [tx, ty], inward: [nx, ny] };
+}
+
+// Compute notch V geometry for a node (mm coords)
+// V: two base points on the boundary, apex inward — like a sewing notch
+// Returns { apex, e1, e2 } — e1/e2 are the boundary-side open ends of the V
+function computeNotchGeometry(points, nodeKey) {
+    const p = [nodeKey.x, nodeKey.y];
+    const n = points.length;
+    // edgeIdx may be fractional (junction nodes use breaks[k]-0.5); round to get real index
+    const ei = Math.round(nodeKey.edgeIdx);
+    const safeEi = Math.min(Math.max(ei, 0), n - 1);
+
+    // Outgoing edge tangent (edge leaving ei → ei+1)
+    const bOut = points[(safeEi + 1) % n];
+    const outDx = bOut[0] - points[safeEi][0], outDy = bOut[1] - points[safeEi][1];
+    const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
+    let tx = outLen > 1e-9 ? outDx/outLen : 1;
+    let ty = outLen > 1e-9 ? outDy/outLen : 0;
+
+    // For junction nodes (fractional edgeIdx), average with the incoming tangent so the
+    // V-mark is symmetric about the join and doesn't appear rotated to one side.
+    if (nodeKey.edgeIdx !== Math.floor(nodeKey.edgeIdx)) {
+        const prevIdx = (safeEi - 1 + n) % n;
+        const inDx = points[safeEi][0] - points[prevIdx][0];
+        const inDy = points[safeEi][1] - points[prevIdx][1];
+        const inLen = Math.sqrt(inDx*inDx + inDy*inDy);
+        if (inLen > 1e-9) {
+            // Average the two unit tangents then re-normalise
+            let avgX = tx + inDx/inLen;
+            let avgY = ty + inDy/inLen;
+            const avgLen = Math.sqrt(avgX*avgX + avgY*avgY);
+            if (avgLen > 1e-9) { tx = avgX/avgLen; ty = avgY/avgLen; }
+        }
+    }
+
+    const area = signedPolygonArea(points);
+    let nx, ny;
+    if (area >= 0) { nx = -ty; ny = tx; }
+    else           { nx = ty;  ny = -tx; }
+
+    const HALF_WIDTH = 3;  // mm — half the opening width along the boundary
+    const DEPTH = 4;       // mm — how deep the apex goes into the shape
+
+    // Base points: on the boundary, either side of the midpoint
+    const e1 = [p[0] + HALF_WIDTH * tx, p[1] + HALF_WIDTH * ty];
+    const e2 = [p[0] - HALF_WIDTH * tx, p[1] - HALF_WIDTH * ty];
+
+    // Apex: inside the shape
+    const apex = [p[0] + DEPTH * nx, p[1] + DEPTH * ny];
+
+    return { apex, e1, e2, nodePoint: p };
+}
+
+// Return exactly 4 cardinal nodes (top, bottom, left, right) for a shape.
+// Each node sits on the most extreme edge in that direction, but its position
+// is pinned to the bounding-box center on the perpendicular axis so it is
+// always visually centered regardless of polygon tessellation.
+function computeCardinalNodes(shapeName) {
+    const data = shapeData[shapeName];
+    if (!data || !data.originalMmPoints) return [];
+    const pts = data.originalMmPoints;
+    const n = pts.length;
+
+    // Use segment breaks tracked from the original DXF entities.
+    // segmentBreaks[k] = index in pts[] where original entity k starts.
+    // Segment k spans pts[segmentBreaks[k] .. segmentBreaks[k+1]-1] (or to n-1 for last).
+    const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
+        ? data.segmentBreaks
+        : [0];
+
+    // Build one node per original segment at its arc-length midpoint
+    const nodes = [];
+    for (let si = 0; si < breaks.length; si++) {
+        const start = breaks[si];
+        const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
+        if (end <= start) continue;
+
+        // Compute total arc length of this segment
+        let totalLen = 0;
+        for (let i = start; i < end; i++) {
+            const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
+            totalLen += Math.sqrt(dx*dx + dy*dy);
+        }
+        if (totalLen < 0.001) continue;  // skip degenerate
+
+        // Walk to the halfway arc-length point
+        const half = totalLen / 2;
+        let walked = 0;
+        let mx = pts[start][0], my = pts[start][1];
+        let edgeIdx = start;
+        for (let i = start; i < end; i++) {
+            const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
+            const segLen = Math.sqrt(dx*dx + dy*dy);
+            if (walked + segLen >= half) {
+                const t = (half - walked) / segLen;
+                mx = pts[i][0] + t * dx;
+                my = pts[i][1] + t * dy;
+                edgeIdx = i;
+                break;
+            }
+            walked += segLen;
+        }
+
+        nodes.push({ edgeIdx, x: mx, y: my });
+    }
+
+    // --- Junction nodes: one at each segment-to-segment join that is NOT a sharp corner ---
+    const CORNER_THRESHOLD_DEG = 20;  // angles smaller than this are considered smooth
+    const CORNER_COS = Math.cos(CORNER_THRESHOLD_DEG * Math.PI / 180);
+
+    for (let si = 1; si < breaks.length; si++) {
+        const jIdx = breaks[si];             // index of junction vertex in pts[]
+        if (jIdx <= 0 || jIdx >= n - 1) continue;
+
+        // Incoming tangent: last sub-edge of previous segment
+        const inDx = pts[jIdx][0] - pts[jIdx - 1][0];
+        const inDy = pts[jIdx][1] - pts[jIdx - 1][1];
+        const inLen = Math.sqrt(inDx*inDx + inDy*inDy);
+
+        // Outgoing tangent: first sub-edge of this segment
+        const outDx = pts[jIdx + 1][0] - pts[jIdx][0];
+        const outDy = pts[jIdx + 1][1] - pts[jIdx][1];
+        const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
+
+        if (inLen < 1e-9 || outLen < 1e-9) continue;
+
+        const dot = (inDx/inLen) * (outDx/outLen) + (inDy/inLen) * (outDy/outLen);
+        if (dot >= CORNER_COS) {
+            // Smooth join — add a node here
+            // Use fractional edgeIdx so it doesn't collide with midpoint node edgeIdxes
+            nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
+        }
+    }
+
+    // --- Wrap-around junction: for closed shapes, check the seam between last segment and first ---
+    // The top junction of this shape lands at index 0 (start of merged array) which the loop above skips.
+    if (breaks.length > 1) {
+        const closeTol = 1.0; // mm
+        const dx0 = pts[n-1][0] - pts[0][0], dy0 = pts[n-1][1] - pts[0][1];
+        const isClosed = Math.sqrt(dx0*dx0 + dy0*dy0) < closeTol;
+
+        if (isClosed) {
+            // Incoming tangent: last edge of the last segment (approaching pts[0]/pts[n-1])
+            const inDx = pts[n-1][0] - pts[n-2][0];
+            const inDy = pts[n-1][1] - pts[n-2][1];
+            const inLen = Math.sqrt(inDx*inDx + inDy*inDy);
+
+            // Outgoing tangent: first edge of the first segment (leaving pts[0])
+            const outDx = pts[1][0] - pts[0][0];
+            const outDy = pts[1][1] - pts[0][1];
+            const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
+
+            if (inLen > 1e-9 && outLen > 1e-9) {
+                const dot = (inDx/inLen) * (outDx/outLen) + (inDy/inLen) * (outDy/outLen);
+                if (dot >= CORNER_COS) {
+                    // Smooth wrap-around join — use edgeIdx -0.5 (rounds to 0 in computeNotchGeometry)
+                    nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+                }
+            }
+        }
+    }
+
+    return nodes;
+}
+
+// Render clickable node circles for all shapes (shown only in notch mode)
+function showNotchNodes() {
+    hideNotchNodes();
+
+    Object.keys(shapeData).forEach(shapeName => {
+        const data = shapeData[shapeName];
+        if (!data || !data.originalMmPoints) return;
+
+        const nodes = computeCardinalNodes(shapeName);
+        nodes.forEach((nodeKey) => {
+            const cx = toCanvasX(nodeKey.x);
+            const cy = toCanvasY(nodeKey.y);
+
+            const isActive = shapeNotches[shapeName] && shapeNotches[shapeName].has(nodeKey.edgeIdx);
+
+            const circle = new fabric.Circle({
+                left: cx,
+                top: cy,
+                originX: 'center',
+                originY: 'center',
+                radius: 8,
+                fill: isActive ? 'rgba(255, 107, 53, 0.85)' : 'rgba(255,255,255,0.12)',
+                stroke: isActive ? '#FF6B35' : '#aaaaaa',
+                strokeWidth: 2,
+                selectable: false,
+                evented: true,
+                hoverCursor: 'pointer',
+                _notchNode: true,
+                _shapeName: shapeName,
+                _nodeKey: nodeKey
+            });
+
+            circle.on('mousedown', function() {
+                toggleNotch(shapeName, nodeKey);
+            });
+
+            notchNodeObjects.push(circle);
+            canvas.add(circle);
+            canvas.bringToFront(circle);
+        });
+    });
+
+    canvas.renderAll();
+}
+
+// Remove all node circles from canvas
+function hideNotchNodes() {
+    notchNodeObjects.forEach(obj => canvas.remove(obj));
+    notchNodeObjects = [];
+    canvas.renderAll();
+}
+
+// Toggle notch mode on/off (called from Python toolbar button)
+function setNotchMode(active) {
+    notchMode = active;
+    if (active) {
+        Object.values(shapes).forEach(shape => { shape.selectable = false; });
+        canvas.discardActiveObject();
+        showNotchNodes();
+    } else {
+        hideNotchNodes();
+        Object.values(shapes).forEach(shape => { shape.selectable = true; });
+    }
+    canvas.renderAll();
+}
+
+// Toggle a notch on/off at a specific edge node
+function toggleNotch(shapeName, nodeKey) {
+    if (!shapeNotches[shapeName]) shapeNotches[shapeName] = new Map();
+
+    if (shapeNotches[shapeName].has(nodeKey.edgeIdx)) {
+        shapeNotches[shapeName].delete(nodeKey.edgeIdx);
+    } else {
+        shapeNotches[shapeName].set(nodeKey.edgeIdx, nodeKey);
+    }
+
+    drawNotchMarksForShape(shapeName);
+    showNotchNodes();  // Refresh highlighted state of node circles
+}
+
+// Draw the V marks for all active notches on a shape
+function drawNotchMarksForShape(shapeName) {
+    clearNotchMarksForShape(shapeName);
+
+    const data = shapeData[shapeName];
+    if (!data || !data.originalMmPoints) return;
+
+    const notches = shapeNotches[shapeName];
+    if (!notches || notches.size === 0) return;
+
+    if (!notchMarkObjects[shapeName]) notchMarkObjects[shapeName] = [];
+
+    notches.forEach((nodeKey) => {
+        const { apex, e1, e2 } = computeNotchGeometry(data.originalMmPoints, nodeKey);
+
+        const ax = toCanvasX(apex[0]), ay = toCanvasY(apex[1]);
+        const e1x = toCanvasX(e1[0]), e1y = toCanvasY(e1[1]);
+        const e2x = toCanvasX(e2[0]), e2y = toCanvasY(e2[1]);
+
+        const line1 = new fabric.Line([e1x, e1y, ax, ay], {
+            stroke: '#FF6B35', strokeWidth: 1,
+            selectable: false, evented: false, _notchMark: true
+        });
+        const line2 = new fabric.Line([e2x, e2y, ax, ay], {
+            stroke: '#FF6B35', strokeWidth: 1,
+            selectable: false, evented: false, _notchMark: true
+        });
+
+        canvas.add(line1);
+        canvas.add(line2);
+        canvas.bringToFront(line1);
+        canvas.bringToFront(line2);
+        notchMarkObjects[shapeName].push(line1, line2);
+    });
+
+    canvas.renderAll();
+}
+
+// Remove all V mark objects for a shape from the canvas
+function clearNotchMarksForShape(shapeName) {
+    if (notchMarkObjects[shapeName]) {
+        notchMarkObjects[shapeName].forEach(obj => canvas.remove(obj));
+        notchMarkObjects[shapeName] = [];
+    }
+}
+
+// Redraw all notch marks (e.g. after canvas resize / redrawAllShapes)
+function redrawAllNotchMarks() {
+    Object.keys(shapeNotches).forEach(shapeName => drawNotchMarksForShape(shapeName));
+}
+
+// Return notch geometry (mm coords) for all active notches — used by Python for G-code
+function getNotches() {
+    const result = {};
+    Object.keys(shapeNotches).forEach(shapeName => {
+        const notches = shapeNotches[shapeName];
+        if (!notches || notches.size === 0) return;
+
+        const data = shapeData[shapeName];
+        if (!data || !data.originalMmPoints) return;
+
+        result[shapeName] = [];
+        notches.forEach((nodeKey) => {
+            const geom = computeNotchGeometry(data.originalMmPoints, nodeKey);
+            result[shapeName].push({
+                nodeIdx: nodeKey.edgeIdx,
+                apex: geom.apex,
+                e1: geom.e1,
+                e2: geom.e2
+            });
+        });
+    });
+    return result;
+}
+
+// Reset viewport zoom/pan to default (fit-to-canvas view)
+function resetZoom() {
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+    viewZoom = 1;
+    canvas.requestRenderAll();
+}
+
+// Apply notch hints from the DXF file (POINT entities on the NOTCH layer).
+// Each hint is an [x, y] mm coordinate. We project it onto the nearest edge
+// segment of the nearest shape and activate a notch at that exact location.
+function addNotchHints(hints) {
+    if (!hints || hints.length === 0) return;
+
+    hints.forEach(([hx, hy]) => {
+        let bestShape = null, bestEdgeIdx = -1, bestX = 0, bestY = 0, bestDist = Infinity;
+
+        Object.keys(shapeData).forEach(shapeName => {
+            const pts = shapeData[shapeName] && shapeData[shapeName].originalMmPoints;
+            if (!pts) return;
+            const n = pts.length;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                const ax = pts[i][0], ay = pts[i][1];
+                const bx = pts[j][0], by = pts[j][1];
+                const dx = bx - ax, dy = by - ay;
+                const lenSq = dx*dx + dy*dy;
+                if (lenSq < 1e-18) continue;
+                let t = ((hx - ax)*dx + (hy - ay)*dy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+                const qx = ax + t*dx, qy = ay + t*dy;
+                const d = (hx - qx)**2 + (hy - qy)**2;
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestShape = shapeName;
+                    bestEdgeIdx = i;
+                    bestX = qx;
+                    bestY = qy;
+                }
+            }
+        });
+
+        if (bestShape && bestEdgeIdx >= 0) {
+            const nodeKey = { edgeIdx: bestEdgeIdx, x: bestX, y: bestY };
+            if (!shapeNotches[bestShape]) shapeNotches[bestShape] = new Map();
+            shapeNotches[bestShape].set(bestEdgeIdx, nodeKey);
+            drawNotchMarksForShape(bestShape);
+            console.log(`Notch hint (${hx.toFixed(1)}, ${hy.toFixed(1)}) → ${bestShape} edge ${bestEdgeIdx} @ (${bestX.toFixed(1)}, ${bestY.toFixed(1)})`);
+        }
+    });
+
+    if (notchMode) showNotchNodes();
+    canvas.requestRenderAll();
 }
 
 // Export functions for use from Python
@@ -2107,6 +2634,11 @@ window.toolpathCanvas = {
     saveCanvasState: saveCanvasState,
     loadCanvasState: loadCanvasState,
     getCanvasData: getCanvasData,
+    // Notch tool
+    setNotchMode: setNotchMode,
+    getNotches: getNotches,
+    // Zoom
+    resetZoom: resetZoom,
     // Toolpath visualization
     showToolpath: showToolpath,
     clearToolpath: clearToolpath,
@@ -2238,7 +2770,7 @@ function showToolpath(toolpathData) {
                 [toCanvasX(seg.x1), toCanvasY(seg.y1), toCanvasX(seg.x2), toCanvasY(seg.y2)],
                 {
                     stroke: TOOLPATH_COLOR,
-                    strokeWidth: 1.5,
+                    strokeWidth: 2,
                     opacity: 0.7,
                     selectable: false,
                     evented: false

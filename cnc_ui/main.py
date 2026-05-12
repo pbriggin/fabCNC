@@ -67,12 +67,34 @@ jog_params = {
 # Z cut height parameter (used by toolpath generator)
 z_cut_height = {'value': -35.0}  # Default Z cutting height in mm (Medium pressure)
 
+# Cut settings state — persisted with canvas saves
+PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
+SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
+cut_settings = {'pressure': 'Medium', 'speed': 'Medium'}
+home_before_toolpath = {'enabled': True}  # Home all axes before toolpath (OFF = Z and A only)
+# Weak references to the select widgets so load can update them
+_pressure_select_ref = {'el': None}
+_speed_select_ref    = {'el': None}
+
+def apply_cut_pressure(name: str) -> None:
+    """Apply a named pressure setting and record it in cut_settings."""
+    z_cut_height.update({'value': PRESSURE_MAP[name]})
+    cut_settings['pressure'] = name
+
+def apply_cut_speed(name: str) -> None:
+    """Apply a named speed setting and record it in cut_settings."""
+    feed, rapid = SPEED_MAP[name]
+    toolpath_generator.feed_rate = feed
+    toolpath_generator.rapid_rate = rapid
+    toolpath_generator.stealthchop = name in ('Slow', 'Medium')
+    cut_settings['speed'] = name
+
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
     cutting_height=-30.0,  # Z height when cutting (mm)
     safe_height=-15.0,     # Z height when raised (mm)
-    corner_angle_threshold=30.0,  # Increased to reduce false corners on curves
+    corner_angle_threshold=20.0,  # Standardized threshold across all corner detection
     feed_rate=15000.0,     # mm/min (250 mm/s)
     plunge_rate=12000.0,    # mm/min
     rapid_rate=18000.0,    # mm/min (300 mm/s) - rapid/jog moves
@@ -759,31 +781,31 @@ def create_job_controls():
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
-        _pressure_map = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
-        _speed_map = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
-        def _set_cut_pressure(name):
-            z_cut_height.update({'value': _pressure_map[name]})
-        def _set_cut_speed(name):
-            feed, rapid = _speed_map[name]
-            toolpath_generator.feed_rate = feed
-            toolpath_generator.rapid_rate = rapid
-            toolpath_generator.stealthchop = (name in ('Slow', 'Medium'))
         with ui.grid(columns='auto 1fr').classes('w-full items-center gap-x-2 gap-y-1'):
             ui.label('Cut Pressure:').style('color: #aaa; font-size: 13px;')
-            ui.select(
-                options=['Trace', 'Light', 'Medium', 'Hard'],
-                value='Medium',
-                on_change=lambda e: _set_cut_pressure(e.value)
+            _pressure_select = ui.select(
+                options=list(PRESSURE_MAP.keys()),
+                value=cut_settings['pressure'],
+                on_change=lambda e: apply_cut_pressure(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+            _pressure_select_ref['el'] = _pressure_select
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
-            ui.select(
-                options=['Slow', 'Medium', 'Fast'],
-                value='Medium',
-                on_change=lambda e: _set_cut_speed(e.value)
+            _speed_select = ui.select(
+                options=list(SPEED_MAP.keys()),
+                value=cut_settings['speed'],
+                on_change=lambda e: apply_cut_speed(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
-        _set_cut_pressure('Medium')
-        _set_cut_speed('Medium')
+            _speed_select_ref['el'] = _speed_select
+        apply_cut_pressure(cut_settings['pressure'])
+        apply_cut_speed(cut_settings['speed'])
         
+        # Home Before Toolpath toggle
+        with ui.row().classes('w-full items-center justify-between').style('padding: 4px 0;'):
+            ui.label('Home Before Toolpath').style('color: #aaa; font-size: 13px;')
+            ui.switch(value=home_before_toolpath['enabled'],
+                      on_change=lambda e: home_before_toolpath.update({'enabled': e.value})) \
+                .props('dense color=orange')
+
         # Generate Toolpath / Clear Toolpath toggle button
         toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
             .props('dense flat') \
@@ -851,7 +873,7 @@ def home_all():
     cnc_controller.home_all()
 
 
-def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0):
+def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None):
     """Add shapes to canvas without clearing existing ones."""
     global toolpath_canvas
     
@@ -867,10 +889,12 @@ def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0):
                 y_vals = [p[1] for p in points]
                 logger.info(f"  Sending {shape_name} to canvas: {len(points)} pts, X({min(x_vals):.1f}-{max(x_vals):.1f}), Y({min(y_vals):.1f}-{max(y_vals):.1f})")
                 
-                # Convert points to JSON-safe format
+                # Convert points and segment breaks to JSON-safe format
                 points_json = json.dumps(points)
-                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}); }} catch(e) {{ alert(e.message); }}''')
-                logger.info(f"  Added {shape_name}: {len(points)} points")
+                seg_breaks = breaks.get(shape_name, [0]) if breaks else [0]
+                breaks_json = json.dumps(seg_breaks)
+                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}); }} catch(e) {{ alert(e.message); }}''')
+                logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments")
 
 
 def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
@@ -922,7 +946,7 @@ async def handle_file_upload(event, label):
         ui.notify('Processing DXF file...', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
-        shapes = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
+        shapes, shape_breaks = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
         current_toolpath_shapes = shapes
         
         # Debug: Print shape details
@@ -957,7 +981,7 @@ async def handle_file_upload(event, label):
         
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
-        update_toolpath_plot(shapes, clear_existing=False)
+        add_shapes_to_canvas(shapes, breaks=shape_breaks)
         
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
@@ -982,7 +1006,10 @@ async def save_canvas_state():
         name_input = ui.input('Filename', value='').props('autofocus outlined').classes('w-full')
         warning_label = ui.label('').classes('text-warning')
         
-        async def do_save(overwrite=False):
+        # Track whether the user has already been warned about an existing file
+        overwrite_confirmed = {'value': False}
+        
+        async def do_save():
             try:
                 name = name_input.value.strip()
                 if not name:
@@ -996,30 +1023,38 @@ async def save_canvas_state():
                     ui.notify('Invalid filename', type='warning')
                     return
                 
-                # Add .json extension if not present
+                # Enforce filename length limit (ext4 NAME_MAX = 255 bytes)
+                # Reserve 5 bytes for ".json" extension
                 if not safe_name.endswith('.json'):
-                    safe_name += '.json'
+                    safe_name = safe_name[:250] + '.json'
+                else:
+                    safe_name = safe_name[:255]
                 
                 filepath = os.path.join(file_manager.upload_dir, safe_name)
                 
-                # Check if file exists
-                if os.path.exists(filepath) and not overwrite:
-                    warning_label.set_text(f'File "{safe_name}" exists. Click Save again to overwrite.')
-                    # Change save button to confirm overwrite
-                    save_btn.on_click.clear()
-                    save_btn._props['color'] = 'warning'
+                # Check if file exists — warn on first click, allow on second
+                if os.path.exists(filepath) and not overwrite_confirmed['value']:
+                    warning_label.set_text(f'"{safe_name}" already exists. Click Save again to overwrite.')
+                    overwrite_confirmed['value'] = True
+                    save_btn.props('color=warning')
                     save_btn.set_text('Overwrite')
-                    save_btn.on('click', lambda: do_save(overwrite=True))
-                    save_btn.update()
                     return
+                
+                # Reset overwrite state for next use
+                overwrite_confirmed['value'] = False
                 
                 # Get canvas data from JavaScript
                 canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()')
                 
                 if not canvas_json:
-                    ui.notify('No shapes to save', type='warning')
+                    ui.notify('No canvas data to save', type='warning')
                     dialog.close()
                     return
+                
+                # Inject cut settings into the saved JSON
+                state = json.loads(canvas_json)
+                state['cut_settings'] = cut_settings.copy()
+                canvas_json = json.dumps(state, indent=2)
                 
                 # Write to file
                 with open(filepath, 'w') as f:
@@ -1035,7 +1070,7 @@ async def save_canvas_state():
         
         with ui.row().classes('w-full gap-2 mt-4'):
             ui.button('Cancel', on_click=dialog.close).props('flat')
-            save_btn = ui.button('Save', on_click=lambda: do_save(), color='primary')
+            save_btn = ui.button('Save', on_click=do_save, color='primary')
     
     dialog.open()
 
@@ -1068,11 +1103,21 @@ async def load_canvas_state():
                 await ui.run_javascript(f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})')
                 
                 # Parse and update Python state
-                import json
                 state = json.loads(canvas_json)
                 current_toolpath_shapes = {}
                 for name, shape_data in state.get('shapes', {}).items():
                     current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
+                
+                # Restore cut settings if saved
+                saved_cut = state.get('cut_settings', {})
+                if saved_cut.get('pressure') in PRESSURE_MAP:
+                    apply_cut_pressure(saved_cut['pressure'])
+                    if _pressure_select_ref['el']:
+                        _pressure_select_ref['el'].set_value(saved_cut['pressure'])
+                if saved_cut.get('speed') in SPEED_MAP:
+                    apply_cut_speed(saved_cut['speed'])
+                    if _speed_select_ref['el']:
+                        _speed_select_ref['el'].set_value(saved_cut['speed'])
                 
                 machine_state.set_job_loaded(True, os.path.basename(filepath))
                 machine_state.set_toolpath_generated(False)  # Clear toolpath since shapes changed
@@ -1157,8 +1202,21 @@ async def toggle_toolpath(button):
             import traceback
             traceback.print_exc()
         
-        # Update toolpath generator with current Z cut height
+        # Update toolpath generator with current Z cut height and homing preference
         toolpath_generator.cutting_height = z_cut_height['value']
+        toolpath_generator.home_all = home_before_toolpath['enabled']
+        
+        # Fetch notch data from canvas (in mm coords, geometry pre-computed)
+        notches = {}
+        try:
+            notches_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getNotches())')
+            if notches_json:
+                notches = json.loads(notches_json)
+                total_notches = sum(len(v) for v in notches.values())
+                if total_notches:
+                    print(f"Fetched {total_notches} notch(es) from canvas")
+        except Exception as e:
+            print(f"Could not fetch notches: {e}")
         
         # Generate visualization data for the canvas
         viz_data = toolpath_generator.generate_visualization_data(current_toolpath_shapes)
@@ -1171,7 +1229,7 @@ async def toggle_toolpath(button):
             pass  # Visualization still renders; just didn't get JS ack in time
         
         # Generate actual G-code for later execution
-        gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="preview")
+        gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="preview", notches=notches)
         current_gcode = gcode_str.split('\n')
         
         # Count corners and segments for info
@@ -1346,10 +1404,58 @@ async def update_ui(pos_labels, status_label):
         _previous_status['text'] = current_status
 
 
+_APP_PASSWORD = '2026'
+
+# Generated once per process — all browser sessions authenticated before this
+# boot are considered invalid when the server restarts.
+import secrets as _secrets
+_BOOT_TOKEN = _secrets.token_hex(16)
+
+
+@ui.page('/login')
+def login_page():
+    """Password splash screen shown on first access."""
+    ui.dark_mode().enable()
+    ui.add_head_html('''
+        <style>
+            html, body { margin: 0; padding: 0; height: 100vh; background: #121212; }
+        </style>
+    ''')
+
+    async def try_login():
+        if password_input.value == _APP_PASSWORD:
+            app.storage.user['authenticated'] = True
+            app.storage.user['boot_token'] = _BOOT_TOKEN
+            ui.navigate.to('/')
+        else:
+            ui.notify('Incorrect password', type='negative')
+            password_input.value = ''
+            password_input.run_method('focus')
+
+    with ui.column().classes('items-center justify-center').style('height: 100vh; width: 100%;'):
+        with ui.card().style('min-width: 320px; padding: 2rem; background: #1e1e1e; border-radius: 12px;'):
+            ui.image('/static/favicon.svg').style('width: 72px; height: 72px; margin: 0 auto 0.5rem;')
+            ui.label('fabCNC').style('font-size: 28px; font-weight: bold; color: #4a9eff; text-align: center; width: 100%;')
+            ui.label('Enter password to continue').style('color: #888; text-align: center; margin-bottom: 1.5rem; width: 100%;')
+            password_input = (
+                ui.input(placeholder='Password', password=True)
+                .props('outlined dense autofocus')
+                .style('width: 100%; margin-bottom: 1rem;')
+            )
+            password_input.on('keydown.enter', try_login)
+            ui.button('Unlock', on_click=try_login) \
+                .props('color=primary').style('width: 100%;')
+
+
 @ui.page('/')
 def main_page():
     """Main application page with responsive tabbed interface optimized for 1280x720 and larger."""
     
+    # Redirect to login if not authenticated for this boot session
+    if not app.storage.user.get('authenticated') or app.storage.user.get('boot_token') != _BOOT_TOKEN:
+        ui.navigate.to('/login')
+        return
+
     # Enforce dark mode
     ui.dark_mode().enable()
     
@@ -1734,9 +1840,32 @@ def main_page():
                                 
                                 ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                             
+                            # Second toolbar row: Notch editing tool
+                            notch_mode_state = {'active': False, 'btn': None}
+
+                            def toggle_notch_mode():
+                                notch_mode_state['active'] = not notch_mode_state['active']
+                                btn = notch_mode_state['btn']
+                                if notch_mode_state['active']:
+                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35; color: #ffffff;')
+                                    btn.set_text('✂ Notch  (ON)')
+                                else:
+                                    btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
+                                    btn.set_text('✂ Notch')
+                                ui.run_javascript(f"window.toolpathCanvas.setNotchMode({str(notch_mode_state['active']).lower()})")
+
+                            with ui.row().classes('items-center gap-2').style('background: #252525; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
+                                ui.label('Edit:').style('color: #777; font-size: 12px;')
+                                notch_btn = ui.button('✂ Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
+                                notch_mode_state['btn'] = notch_btn
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+                                ui.label('Notches are cut first before shape outlines.').style('color: #555; font-size: 11px; font-style: italic;')
+                                ui.element('div').style('flex: 1;')
+                                ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
+                            
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=33"></script>')
+                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=47"></script>')
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
@@ -1923,5 +2052,6 @@ if __name__ in {"__main__", "__mp_main__"}:
         favicon=Path(__file__).parent / 'static' / 'favicon.svg',
         dark=None,  # Auto-detect system preference
         reload=False,
-        show=False  # Don't auto-open browser (for kiosk mode)
+        show=False,  # Don't auto-open browser (for kiosk mode)
+        storage_secret='fabcnc-storage-secret-2026'
     )
