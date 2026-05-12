@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.33"
+APP_VERSION = "v1.0.34"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1865,7 +1865,7 @@ def main_page():
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html('<script src="/static/toolpath_canvas.js?v=47"></script>')
+                            ui.add_head_html(f'<script src="/static/toolpath_canvas.js?v={APP_VERSION}"></script>')
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
