@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.34"
+APP_VERSION = "v1.0.35"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -1744,8 +1744,11 @@ def main_page():
                     capture_output=True, timeout=60
                 )
             )
-        subprocess.Popen(['sudo', 'systemctl', 'restart', 'fabcnc.service'],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Tell the browser to reload after a delay, then exit.
+        # systemd Restart=always will relaunch the service automatically — no sudo needed.
+        await ui.run_javascript('setTimeout(() => window.location.reload(), 8000)')
+        import sys
+        sys.exit(0)
 
     update_btn.on_click(do_software_update)
 
@@ -2020,10 +2023,11 @@ def main_page():
                             ui.label('System Controls').classes('text-body1 font-bold mb-1').style('color: #aaa;')
                             
                             with ui.row().classes('gap-2'):
-                                def restart_service():
+                                async def restart_service():
                                     ui.notify('Restarting service...', type='warning')
-                                    subprocess.Popen(['sudo', 'systemctl', 'restart', 'fabcnc.service'], 
-                                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    await ui.run_javascript('setTimeout(() => window.location.reload(), 5000)')
+                                    import sys
+                                    sys.exit(0)
                                 
                                 ui.button('Restart Service', icon='refresh', on_click=restart_service) \
                                     .props('color=warning dense').style('font-size: 13px;')
