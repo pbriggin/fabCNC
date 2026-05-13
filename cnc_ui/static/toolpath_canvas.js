@@ -123,18 +123,21 @@ function redrawAllShapes() {
             const newShape = new fabric.Polyline(points, {
                 fill: 'transparent',
                 stroke: shape.stroke || '#42A5F5',
-                strokeWidth: 2,
+                strokeWidth: 1,
                 selectable: true,
                 hasControls: true,
                 hasBorders: true,
                 lockRotation: true,
                 lockScalingX: true,
                 lockScalingY: true,
+                objectCaching: false,
                 shapeName: shapeName
             });
             
             shapes[shapeName] = newShape;
             canvas.add(newShape);
+            // Compensate for Fabric.js v5 Polyline strokeWidth/2 bounding box shift
+            newShape.set({ left: newShape.left + newShape.strokeWidth / 2, top: newShape.top + newShape.strokeWidth / 2 });
             
             // Update initial position
             data.initialLeft = newShape.left;
@@ -784,7 +787,7 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     const polyline = new fabric.Polyline(canvasPoints, {
         fill: 'transparent',
         stroke: color,
-        strokeWidth: 2,
+        strokeWidth: 1,
         selectable: true,
         hasControls: true,
         hasBorders: true,
@@ -796,12 +799,15 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
         cornerSize: 10,
         cornerStyle: 'circle',
         transparentCorners: false,
+        objectCaching: false,
         shapeName: name
     });
     
     shapes[name] = polyline;
     canvas.add(polyline);
     canvas.bringToFront(polyline);
+    // Compensate for Fabric.js v5 Polyline strokeWidth/2 bounding box shift
+    polyline.set({ left: polyline.left + polyline.strokeWidth / 2, top: polyline.top + polyline.strokeWidth / 2 });
     canvas.setActiveObject(polyline);
     canvas.renderAll();
     
@@ -2299,7 +2305,7 @@ function redrawShapeFromData(shapeName) {
     const newShape = new fabric.Polyline(canvasPoints, {
         fill: 'transparent',
         stroke: strokeColor,
-        strokeWidth: 2,
+        strokeWidth: 1,
         selectable: true,
         hasControls: true,
         hasBorders: true,
@@ -2311,12 +2317,15 @@ function redrawShapeFromData(shapeName) {
         cornerSize: 10,
         cornerStyle: 'circle',
         transparentCorners: false,
+        objectCaching: false,
         shapeName: shapeName
     });
     
     shapes[shapeName] = newShape;
     canvas.add(newShape);
     canvas.setActiveObject(newShape);
+    // Compensate for Fabric.js v5 Polyline strokeWidth/2 bounding box shift
+    newShape.set({ left: newShape.left + newShape.strokeWidth / 2, top: newShape.top + newShape.strokeWidth / 2 });
     
     // Update initial position
     data.initialLeft = newShape.left;
@@ -2969,16 +2978,16 @@ function drawNotchMarksForShape(shapeName) {
     notches.forEach((nodeKey) => {
         const { apex, e1, e2 } = computeNotchGeometry(data.originalMmPoints, nodeKey);
 
-        const ax = toCanvasX(apex[0]), ay = toCanvasY(apex[1]);
-        const e1x = toCanvasX(e1[0]), e1y = toCanvasY(e1[1]);
-        const e2x = toCanvasX(e2[0]), e2y = toCanvasY(e2[1]);
+        const ax  = toCanvasX(apex[0]) + 0.25, ay  = toCanvasY(apex[1]) + 0.25;
+        const e1x = toCanvasX(e1[0])   + 0.25, e1y = toCanvasY(e1[1])   + 0.25;
+        const e2x = toCanvasX(e2[0])   + 0.25, e2y = toCanvasY(e2[1])   + 0.25;
 
         const line1 = new fabric.Line([e1x, e1y, ax, ay], {
-            stroke: '#FF6B35', strokeWidth: 1,
+            stroke: '#FF6B35', strokeWidth: 0.5,
             selectable: false, evented: false, _notchMark: true
         });
         const line2 = new fabric.Line([e2x, e2y, ax, ay], {
-            stroke: '#FF6B35', strokeWidth: 1,
+            stroke: '#FF6B35', strokeWidth: 0.5,
             selectable: false, evented: false, _notchMark: true
         });
 
@@ -3219,15 +3228,38 @@ function showToolpath(toolpathData) {
     // Clear any existing toolpath
     clearToolpathObjects();
     
-    // Lock the canvas
+    // Lock the canvas (hides Polyline shapes)
     lockCanvas();
-    
+
     const TOOLPATH_COLOR = '#3399FF';  // Blue for toolhead path
     const ARROW_COLOR = '#3399FF';     // Blue for orientation arrows
     const RAPID_COLOR = '#FF00FF';     // Magenta for rapid/jog moves between shapes
     const START_COLOR = '#00FF00';     // Green for start point
     const END_COLOR = '#FF6600';       // Orange for end point
-    
+
+    // Draw shape outlines as fabric.Line objects (same renderer as toolpath lines,
+    // guaranteeing pixel-perfect alignment with the toolpath).
+    for (const [shapeName, data] of Object.entries(shapeData)) {
+        if (!data || !data.originalMmPoints) continue;
+        const pts = data.originalMmPoints;
+        const shapeColor = (shapes[shapeName] && shapes[shapeName].stroke) || '#42A5F5';
+        for (let i = 0; i < pts.length - 1; i++) {
+            const outlineLine = new fabric.Line(
+                [toCanvasX(pts[i][0]), toCanvasY(pts[i][1]),
+                 toCanvasX(pts[i+1][0]), toCanvasY(pts[i+1][1])],
+                {
+                    stroke: shapeColor,
+                    strokeWidth: 1,
+                    opacity: 0.5,
+                    selectable: false,
+                    evented: false
+                }
+            );
+            canvas.add(outlineLine);
+            toolpathObjects.push(outlineLine);
+        }
+    }
+
     // Track position across all shapes for rapid moves between them
     let globalPrevEndX = null;
     let globalPrevEndY = null;
@@ -3272,7 +3304,7 @@ function showToolpath(toolpathData) {
                 [toCanvasX(seg.x1), toCanvasY(seg.y1), toCanvasX(seg.x2), toCanvasY(seg.y2)],
                 {
                     stroke: TOOLPATH_COLOR,
-                    strokeWidth: 2,
+                    strokeWidth: 1,
                     opacity: 0.7,
                     selectable: false,
                     evented: false
@@ -3281,7 +3313,7 @@ function showToolpath(toolpathData) {
             canvas.add(cutLine);
             toolpathObjects.push(cutLine);
             
-            // Draw orientation arrow at midpoint of segment
+            // Draw direction arrow centered on segment midpoint (no shaft)
             // Show arrows every ~20 segments to avoid clutter
             if (i % 20 === 0 && seg.angle !== undefined) {
                 const midX = (seg.x1 + seg.x2) / 2;
@@ -3293,38 +3325,24 @@ function showToolpath(toolpathData) {
                 const segLength = Math.sqrt(dx * dx + dy * dy);
                 
                 if (segLength > 0.5) {  // Only draw if segment is long enough
-                    // Normalize and scale arrow
-                    const arrowLength = Math.min(15 / scale, segLength * 0.4);  // Arrow length in mm
+                    const headSize = 5 / scale;  // arrow half-length in mm
                     const nx = dx / segLength;
                     const ny = dy / segLength;
-                    
-                    const arrowEndX = midX + nx * arrowLength;
-                    const arrowEndY = midY + ny * arrowLength;
-                    
-                    // Arrow shaft
-                    const arrowShaft = new fabric.Line(
-                        [toCanvasX(midX), toCanvasY(midY), toCanvasX(arrowEndX), toCanvasY(arrowEndY)],
-                        {
-                            stroke: ARROW_COLOR,
-                            strokeWidth: 2,
-                            selectable: false,
-                            evented: false
-                        }
-                    );
-                    canvas.add(arrowShaft);
-                    toolpathObjects.push(arrowShaft);
-                    
-                    // Arrow head (triangle)
-                    const headSize = 4 / scale;  // mm
-                    const perpX = -ny;  // Perpendicular direction
+                    const perpX = -ny;
                     const perpY = nx;
                     
+                    // Tip and base centered on midpoint
+                    const tipX  = midX + nx * headSize * 0.5;
+                    const tipY  = midY + ny * headSize * 0.5;
+                    const baseX = midX - nx * headSize * 0.5;
+                    const baseY = midY - ny * headSize * 0.5;
+                    
                     const headPoints = [
-                        { x: toCanvasX(arrowEndX), y: toCanvasY(arrowEndY) },
-                        { x: toCanvasX(arrowEndX - nx * headSize + perpX * headSize * 0.5), 
-                          y: toCanvasY(arrowEndY - ny * headSize + perpY * headSize * 0.5) },
-                        { x: toCanvasX(arrowEndX - nx * headSize - perpX * headSize * 0.5), 
-                          y: toCanvasY(arrowEndY - ny * headSize - perpY * headSize * 0.5) }
+                        { x: toCanvasX(tipX)  + 0.5, y: toCanvasY(tipY)  + 0.5 },
+                        { x: toCanvasX(baseX + perpX * headSize * 0.4) + 0.5,
+                          y: toCanvasY(baseY + perpY * headSize * 0.4) + 0.5 },
+                        { x: toCanvasX(baseX - perpX * headSize * 0.4) + 0.5,
+                          y: toCanvasY(baseY - perpY * headSize * 0.4) + 0.5 }
                     ];
                     
                     const arrowHead = new fabric.Polygon(headPoints, {

@@ -745,10 +745,11 @@ def create_file_controls():
         loaded_file_label = ui.label('No file loaded').classes('text-body2').style('color: #777;')
         
         upload = ui.upload(
-            label='Load DXF File',
+            label='Load DXF Files',
             auto_upload=True,
+            multiple=True,
             on_upload=lambda e: handle_file_upload(e, loaded_file_label)
-        ).props('accept=.dxf dense').classes('w-full dxf-upload').style('font-size: 13px;')
+        ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;')
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -947,7 +948,7 @@ async def handle_file_upload(event, label):
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
         shapes, shape_breaks = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
-        current_toolpath_shapes = shapes
+        current_toolpath_shapes.update(shapes)
         
         # Debug: Print shape details
         print(f"\n--- DXF Processing Results ---")
@@ -981,7 +982,8 @@ async def handle_file_upload(event, label):
         
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
-        add_shapes_to_canvas(shapes, breaks=shape_breaks)
+        # Offset color index by current shape count so each file gets distinct colors
+        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks)
         
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
