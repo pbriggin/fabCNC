@@ -2837,22 +2837,24 @@ function computeNotchGeometry(points, nodeKey) {
     return { apex, e1, e2, nodePoint: p };
 }
 
-// Return one node per DXF segment (midpoint) plus junction nodes between segments.
-// Nodes closer than MIN_NODE_SPACING_MM to an already-placed node are dropped.
+// Compute notch nodes for a shape:
+//   - One node at the midpoint of every segment (spline or line)
+//   - One junction node at each segment boundary that is NOT a sharp corner
 function computeCardinalNodes(shapeName) {
     const data = shapeData[shapeName];
     if (!data || !data.originalMmPoints) return [];
     const pts = data.originalMmPoints;
     const n = pts.length;
 
-    const MIN_NODE_SPACING_MM = 15;
+    const CORNER_THRESHOLD_DEG = 45;
+    const CORNER_COS = Math.cos(CORNER_THRESHOLD_DEG * Math.PI / 180);
 
     const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
         ? data.segmentBreaks : [0];
 
-    const candidates = [];
+    const nodes = [];
 
-    // Midpoint node per segment
+    // --- Midpoint node for every segment ---
     for (let si = 0; si < breaks.length; si++) {
         const start = breaks[si];
         const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
@@ -2867,39 +2869,48 @@ function computeCardinalNodes(shapeName) {
         let walked = 0, mx = pts[start][0], my = pts[start][1], edgeIdx = start;
         for (let i = start; i < end; i++) {
             const dx = pts[i+1][0]-pts[i][0], dy = pts[i+1][1]-pts[i][1];
-            const segLen = Math.sqrt(dx*dx+dy*dy);
-            if (walked + segLen >= half) {
-                const t = (half - walked) / segLen;
-                mx = pts[i][0] + t*dx; my = pts[i][1] + t*dy; edgeIdx = i; break;
+            const sl = Math.sqrt(dx*dx+dy*dy);
+            if (walked + sl >= half) {
+                const t = (half - walked) / sl;
+                mx = pts[i][0]+t*dx; my = pts[i][1]+t*dy; edgeIdx = i; break;
             }
-            walked += segLen;
+            walked += sl;
         }
-        candidates.push({ edgeIdx, x: mx, y: my });
+        nodes.push({ edgeIdx, x: mx, y: my });
     }
 
-    // Junction node at each segment boundary
+    // --- Junction node at each segment boundary, only if NOT a corner ---
     for (let si = 1; si < breaks.length; si++) {
         const jIdx = breaks[si];
         if (jIdx <= 0 || jIdx >= n - 1) continue;
-        candidates.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
-    }
 
-    // Wrap-around junction for closed shapes
-    if (breaks.length > 1) {
-        const dx0 = pts[n-1][0]-pts[0][0], dy0 = pts[n-1][1]-pts[0][1];
-        if (Math.sqrt(dx0*dx0+dy0*dy0) < 1.0) {
-            candidates.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+        const inDx = pts[jIdx][0]-pts[jIdx-1][0], inDy = pts[jIdx][1]-pts[jIdx-1][1];
+        const inLen = Math.sqrt(inDx*inDx+inDy*inDy);
+        const outDx = pts[jIdx+1][0]-pts[jIdx][0], outDy = pts[jIdx+1][1]-pts[jIdx][1];
+        const outLen = Math.sqrt(outDx*outDx+outDy*outDy);
+        if (inLen < 1e-9 || outLen < 1e-9) continue;
+
+        const dot = (inDx/inLen)*(outDx/outLen) + (inDy/inLen)*(outDy/outLen);
+        if (dot >= CORNER_COS) {
+            nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
         }
     }
 
-    // Deduplicate: drop any candidate within MIN_NODE_SPACING_MM of a kept node
-    const nodes = [];
-    for (const c of candidates) {
-        const tooClose = nodes.some(k => {
-            const dx = c.x-k.x, dy = c.y-k.y;
-            return Math.sqrt(dx*dx+dy*dy) < MIN_NODE_SPACING_MM;
-        });
-        if (!tooClose) nodes.push(c);
+    // --- Wrap-around junction for closed shapes ---
+    if (breaks.length > 1) {
+        const dx0 = pts[n-1][0]-pts[0][0], dy0 = pts[n-1][1]-pts[0][1];
+        if (Math.sqrt(dx0*dx0+dy0*dy0) < 1.0) {
+            const inDx = pts[n-1][0]-pts[n-2][0], inDy = pts[n-1][1]-pts[n-2][1];
+            const inLen = Math.sqrt(inDx*inDx+inDy*inDy);
+            const outDx = pts[1][0]-pts[0][0], outDy = pts[1][1]-pts[0][1];
+            const outLen = Math.sqrt(outDx*outDx+outDy*outDy);
+            if (inLen > 1e-9 && outLen > 1e-9) {
+                const dot = (inDx/inLen)*(outDx/outLen)+(inDy/inLen)*(outDy/outLen);
+                if (dot >= CORNER_COS) {
+                    nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+                }
+            }
+        }
     }
 
     return nodes;
