@@ -698,7 +698,7 @@ function clearShapes() {
     clipboard = null;  // Clear clipboard
     
     // Exit notch mode and clear all notch data
-    notchMode = false;
+    if (notchMode) disableNotchMode();
     shapeNotches = {};
     notchNodeObjects.forEach(obj => canvas.remove(obj));
     notchNodeObjects = [];
@@ -1733,7 +1733,7 @@ function deleteShape() {
     
     // Exit notch mode if no shapes remain
     if (Object.keys(shapes).length === 0) {
-        notchMode = false;
+        disableNotchMode();
     } else if (notchMode) {
         showNotchNodes();
     }
@@ -3002,6 +3002,15 @@ function hideNotchNodes() {
 }
 
 // Toggle notch mode on/off (called from Python toolbar button)
+// Internally disable notch mode and notify Python to reset the toolbar button
+function disableNotchMode() {
+    notchMode = false;
+    hideNotchNodes();
+    Object.values(shapes).forEach(shape => { shape.selectable = true; });
+    if (window.emitEvent) window.emitEvent('notch_mode_changed', { active: false });
+    canvas.renderAll();
+}
+
 function setNotchMode(active) {
     notchMode = active;
     if (active) {
@@ -3296,9 +3305,8 @@ function showToolpath(toolpathData) {
 
     // Exit notch mode when toolpath is generated
     if (notchMode) {
-        notchMode = false;
-        hideNotchNodes();
-        Object.values(shapes).forEach(shape => { shape.selectable = false; }); // keep locked by toolpath
+        disableNotchMode();
+        // Keep shapes unselectable — lockCanvas() will enforce this
     }
 
     // Lock the canvas (hides Polyline shapes)

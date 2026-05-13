@@ -742,13 +742,11 @@ def create_file_controls():
     with ui.column().classes('w-full gap-2'):
         ui.label('Job File').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
-        loaded_file_label = ui.label('No file loaded').classes('text-body2').style('color: #777;')
-        
         upload = ui.upload(
             label='Load DXF Files',
             auto_upload=True,
             multiple=True,
-            on_upload=lambda e: handle_file_upload(e, loaded_file_label)
+            on_upload=lambda e: handle_file_upload(e)
         ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;')
         
         # Use JavaScript to reset on click (before file picker opens)
@@ -772,8 +770,6 @@ def create_file_controls():
             ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
             ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
             ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
-        
-        return loaded_file_label
 
 
 def create_job_controls():
@@ -916,7 +912,7 @@ def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
     add_shapes_to_canvas(shapes)
 
 
-async def handle_file_upload(event, label):
+async def handle_file_upload(event):
     """Handle file upload event."""
     global current_gcode, current_toolpath_shapes, toolpath_canvas
     
@@ -1863,15 +1859,24 @@ def main_page():
                                 if notch_mode_state['active']:
                                     btn.props('dense unelevated')
                                     btn.style('height: 36px; font-size: 13px; background-color: #FF6B35 !important; color: #1a1a1a !important; font-weight: 700;')
-                                    btn.set_text('✂ Notch  (ON)')
+                                    btn.set_text('V Notch  (ON)')
                                 else:
                                     btn.props('dense flat')
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
-                                    btn.set_text('✂ Notch')
+                                    btn.set_text('V Notch')
                                 ui.run_javascript(f"window.toolpathCanvas.setNotchMode({str(notch_mode_state['active']).lower()})")
 
+                            def deactivate_notch_btn():
+                                """Reset the notch button to OFF state (called when JS auto-disables notch mode)."""
+                                notch_mode_state['active'] = False
+                                btn = notch_mode_state['btn']
+                                if btn:
+                                    btn.props('dense flat')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
+                                    btn.set_text('V Notch')
+
                             with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
-                                notch_btn = ui.button('✂ Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
+                                notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
@@ -1978,6 +1983,14 @@ def main_page():
                                         ui.notify('Toolpath cleared - shape deleted', type='info')
                             
                             ui.on('shape_deleted', on_shape_deleted)
+
+                            # Handle notch mode auto-disabled from JS (clear/delete/toolpath)
+                            def on_notch_mode_changed(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if isinstance(data, dict) and not data.get('active', True):
+                                    deactivate_notch_btn()
+
+                            ui.on('notch_mode_changed', on_notch_mode_changed)
                         
                         # Right column: Jog Controls only (fixed width)
                         with ui.column().classes('gap-2 items-center').style('flex: 0 0 320px; padding: 0 0 10px 0; box-sizing: border-box;'):
