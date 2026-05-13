@@ -117,6 +117,8 @@ function redrawAllShapes() {
             
             shapes[shapeName] = newShape;
             canvas.add(newShape);
+            // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
+            newShape.set({ left: newShape.left + 1, top: newShape.top + 1 });
             
             // Update initial position
             data.initialLeft = newShape.left;
@@ -547,6 +549,8 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     shapes[name] = polyline;
     canvas.add(polyline);
     canvas.bringToFront(polyline);
+    // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
+    polyline.set({ left: polyline.left + 1, top: polyline.top + 1 });
     canvas.setActiveObject(polyline);
     canvas.renderAll();
     
@@ -1904,6 +1908,8 @@ function redrawShapeFromData(shapeName) {
     shapes[shapeName] = newShape;
     canvas.add(newShape);
     canvas.setActiveObject(newShape);
+    // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
+    newShape.set({ left: newShape.left + 1, top: newShape.top + 1 });
     
     // Update initial position
     data.initialLeft = newShape.left;
