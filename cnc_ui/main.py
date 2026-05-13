@@ -1880,7 +1880,8 @@ def main_page():
                                     else:
                                         units_state['unit'] = 'mm'
                                         units_btn.set_text('mm')
-                                    await ui.run_javascript(f"window.toolpathCanvas.setUnits('{units_state[\"unit\"]}')")
+                                    unit = units_state['unit']
+                                    await ui.run_javascript(f"window.toolpathCanvas.setUnits('{unit}')")
 
                                 units_btn = ui.button('mm', on_click=toggle_units).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa; min-width: 52px;').tooltip('Toggle axis units between mm and inches')
                             
