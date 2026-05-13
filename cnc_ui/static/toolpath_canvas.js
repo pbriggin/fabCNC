@@ -1166,6 +1166,84 @@ function alignCentersHorizontal() {
     return true;
 }
 
+// Distribute selected shapes with equal spacing along X (horizontal distribute)
+function distributeHorizontally() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length < 3) return false;
+
+    saveUndoState();
+
+    const shapeEntries = selectedShapes.map(shape => ({
+        name: shape.shapeName,
+        data: shapeData[shape.shapeName]
+    })).filter(s => s.data && s.data.originalMmPoints);
+
+    if (shapeEntries.length < 3) return false;
+
+    shapeEntries.forEach(s => {
+        const xVals = s.data.originalMmPoints.map(p => p[0]);
+        s.centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+    });
+
+    shapeEntries.sort((a, b) => a.centerX - b.centerX);
+
+    const minX = shapeEntries[0].centerX;
+    const maxX = shapeEntries[shapeEntries.length - 1].centerX;
+    const step = (maxX - minX) / (shapeEntries.length - 1);
+
+    shapeEntries.forEach((s, i) => {
+        const targetX = minX + i * step;
+        const dx = targetX - s.centerX;
+        if (Math.abs(dx) > 0.001) {
+            s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0] + dx, p[1]]);
+            s.data.initialLeft = null;
+        }
+        redrawShapeFromData(s.name);
+        emitShapeUpdate(s.name);
+    });
+
+    return true;
+}
+
+// Distribute selected shapes with equal spacing along Y (vertical distribute)
+function distributeVertically() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length < 3) return false;
+
+    saveUndoState();
+
+    const shapeEntries = selectedShapes.map(shape => ({
+        name: shape.shapeName,
+        data: shapeData[shape.shapeName]
+    })).filter(s => s.data && s.data.originalMmPoints);
+
+    if (shapeEntries.length < 3) return false;
+
+    shapeEntries.forEach(s => {
+        const yVals = s.data.originalMmPoints.map(p => p[1]);
+        s.centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+    });
+
+    shapeEntries.sort((a, b) => a.centerY - b.centerY);
+
+    const minY = shapeEntries[0].centerY;
+    const maxY = shapeEntries[shapeEntries.length - 1].centerY;
+    const step = (maxY - minY) / (shapeEntries.length - 1);
+
+    shapeEntries.forEach((s, i) => {
+        const targetY = minY + i * step;
+        const dy = targetY - s.centerY;
+        if (Math.abs(dy) > 0.001) {
+            s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0], p[1] + dy]);
+            s.data.initialLeft = null;
+        }
+        redrawShapeFromData(s.name);
+        emitShapeUpdate(s.name);
+    });
+
+    return true;
+}
+
 // Rotate shape 90 degrees clockwise
 function rotate90() {
     const selectedShapes = getSelectedShapes();
@@ -2792,6 +2870,8 @@ window.toolpathCanvas = {
     mirrorY: mirrorY,
     alignCentersVertical: alignCentersVertical,
     alignCentersHorizontal: alignCentersHorizontal,
+    distributeHorizontally: distributeHorizontally,
+    distributeVertically: distributeVertically,
     rotate90: rotate90,
     rotateByDegrees: rotateByDegrees,
     scaleShape: scaleShape,
