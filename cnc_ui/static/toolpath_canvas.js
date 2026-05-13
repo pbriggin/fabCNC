@@ -20,6 +20,9 @@ let shapeNotches = {};       // shapeName -> Map<edgeIdx, {edgeIdx, x, y}> of ac
 let notchNodeObjects = [];   // Clickable node circles on canvas (all shapes)
 let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
 
+// Unit display mode
+let currentUnit = 'mm';  // 'mm' or 'in'
+
 // Viewport zoom/pan state (separate from the mm→px scale)
 let viewZoom = 1;            // Current viewport zoom level
 let isPanning = false;       // True while alt+drag pan is active
@@ -117,8 +120,6 @@ function redrawAllShapes() {
             
             shapes[shapeName] = newShape;
             canvas.add(newShape);
-            // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
-            newShape.set({ left: newShape.left + 1, top: newShape.top + 1 });
             
             // Update initial position
             data.initialLeft = newShape.left;
@@ -273,6 +274,44 @@ function initCanvas(elementId) {
     // Prevent page scroll while cursor is over canvas
     canvas.upperCanvasEl.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
     // ────────────────────────────────────────────────────────────────────────
+
+    // ── Shape name tooltip on hover ─────────────────────────────────────────
+    const tooltip = document.createElement('div');
+    tooltip.id = 'shape-tooltip';
+    tooltip.style.cssText = [
+        'position:fixed',
+        'background:rgba(0,0,0,0.75)',
+        'color:#fff',
+        'padding:4px 8px',
+        'border-radius:4px',
+        'font-size:12px',
+        'font-family:monospace',
+        'pointer-events:none',
+        'display:none',
+        'z-index:9999',
+        'white-space:nowrap',
+    ].join(';');
+    document.body.appendChild(tooltip);
+
+    canvas.on('mouse:over', function(opt) {
+        const target = opt.target;
+        if (target && target.shapeName) {
+            tooltip.textContent = target.shapeName;
+            tooltip.style.display = 'block';
+        }
+    });
+    canvas.on('mouse:move', function(opt) {
+        if (tooltip.style.display === 'block') {
+            tooltip.style.left = (opt.e.clientX + 14) + 'px';
+            tooltip.style.top  = (opt.e.clientY - 10) + 'px';
+        }
+    });
+    canvas.on('mouse:out', function(opt) {
+        if (opt.target && opt.target.shapeName) {
+            tooltip.style.display = 'none';
+        }
+    });
+    // ────────────────────────────────────────────────────────────────────────
     
     // Use ResizeObserver for more reliable container resize detection
     if (typeof ResizeObserver !== 'undefined') {
@@ -325,9 +364,11 @@ function drawGrid() {
     axisLabels.forEach(label => canvas.remove(label));
     axisLabels = [];
     
-    // Grid spacing: 20mm uniform grid, labels every 200mm
+    // Grid spacing: 20mm uniform grid
+    // Labels every 200mm (mm mode) or every 5 inches / 127mm (inch mode)
     const gridSpacing = 20;   // mm - uniform grid lines
-    const labelSpacing = 200; // mm - axis labels
+    const useInches = (currentUnit === 'in');
+    const labelSpacing = useInches ? 127 : 200; // mm
     
     const gridColor = '#2a2a2a';
     const labelColor = '#888888';
@@ -358,7 +399,8 @@ function drawGrid() {
     
     // X axis labels
     for (let x = 0; x <= WORK_WIDTH; x += labelSpacing) {
-        const label = new fabric.Text(Math.round(x).toString(), {
+        const labelText = useInches ? Math.round(x / 25.4) + '"' : Math.round(x).toString();
+        const label = new fabric.Text(labelText, {
             left: toCanvasX(x),
             top: toCanvasY(0) + 5,
             fontSize: 10,
@@ -374,7 +416,8 @@ function drawGrid() {
     
     // Y axis labels
     for (let y = 0; y <= WORK_HEIGHT; y += labelSpacing) {
-        const label = new fabric.Text(Math.round(y).toString(), {
+        const labelText = useInches ? Math.round(y / 25.4) + '"' : Math.round(y).toString();
+        const label = new fabric.Text(labelText, {
             left: toCanvasX(0) - 5,
             top: toCanvasY(y),
             fontSize: 10,
@@ -549,8 +592,6 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     shapes[name] = polyline;
     canvas.add(polyline);
     canvas.bringToFront(polyline);
-    // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
-    polyline.set({ left: polyline.left + 1, top: polyline.top + 1 });
     canvas.setActiveObject(polyline);
     canvas.renderAll();
     
@@ -1054,6 +1095,76 @@ function mirrorY() {
         emitShapeUpdate(shape.shapeName);
     });
     
+    return true;
+}
+
+// Align selected shapes so their centerpoints share the same X coordinate (vertical axis)
+function alignCentersVertical() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length < 2) return false;
+
+    saveUndoState();
+
+    // Collect current mm points and compute each shape's center X
+    const shapePoints = selectedShapes.map(shape => ({
+        shape,
+        points: getCurrentMmPoints(shape)
+    })).filter(s => s.points !== null);
+
+    if (shapePoints.length < 2) return false;
+
+    const centerXs = shapePoints.map(s => {
+        const xVals = s.points.map(p => p[0]);
+        return (Math.min(...xVals) + Math.max(...xVals)) / 2;
+    });
+
+    // Target: average of all center Xs
+    const targetX = centerXs.reduce((a, b) => a + b, 0) / centerXs.length;
+
+    shapePoints.forEach((s, i) => {
+        const dx = targetX - centerXs[i];
+        const data = shapeData[s.shape.shapeName];
+        data.originalMmPoints = s.points.map(p => [p[0] + dx, p[1]]);
+        data.initialLeft = null;
+        redrawShapeFromData(s.shape.shapeName);
+        emitShapeUpdate(s.shape.shapeName);
+    });
+
+    return true;
+}
+
+// Align selected shapes so their centerpoints share the same Y coordinate (horizontal axis)
+function alignCentersHorizontal() {
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length < 2) return false;
+
+    saveUndoState();
+
+    // Collect current mm points and compute each shape's center Y
+    const shapePoints = selectedShapes.map(shape => ({
+        shape,
+        points: getCurrentMmPoints(shape)
+    })).filter(s => s.points !== null);
+
+    if (shapePoints.length < 2) return false;
+
+    const centerYs = shapePoints.map(s => {
+        const yVals = s.points.map(p => p[1]);
+        return (Math.min(...yVals) + Math.max(...yVals)) / 2;
+    });
+
+    // Target: average of all center Ys
+    const targetY = centerYs.reduce((a, b) => a + b, 0) / centerYs.length;
+
+    shapePoints.forEach((s, i) => {
+        const dy = targetY - centerYs[i];
+        const data = shapeData[s.shape.shapeName];
+        data.originalMmPoints = s.points.map(p => [p[0], p[1] + dy]);
+        data.initialLeft = null;
+        redrawShapeFromData(s.shape.shapeName);
+        emitShapeUpdate(s.shape.shapeName);
+    });
+
     return true;
 }
 
@@ -1908,8 +2019,6 @@ function redrawShapeFromData(shapeName) {
     shapes[shapeName] = newShape;
     canvas.add(newShape);
     canvas.setActiveObject(newShape);
-    // Compensate for Fabric.js v5 strokeWidth/2 offset in Polyline bounding box
-    newShape.set({ left: newShape.left + 1, top: newShape.top + 1 });
     
     // Update initial position
     data.initialLeft = newShape.left;
@@ -2112,6 +2221,64 @@ function handleKeyDown(e) {
         if (deleteShape()) {
             e.preventDefault();
         }
+    }
+
+    // Arrow keys = nudge selected shape(s) by 1mm (or 10mm with Shift)
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        const active = canvas.getActiveObject();
+        if (!active) return;
+
+        const step = e.shiftKey ? 10 : 1;  // mm
+        let dx = 0, dy = 0;
+        if (e.key === 'ArrowLeft')  dx = -step;
+        if (e.key === 'ArrowRight') dx =  step;
+        if (e.key === 'ArrowUp')    dy =  step;
+        if (e.key === 'ArrowDown')  dy = -step;
+
+        // Collect shape names to move
+        const shapeNames = active.type === 'activeSelection'
+            ? active.getObjects().map(o => o.shapeName).filter(Boolean)
+            : (active.shapeName ? [active.shapeName] : []);
+
+        if (shapeNames.length === 0) return;
+
+        saveUndoState();
+
+        shapeNames.forEach(name => {
+            const data = shapeData[name];
+            if (!data || !data.originalMmPoints) return;
+
+            let newPoints = data.originalMmPoints.map(p => [p[0] + dx, p[1] + dy]);
+
+            // Constrain to work area
+            const xs = newPoints.map(p => p[0]);
+            const ys = newPoints.map(p => p[1]);
+            let cx = 0, cy = 0;
+            if (Math.min(...xs) < 0)               cx = -Math.min(...xs);
+            else if (Math.max(...xs) > WORK_WIDTH)  cx = WORK_WIDTH - Math.max(...xs);
+            if (Math.min(...ys) < 0)               cy = -Math.min(...ys);
+            else if (Math.max(...ys) > WORK_HEIGHT) cy = WORK_HEIGHT - Math.max(...ys);
+            if (cx !== 0 || cy !== 0) {
+                newPoints = newPoints.map(p => [p[0] + cx, p[1] + cy]);
+            }
+
+            data.originalMmPoints = newPoints;
+            emitShapeUpdate(name);
+        });
+
+        // Redraw all moved shapes
+        shapeNames.forEach(name => redrawShapeFromData(name));
+
+        // Restore multi-selection if needed
+        if (shapeNames.length > 1) {
+            const objs = shapeNames.map(n => shapes[n]).filter(Boolean);
+            canvas.discardActiveObject();
+            const sel = new fabric.ActiveSelection(objs, { canvas });
+            canvas.setActiveObject(sel);
+        }
+
+        canvas.renderAll();
+        e.preventDefault();
     }
 }
 
@@ -2625,6 +2792,8 @@ window.toolpathCanvas = {
     // Transform tools
     mirrorX: mirrorX,
     mirrorY: mirrorY,
+    alignCentersVertical: alignCentersVertical,
+    alignCentersHorizontal: alignCentersHorizontal,
     rotate90: rotate90,
     rotateByDegrees: rotateByDegrees,
     scaleShape: scaleShape,
@@ -2651,6 +2820,8 @@ window.toolpathCanvas = {
     // Notch tool
     setNotchMode: setNotchMode,
     getNotches: getNotches,
+    // Units
+    setUnits: setUnits,
     // Zoom
     resetZoom: resetZoom,
     // Toolpath visualization
@@ -2659,6 +2830,17 @@ window.toolpathCanvas = {
     isToolpathLocked: isToolpathLocked,
     updateToolhead: updateToolhead
 };
+
+// ============ UNITS TOGGLE ============
+
+function setUnits(unit) {
+    currentUnit = unit;
+    drawGrid();
+    // Send grid lines to back so shapes remain on top
+    gridLines.forEach(line => canvas.sendToBack(line));
+    if (workAreaRect) canvas.sendToBack(workAreaRect);
+    canvas.renderAll();
+}
 
 // ============ TOOLPATH VISUALIZATION ============
 

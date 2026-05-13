@@ -1862,9 +1862,27 @@ def main_page():
                                 notch_btn = ui.button('✂ Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+                                ui.button('⬡ Align ↕', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align centers vertically — same X position')
+                                ui.button('⬡ Align ↔', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align centers horizontally — same Y position')
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.label('Notches are cut first before shape outlines.').style('color: #555; font-size: 11px; font-style: italic;')
                                 ui.element('div').style('flex: 1;')
                                 ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+
+                                # Units toggle: mm ↔ in
+                                units_state = {'unit': 'mm'}
+
+                                async def toggle_units():
+                                    if units_state['unit'] == 'mm':
+                                        units_state['unit'] = 'in'
+                                        units_btn.set_text('in')
+                                    else:
+                                        units_state['unit'] = 'mm'
+                                        units_btn.set_text('mm')
+                                    await ui.run_javascript(f"window.toolpathCanvas.setUnits('{units_state[\"unit\"]}')")
+
+                                units_btn = ui.button('mm', on_click=toggle_units).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa; min-width: 52px;').tooltip('Toggle axis units between mm and inches')
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
