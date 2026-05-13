@@ -1583,6 +1583,16 @@ def main_page():
                 background: transparent !important;
             }
             
+            /* Hide number input spinners */
+            input[type=number]::-webkit-inner-spin-button,
+            input[type=number]::-webkit-outer-spin-button {
+                -webkit-appearance: none;
+                margin: 0;
+            }
+            input[type=number] {
+                -moz-appearance: textfield;
+            }
+
             /* Toolbar input fields - fixed height to match buttons */
             .toolbar-input .q-field__control {
                 height: 36px !important;
@@ -1851,9 +1861,11 @@ def main_page():
                                 notch_mode_state['active'] = not notch_mode_state['active']
                                 btn = notch_mode_state['btn']
                                 if notch_mode_state['active']:
-                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35; color: #1a1a1a; font-weight: 700;')
+                                    btn.props('dense unelevated')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35 !important; color: #1a1a1a !important; font-weight: 700;')
                                     btn.set_text('✂ Notch  (ON)')
                                 else:
+                                    btn.props('dense flat')
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
                                     btn.set_text('✂ Notch')
                                 ui.run_javascript(f"window.toolpathCanvas.setNotchMode({str(notch_mode_state['active']).lower()})")

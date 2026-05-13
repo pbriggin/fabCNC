@@ -1449,24 +1449,31 @@ function distributeHorizontally() {
 
     if (shapeEntries.length < 3) return false;
 
+    // Compute each shape's left/right/width from originalMmPoints
     shapeEntries.forEach(s => {
         const xVals = s.data.originalMmPoints.map(p => p[0]);
-        s.centerX = (Math.min(...xVals) + Math.max(...xVals)) / 2;
+        s.minX = Math.min(...xVals);
+        s.maxX = Math.max(...xVals);
+        s.width = s.maxX - s.minX;
     });
 
-    shapeEntries.sort((a, b) => a.centerX - b.centerX);
+    // Sort by left edge
+    shapeEntries.sort((a, b) => a.minX - b.minX);
 
-    const minX = shapeEntries[0].centerX;
-    const maxX = shapeEntries[shapeEntries.length - 1].centerX;
-    const step = (maxX - minX) / (shapeEntries.length - 1);
+    const totalSpan = shapeEntries[shapeEntries.length - 1].maxX - shapeEntries[0].minX;
+    const totalShapeWidth = shapeEntries.reduce((sum, s) => sum + s.width, 0);
+    const gap = (totalSpan - totalShapeWidth) / (shapeEntries.length - 1);
 
+    // Place each shape so gaps between edges are equal; keep leftmost fixed
+    let cursor = shapeEntries[0].minX;
     shapeEntries.forEach((s, i) => {
-        const targetX = minX + i * step;
-        const dx = targetX - s.centerX;
+        const targetMinX = i === 0 ? s.minX : cursor;
+        const dx = targetMinX - s.minX;
         if (Math.abs(dx) > 0.001) {
             s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0] + dx, p[1]]);
             s.data.initialLeft = null;
         }
+        cursor = targetMinX + s.width + gap;
         redrawShapeFromData(s.name);
         emitShapeUpdate(s.name);
     });
@@ -1488,24 +1495,31 @@ function distributeVertically() {
 
     if (shapeEntries.length < 3) return false;
 
+    // Compute each shape's top/bottom/height from originalMmPoints
     shapeEntries.forEach(s => {
         const yVals = s.data.originalMmPoints.map(p => p[1]);
-        s.centerY = (Math.min(...yVals) + Math.max(...yVals)) / 2;
+        s.minY = Math.min(...yVals);
+        s.maxY = Math.max(...yVals);
+        s.height = s.maxY - s.minY;
     });
 
-    shapeEntries.sort((a, b) => a.centerY - b.centerY);
+    // Sort by bottom edge
+    shapeEntries.sort((a, b) => a.minY - b.minY);
 
-    const minY = shapeEntries[0].centerY;
-    const maxY = shapeEntries[shapeEntries.length - 1].centerY;
-    const step = (maxY - minY) / (shapeEntries.length - 1);
+    const totalSpan = shapeEntries[shapeEntries.length - 1].maxY - shapeEntries[0].minY;
+    const totalShapeHeight = shapeEntries.reduce((sum, s) => sum + s.height, 0);
+    const gap = (totalSpan - totalShapeHeight) / (shapeEntries.length - 1);
 
+    // Place each shape so gaps between edges are equal; keep bottommost fixed
+    let cursor = shapeEntries[0].minY;
     shapeEntries.forEach((s, i) => {
-        const targetY = minY + i * step;
-        const dy = targetY - s.centerY;
+        const targetMinY = i === 0 ? s.minY : cursor;
+        const dy = targetMinY - s.minY;
         if (Math.abs(dy) > 0.001) {
             s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0], p[1] + dy]);
             s.data.initialLeft = null;
         }
+        cursor = targetMinY + s.height + gap;
         redrawShapeFromData(s.name);
         emitShapeUpdate(s.name);
     });
