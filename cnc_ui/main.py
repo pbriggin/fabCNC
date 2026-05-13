@@ -1857,8 +1857,7 @@ def main_page():
                                     btn.set_text('✂ Notch')
                                 ui.run_javascript(f"window.toolpathCanvas.setNotchMode({str(notch_mode_state['active']).lower()})")
 
-                            with ui.row().classes('items-center gap-2').style('background: #252525; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
-                                ui.label('Edit:').style('color: #777; font-size: 12px;')
+                            with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
                                 notch_btn = ui.button('✂ Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
@@ -1867,7 +1866,6 @@ def main_page():
                                 ui.button(icon='horizontal_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeHorizontally()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Horizontally — equal X spacing (need 3+ shapes)')
                                 ui.button(icon='vertical_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeVertically()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Vertically — equal Y spacing (need 3+ shapes)')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.label('Notches are cut first before shape outlines.').style('color: #555; font-size: 11px; font-style: italic;')
                                 ui.element('div').style('flex: 1;')
                                 ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')

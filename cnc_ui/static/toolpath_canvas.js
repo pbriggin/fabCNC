@@ -23,6 +23,19 @@ let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
 // Unit display mode
 let currentUnit = 'mm';  // 'mm' or 'in'
 
+// Ruler state — adjustable right and top boundaries (in mm)
+let rulerRightMm = WORK_WIDTH;    // default = full width
+let rulerTopMm   = WORK_HEIGHT;   // default = full height
+// Fabric.js ruler objects
+let rulerRightLine   = null;
+let rulerTopLine     = null;
+let rulerRightHandle = null;
+let rulerTopHandle   = null;
+let rulerBoundsRect  = null;   // invisible rect used for drag-constraint reference
+let rulerRightLabel  = null;
+let rulerTopLabel    = null;
+const RULER_COLOR = '#FFA726';  // amber
+
 // Viewport zoom/pan state (separate from the mm→px scale)
 let viewZoom = 1;            // Current viewport zoom level
 let isPanning = false;       // True while alt+drag pan is active
@@ -78,6 +91,7 @@ function updateCanvasSize() {
     // Redraw grid and work area
     drawGrid();
     drawWorkArea();
+    drawRulers();
     
     // Redraw all shapes at new scale
     redrawAllShapes();
@@ -188,9 +202,11 @@ function initCanvas(elementId) {
     // Draw grid and work area
     drawGrid();
     drawWorkArea();
+    drawRulers();
     
     // Save undo state before any transform starts
     canvas.on('mouse:down', function(e) {
+        if (e.target && e.target._isRulerHandle) return;  // no undo save for ruler drags
         if (e.target && (e.target.shapeName || e.target.type === 'activeSelection')) {
             saveUndoState();
         }
@@ -211,6 +227,7 @@ function initCanvas(elementId) {
     // Handle object movement and transforms
     canvas.on('object:moved', function(e) {
         const obj = e.target;
+        if (obj && obj._isRulerHandle) return;  // ruler already updated live
         if (obj && obj.type === 'activeSelection') {
             console.log('=== object:moved (activeSelection) ===');
             onGroupMoved(obj);
@@ -223,6 +240,7 @@ function initCanvas(elementId) {
     canvas.on('object:rotated', onShapeRotated);
     canvas.on('object:modified', function(e) {
         const obj = e.target;
+        if (obj && obj._isRulerHandle) return;  // ruler already updated live
         if (obj && obj.type === 'activeSelection') {
             console.log('=== object:modified (activeSelection) ===');
             onGroupMoved(obj);
@@ -456,21 +474,199 @@ function drawWorkArea() {
     canvas.sendToBack(workAreaRect);
 }
 
-// Helper: Constrain points to work area bounds
+// Return the current ruler-bounded work area (mm)
+function getRulerBounds() {
+    return { right: rulerRightMm, top: rulerTopMm };
+}
+
+// Bring ruler handles / labels to the very front so they're always clickable
+function ensureRulerHandlesFront() {
+    if (rulerRightHandle) canvas.bringToFront(rulerRightHandle);
+    if (rulerTopHandle)   canvas.bringToFront(rulerTopHandle);
+    if (rulerRightLabel)  canvas.bringToFront(rulerRightLabel);
+    if (rulerTopLabel)    canvas.bringToFront(rulerTopLabel);
+}
+
+// Draw (or redraw) ruler lines, handles, and the invisible bounds rect
+function drawRulers() {
+    // Remove existing ruler objects
+    [rulerRightLine, rulerTopLine, rulerRightHandle, rulerTopHandle,
+     rulerBoundsRect, rulerRightLabel, rulerTopLabel].forEach(obj => {
+        if (obj) canvas.remove(obj);
+    });
+    rulerRightLine = rulerTopLine = rulerRightHandle = rulerTopHandle = null;
+    rulerBoundsRect = rulerRightLabel = rulerTopLabel = null;
+
+    const rx       = toCanvasX(rulerRightMm);
+    const ty       = toCanvasY(rulerTopMm);
+    const workLeft = toCanvasX(0);
+    const workTop  = toCanvasY(WORK_HEIGHT);   // top of the work area in canvas Y
+
+    // --- right ruler: dashed vertical line ---
+    rulerRightLine = new fabric.Line([rx, 0, rx, canvasHeight], {
+        stroke: RULER_COLOR, strokeWidth: 1.5,
+        strokeDashArray: [6, 4],
+        selectable: false, evented: false,
+        opacity: 0.85,
+        _isRulerLine: true
+    });
+
+    // --- top ruler: dashed horizontal line ---
+    rulerTopLine = new fabric.Line([0, ty, canvasWidth, ty], {
+        stroke: RULER_COLOR, strokeWidth: 1.5,
+        strokeDashArray: [6, 4],
+        selectable: false, evented: false,
+        opacity: 0.85,
+        _isRulerLine: true
+    });
+
+    // --- right ruler handle: triangle tab at the top of the ruler line ---
+    // Triangle sits just above the work area top edge; points downward (into work area).
+    rulerRightHandle = new fabric.Triangle({
+        left: rx, top: workTop - 8,
+        width: 14, height: 12, angle: 180,
+        fill: RULER_COLOR, stroke: '#fff', strokeWidth: 1,
+        originX: 'center', originY: 'center',
+        hasControls: false, hasBorders: false,
+        lockMovementY: true,
+        selectable: true, evented: true,
+        hoverCursor: 'ew-resize',
+        _isRulerHandle: 'right'
+    });
+
+    // --- top ruler handle: triangle tab at the left of the ruler line ---
+    // Triangle sits just right of the left axis; points rightward (into work area).
+    rulerTopHandle = new fabric.Triangle({
+        left: workLeft + 8, top: ty,
+        width: 12, height: 14, angle: 90,
+        fill: RULER_COLOR, stroke: '#fff', strokeWidth: 1,
+        originX: 'center', originY: 'center',
+        hasControls: false, hasBorders: false,
+        lockMovementX: true,
+        selectable: true, evented: true,
+        hoverCursor: 'ns-resize',
+        _isRulerHandle: 'top'
+    });
+
+    // --- labels ---
+    const useInches = (currentUnit === 'in');
+    const rightText = useInches
+        ? (rulerRightMm / 25.4).toFixed(1) + '"'
+        : Math.round(rulerRightMm) + 'mm';
+    const topText = useInches
+        ? (rulerTopMm / 25.4).toFixed(1) + '"'
+        : Math.round(rulerTopMm) + 'mm';
+
+    rulerRightLabel = new fabric.Text(rightText, {
+        left: rx + 5, top: workTop - 22,
+        fontSize: 10, fill: RULER_COLOR,
+        fontFamily: 'Roboto, sans-serif',
+        selectable: false, evented: false,
+        _isRulerLabel: true
+    });
+
+    rulerTopLabel = new fabric.Text(topText, {
+        left: workLeft + 4, top: ty - 15,
+        fontSize: 10, fill: RULER_COLOR,
+        fontFamily: 'Roboto, sans-serif',
+        selectable: false, evented: false,
+        _isRulerLabel: true
+    });
+
+    // --- invisible bounds rect for onShapeMoving constraint ---
+    rulerBoundsRect = new fabric.Rect({
+        left: toCanvasX(0),
+        top:  toCanvasY(rulerTopMm),
+        width:  rulerRightMm * scale,
+        height: rulerTopMm   * scale,
+        fill: 'transparent', stroke: 'transparent', strokeWidth: 0,
+        selectable: false, evented: false,
+        _isRulerBoundsRect: true
+    });
+
+    canvas.add(rulerBoundsRect);
+    canvas.add(rulerRightLine);
+    canvas.add(rulerTopLine);
+    canvas.add(rulerRightHandle);
+    canvas.add(rulerTopHandle);
+    canvas.add(rulerRightLabel);
+    canvas.add(rulerTopLabel);
+
+    canvas.sendToBack(rulerBoundsRect);
+    ensureRulerHandlesFront();
+}
+
+// Called from object:moving when the moving object is a ruler handle
+function onRulerHandleMoving(obj) {
+    if (obj._isRulerHandle === 'right') {
+        // Clamp handle X to [left axis … right axis]
+        const minX = toCanvasX(0);
+        const maxX = toCanvasX(WORK_WIDTH);
+        obj.left = Math.max(minX, Math.min(maxX, obj.left));
+
+        rulerRightMm = Math.max(0, Math.min(WORK_WIDTH, fromCanvasX(obj.left)));
+
+        if (rulerRightLine) {
+            rulerRightLine.set({ x1: obj.left, x2: obj.left });
+            rulerRightLine.setCoords();
+        }
+        if (rulerRightLabel) {
+            const txt = currentUnit === 'in'
+                ? (rulerRightMm / 25.4).toFixed(1) + '"'
+                : Math.round(rulerRightMm) + 'mm';
+            rulerRightLabel.set({ text: txt, left: obj.left + 5 });
+        }
+        if (rulerBoundsRect) {
+            rulerBoundsRect.set({ width: rulerRightMm * scale });
+            rulerBoundsRect.setCoords();
+        }
+
+    } else if (obj._isRulerHandle === 'top') {
+        // Clamp handle Y to [work area top … work area bottom]
+        const minY = toCanvasY(WORK_HEIGHT);   // smaller canvas Y = higher mm
+        const maxY = toCanvasY(0);
+        obj.top = Math.max(minY, Math.min(maxY, obj.top));
+
+        rulerTopMm = Math.max(0, Math.min(WORK_HEIGHT, fromCanvasY(obj.top)));
+
+        if (rulerTopLine) {
+            rulerTopLine.set({ y1: obj.top, y2: obj.top });
+            rulerTopLine.setCoords();
+        }
+        if (rulerTopLabel) {
+            const txt = currentUnit === 'in'
+                ? (rulerTopMm / 25.4).toFixed(1) + '"'
+                : Math.round(rulerTopMm) + 'mm';
+            rulerTopLabel.set({ text: txt, top: obj.top - 15 });
+        }
+        if (rulerBoundsRect) {
+            rulerBoundsRect.set({
+                top:    toCanvasY(rulerTopMm),
+                height: rulerTopMm * scale
+            });
+            rulerBoundsRect.setCoords();
+        }
+    }
+}
+
+// Helper: Constrain points to ruler-bounded work area
 function constrainShapeToWorkArea(points) {
+    const boundRight = rulerRightMm;
+    const boundTop   = rulerTopMm;
+
     const xVals = points.map(p => p[0]);
     const yVals = points.map(p => p[1]);
     const minX = Math.min(...xVals);
     const maxX = Math.max(...xVals);
     const minY = Math.min(...yVals);
     const maxY = Math.max(...yVals);
-    
+
     let offsetX = 0, offsetY = 0;
     if (minX < 0) offsetX = -minX;
-    else if (maxX > WORK_WIDTH) offsetX = WORK_WIDTH - maxX;
+    else if (maxX > boundRight) offsetX = boundRight - maxX;
     if (minY < 0) offsetY = -minY;
-    else if (maxY > WORK_HEIGHT) offsetY = WORK_HEIGHT - maxY;
-    
+    else if (maxY > boundTop) offsetY = boundTop - maxY;
+
     if (offsetX !== 0 || offsetY !== 0) {
         return points.map(p => [p[0] + offsetX, p[1] + offsetY]);
     }
@@ -493,9 +689,15 @@ function clearShapes() {
     notchNodeObjects = [];
     Object.values(notchMarkObjects).forEach(arr => arr.forEach(obj => canvas.remove(obj)));
     notchMarkObjects = {};
-    // Also remove any other objects that aren't grid/work area
+    // Also remove any other objects that aren't grid/work area/rulers
     const objectsToRemove = canvas.getObjects().filter(obj => 
-        obj !== workAreaRect && !gridLines.includes(obj) && !axisLabels.includes(obj)
+        obj !== workAreaRect &&
+        !gridLines.includes(obj) &&
+        !axisLabels.includes(obj) &&
+        !obj._isRulerLine &&
+        !obj._isRulerHandle &&
+        !obj._isRulerLabel &&
+        !obj._isRulerBoundsRect
     );
     objectsToRemove.forEach(obj => canvas.remove(obj));
     
@@ -546,18 +748,18 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
         initialTop: null
     };
     
-    // Constrain shape to work area bounds if needed
-    if (minX < 0 || maxX > WORK_WIDTH || minY < 0 || maxY > WORK_HEIGHT) {
+    // Constrain shape to ruler-bounded area if needed
+    if (minX < 0 || maxX > rulerRightMm || minY < 0 || maxY > rulerTopMm) {
         let offsetX = 0, offsetY = 0;
         if (minX < 0) offsetX = -minX;
-        else if (maxX > WORK_WIDTH) offsetX = WORK_WIDTH - maxX;
+        else if (maxX > rulerRightMm) offsetX = rulerRightMm - maxX;
         if (minY < 0) offsetY = -minY;
-        else if (maxY > WORK_HEIGHT) offsetY = WORK_HEIGHT - maxY;
+        else if (maxY > rulerTopMm) offsetY = rulerTopMm - maxY;
         
         // Apply offset to constrain within bounds
         shapeData[name].originalMmPoints = points.map(p => [p[0] + offsetX, p[1] + offsetY]);
         points = shapeData[name].originalMmPoints;
-        console.log('Shape constrained to work area:', name);
+        console.log('Shape constrained to ruler area:', name);
     }
     
     // Convert points to canvas coordinates
@@ -595,6 +797,9 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     canvas.setActiveObject(polyline);
     canvas.renderAll();
     
+    // Keep ruler handles on top
+    ensureRulerHandlesFront();
+    
     // Store initial left/top position AFTER adding to canvas
     shapeData[name].initialLeft = polyline.left;
     shapeData[name].initialTop = polyline.top;
@@ -607,14 +812,23 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
 // Constrain shape to work area during drag (real-time)
 function onShapeMoving(e) {
     const obj = e.target;
-    if (!obj || !obj.shapeName) return;
+    if (!obj) return;
+
+    // Ruler handle — delegate to dedicated handler
+    if (obj._isRulerHandle) {
+        onRulerHandleMoving(obj);
+        return;
+    }
+
+    if (!obj.shapeName) return;
     
-    // Use the work area rect bounds directly
-    if (!workAreaRect) return;
+    // Use the ruler bounds rect (tracks current ruler area); fall back to full work area
+    const boundsRect = rulerBoundsRect || workAreaRect;
+    if (!boundsRect) return;
     
     // Get the bounding box of the shape
     const bound = obj.getBoundingRect(true, true); // absolute coords, skip transform
-    const work = workAreaRect.getBoundingRect();
+    const work = boundsRect.getBoundingRect();
     
     // Calculate offset between object origin (left,top) and bounding rect
     const offsetLeft = obj.left - bound.left;
@@ -696,14 +910,14 @@ function onGroupMoved(group) {
 
         let newPoints = data.originalMmPoints.map(p => [p[0] + deltaMmX, p[1] + deltaMmY]);
 
-        // Constrain to work area
+        // Constrain to ruler-bounded work area
         const xs = newPoints.map(p => p[0]);
         const ys = newPoints.map(p => p[1]);
         let cx = 0, cy = 0;
-        if (Math.min(...xs) < 0)            cx = -Math.min(...xs);
-        else if (Math.max(...xs) > WORK_WIDTH)  cx = WORK_WIDTH - Math.max(...xs);
-        if (Math.min(...ys) < 0)            cy = -Math.min(...ys);
-        else if (Math.max(...ys) > WORK_HEIGHT) cy = WORK_HEIGHT - Math.max(...ys);
+        if (Math.min(...xs) < 0)               cx = -Math.min(...xs);
+        else if (Math.max(...xs) > rulerRightMm)  cx = rulerRightMm - Math.max(...xs);
+        if (Math.min(...ys) < 0)               cy = -Math.min(...ys);
+        else if (Math.max(...ys) > rulerTopMm) cy = rulerTopMm - Math.max(...ys);
         if (cx !== 0 || cy !== 0) {
             newPoints = newPoints.map(p => [p[0] + cx, p[1] + cy]);
         }
@@ -776,9 +990,9 @@ function onShapeMoved(e) {
     // Constrain to work area
     let constrainX = 0, constrainY = 0;
     if (minX < 0) constrainX = -minX;
-    else if (maxX > WORK_WIDTH) constrainX = WORK_WIDTH - maxX;
+    else if (maxX > rulerRightMm) constrainX = rulerRightMm - maxX;
     if (minY < 0) constrainY = -minY;
-    else if (maxY > WORK_HEIGHT) constrainY = WORK_HEIGHT - maxY;
+    else if (maxY > rulerTopMm) constrainY = rulerTopMm - maxY;
     
     if (constrainX !== 0 || constrainY !== 0) {
         // Apply constraint
@@ -1636,8 +1850,8 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 shapes: shapesForNest,
-                sheetWidth: WORK_WIDTH,
-                sheetHeight: WORK_HEIGHT,
+                sheetWidth: rulerRightMm,
+                sheetHeight: rulerTopMm,
                 offset: spacing,
                 rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
             })
@@ -1763,7 +1977,7 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
             const candidates = generateCandidates(placedShapes, w, h, spacing);
             
             for (const pos of candidates) {
-                if (pos.x + w > WORK_WIDTH || pos.y + h > WORK_HEIGHT) continue;
+                if (pos.x + w > rulerRightMm || pos.y + h > rulerTopMm) continue;
                 
                 // Use full polygon for collision detection — simplified polygon can miss extreme
                 // vertices (stride-based simplification skips them), causing undetected overlaps.
@@ -1820,7 +2034,7 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
         if (p.bbox.maxY > maxY) maxY = p.bbox.maxY;
     }
     
-    if (maxX > WORK_WIDTH || maxY > WORK_HEIGHT) {
+    if (maxX > rulerRightMm || maxY > rulerTopMm) {
         return { success: false, error: `Need ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm` };
     }
     
@@ -1852,8 +2066,8 @@ function generateCandidates(placedShapes, width, height, spacing) {
     
     // Add grid positions for first shape or when few candidates
     if (placedShapes.length === 0) {
-        for (let y = 0; y <= WORK_HEIGHT - height; y += 50) {
-            for (let x = 0; x <= WORK_WIDTH - width; x += 50) {
+        for (let y = 0; y <= rulerTopMm - height; y += 50) {
+            for (let x = 0; x <= rulerRightMm - width; x += 50) {
                 candidates.push({x, y});
             }
         }
@@ -2105,6 +2319,9 @@ function redrawShapeFromData(shapeName) {
     // If in notch mode, refresh the node circles
     if (notchMode) showNotchNodes();
     
+    // Keep ruler handles on top of everything
+    ensureRulerHandlesFront();
+    
     console.log('redrawShapeFromData done:', shapeName, 'now in shapes:', !!shapes[shapeName], 'total shapes:', Object.keys(shapes).length);
     canvas.renderAll();
 }
@@ -2326,14 +2543,14 @@ function handleKeyDown(e) {
 
             let newPoints = data.originalMmPoints.map(p => [p[0] + dx, p[1] + dy]);
 
-            // Constrain to work area
+            // Constrain to ruler-bounded work area
             const xs = newPoints.map(p => p[0]);
             const ys = newPoints.map(p => p[1]);
             let cx = 0, cy = 0;
-            if (Math.min(...xs) < 0)               cx = -Math.min(...xs);
-            else if (Math.max(...xs) > WORK_WIDTH)  cx = WORK_WIDTH - Math.max(...xs);
-            if (Math.min(...ys) < 0)               cy = -Math.min(...ys);
-            else if (Math.max(...ys) > WORK_HEIGHT) cy = WORK_HEIGHT - Math.max(...ys);
+            if (Math.min(...xs) < 0)                  cx = -Math.min(...xs);
+            else if (Math.max(...xs) > rulerRightMm)  cx = rulerRightMm - Math.max(...xs);
+            if (Math.min(...ys) < 0)                  cy = -Math.min(...ys);
+            else if (Math.max(...ys) > rulerTopMm)    cy = rulerTopMm - Math.max(...ys);
             if (cx !== 0 || cy !== 0) {
                 newPoints = newPoints.map(p => [p[0] + cx, p[1] + cy]);
             }
@@ -2898,6 +3115,8 @@ window.toolpathCanvas = {
     // Notch tool
     setNotchMode: setNotchMode,
     getNotches: getNotches,
+    // Rulers
+    getRulerBounds: getRulerBounds,
     // Units
     setUnits: setUnits,
     // Zoom
@@ -2914,6 +3133,7 @@ window.toolpathCanvas = {
 function setUnits(unit) {
     currentUnit = unit;
     drawGrid();
+    drawRulers();
     // Send grid lines to back so shapes remain on top
     gridLines.forEach(line => canvas.sendToBack(line));
     if (workAreaRect) canvas.sendToBack(workAreaRect);
