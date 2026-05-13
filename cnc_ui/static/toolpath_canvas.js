@@ -2837,10 +2837,9 @@ function computeNotchGeometry(points, nodeKey) {
     return { apex, e1, e2, nodePoint: p };
 }
 
-// Return one node per meaningful DXF segment (arc-length midpoint).
-// Segments shorter than MIN_SEGMENT_MM are skipped — these are tiny connector
-// lines that appear between splines in some DXF exports and are not useful
-// as notch locations.
+// Return nodes for a shape: one midpoint node per meaningful DXF segment, plus
+// one junction node at each join between two meaningful segments.
+// Segments shorter than MIN_SEGMENT_MM are skipped (tiny DXF connector lines).
 function computeCardinalNodes(shapeName) {
     const data = shapeData[shapeName];
     if (!data || !data.originalMmPoints) return [];
@@ -2849,30 +2848,31 @@ function computeCardinalNodes(shapeName) {
 
     const MIN_SEGMENT_MM = 15;  // skip segments shorter than this
 
-    // Use segment breaks tracked from the original DXF entities.
-    // segmentBreaks[k] = index in pts[] where original entity k starts.
-    // Segment k spans pts[segmentBreaks[k] .. segmentBreaks[k+1]-1] (or to n-1 for last).
     const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
         ? data.segmentBreaks
         : [0];
 
-    // Build one node per original segment at its arc-length midpoint
-    const nodes = [];
-    for (let si = 0; si < breaks.length; si++) {
-        const start = breaks[si];
-        const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
-        if (end <= start) continue;
-
-        // Compute total arc length of this segment
-        let totalLen = 0;
+    // Pre-compute arc length of each segment
+    const segLens = breaks.map((start, si) => {
+        const end = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
+        let len = 0;
         for (let i = start; i < end; i++) {
             const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
-            totalLen += Math.sqrt(dx*dx + dy*dy);
+            len += Math.sqrt(dx*dx + dy*dy);
         }
-        if (totalLen < MIN_SEGMENT_MM) continue;  // skip tiny connector segments
+        return len;
+    });
 
-        // Walk to the halfway arc-length point
-        const half = totalLen / 2;
+    const nodes = [];
+
+    // --- Midpoint node per meaningful segment ---
+    for (let si = 0; si < breaks.length; si++) {
+        if (segLens[si] < MIN_SEGMENT_MM) continue;
+
+        const start = breaks[si];
+        const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
+
+        const half = segLens[si] / 2;
         let walked = 0;
         let mx = pts[start][0], my = pts[start][1];
         let edgeIdx = start;
@@ -2888,8 +2888,28 @@ function computeCardinalNodes(shapeName) {
             }
             walked += segLen;
         }
-
         nodes.push({ edgeIdx, x: mx, y: my });
+    }
+
+    // --- Junction node at each join between two meaningful segments ---
+    for (let si = 1; si < breaks.length; si++) {
+        // Skip if either the previous or current segment is too short
+        if (segLens[si - 1] < MIN_SEGMENT_MM || segLens[si] < MIN_SEGMENT_MM) continue;
+
+        const jIdx = breaks[si];
+        if (jIdx <= 0 || jIdx >= n - 1) continue;
+        nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
+    }
+
+    // --- Wrap-around junction: join between last and first segment (closed shapes) ---
+    if (breaks.length > 1 &&
+        segLens[segLens.length - 1] >= MIN_SEGMENT_MM &&
+        segLens[0] >= MIN_SEGMENT_MM) {
+        const closeTol = 1.0;
+        const dx0 = pts[n-1][0] - pts[0][0], dy0 = pts[n-1][1] - pts[0][1];
+        if (Math.sqrt(dx0*dx0 + dy0*dy0) < closeTol) {
+            nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+        }
     }
 
     return nodes;
