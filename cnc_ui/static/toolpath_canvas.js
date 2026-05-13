@@ -2837,15 +2837,17 @@ function computeNotchGeometry(points, nodeKey) {
     return { apex, e1, e2, nodePoint: p };
 }
 
-// Return exactly 4 cardinal nodes (top, bottom, left, right) for a shape.
-// Each node sits on the most extreme edge in that direction, but its position
-// is pinned to the bounding-box center on the perpendicular axis so it is
-// always visually centered regardless of polygon tessellation.
+// Return one node per meaningful DXF segment (arc-length midpoint).
+// Segments shorter than MIN_SEGMENT_MM are skipped — these are tiny connector
+// lines that appear between splines in some DXF exports and are not useful
+// as notch locations.
 function computeCardinalNodes(shapeName) {
     const data = shapeData[shapeName];
     if (!data || !data.originalMmPoints) return [];
     const pts = data.originalMmPoints;
     const n = pts.length;
+
+    const MIN_SEGMENT_MM = 15;  // skip segments shorter than this
 
     // Use segment breaks tracked from the original DXF entities.
     // segmentBreaks[k] = index in pts[] where original entity k starts.
@@ -2867,7 +2869,7 @@ function computeCardinalNodes(shapeName) {
             const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
             totalLen += Math.sqrt(dx*dx + dy*dy);
         }
-        if (totalLen < 0.001) continue;  // skip degenerate
+        if (totalLen < MIN_SEGMENT_MM) continue;  // skip tiny connector segments
 
         // Walk to the halfway arc-length point
         const half = totalLen / 2;
@@ -2888,62 +2890,6 @@ function computeCardinalNodes(shapeName) {
         }
 
         nodes.push({ edgeIdx, x: mx, y: my });
-    }
-
-    // --- Junction nodes: one at each segment-to-segment join that is NOT a sharp corner ---
-    const CORNER_THRESHOLD_DEG = 20;  // angles smaller than this are considered smooth
-    const CORNER_COS = Math.cos(CORNER_THRESHOLD_DEG * Math.PI / 180);
-
-    for (let si = 1; si < breaks.length; si++) {
-        const jIdx = breaks[si];             // index of junction vertex in pts[]
-        if (jIdx <= 0 || jIdx >= n - 1) continue;
-
-        // Incoming tangent: last sub-edge of previous segment
-        const inDx = pts[jIdx][0] - pts[jIdx - 1][0];
-        const inDy = pts[jIdx][1] - pts[jIdx - 1][1];
-        const inLen = Math.sqrt(inDx*inDx + inDy*inDy);
-
-        // Outgoing tangent: first sub-edge of this segment
-        const outDx = pts[jIdx + 1][0] - pts[jIdx][0];
-        const outDy = pts[jIdx + 1][1] - pts[jIdx][1];
-        const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
-
-        if (inLen < 1e-9 || outLen < 1e-9) continue;
-
-        const dot = (inDx/inLen) * (outDx/outLen) + (inDy/inLen) * (outDy/outLen);
-        if (dot >= CORNER_COS) {
-            // Smooth join — add a node here
-            // Use fractional edgeIdx so it doesn't collide with midpoint node edgeIdxes
-            nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
-        }
-    }
-
-    // --- Wrap-around junction: for closed shapes, check the seam between last segment and first ---
-    // The top junction of this shape lands at index 0 (start of merged array) which the loop above skips.
-    if (breaks.length > 1) {
-        const closeTol = 1.0; // mm
-        const dx0 = pts[n-1][0] - pts[0][0], dy0 = pts[n-1][1] - pts[0][1];
-        const isClosed = Math.sqrt(dx0*dx0 + dy0*dy0) < closeTol;
-
-        if (isClosed) {
-            // Incoming tangent: last edge of the last segment (approaching pts[0]/pts[n-1])
-            const inDx = pts[n-1][0] - pts[n-2][0];
-            const inDy = pts[n-1][1] - pts[n-2][1];
-            const inLen = Math.sqrt(inDx*inDx + inDy*inDy);
-
-            // Outgoing tangent: first edge of the first segment (leaving pts[0])
-            const outDx = pts[1][0] - pts[0][0];
-            const outDy = pts[1][1] - pts[0][1];
-            const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
-
-            if (inLen > 1e-9 && outLen > 1e-9) {
-                const dot = (inDx/inLen) * (outDx/outLen) + (inDy/inLen) * (outDy/outLen);
-                if (dot >= CORNER_COS) {
-                    // Smooth wrap-around join — use edgeIdx -0.5 (rounds to 0 in computeNotchGeometry)
-                    nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
-                }
-            }
-        }
     }
 
     return nodes;
