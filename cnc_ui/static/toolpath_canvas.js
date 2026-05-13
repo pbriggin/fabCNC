@@ -214,6 +214,11 @@ function initCanvas(elementId) {
         if (e.target && (e.target.shapeName || e.target.type === 'activeSelection')) {
             saveUndoState();
         }
+        // Initialise notch-mark tracking so the first delta in onShapeMoving is zero
+        if (e.target && e.target.shapeName) {
+            e.target._notchTrackLeft = e.target.left;
+            e.target._notchTrackTop  = e.target.top;
+        }
     });
 
     // Capture start position of a multi-selection before any drag begins
@@ -840,9 +845,10 @@ function onShapeMoving(e) {
     const boundsRect = rulerBoundsRect || workAreaRect;
     if (!boundsRect) return;
     
-    // Get the bounding box of the shape
-    const bound = obj.getBoundingRect(true, true); // absolute coords, skip transform
-    const work = boundsRect.getBoundingRect();
+    // Get the bounding box of the shape in canvas-coordinate space (not viewport space)
+    // so it stays consistent with obj.left/obj.top regardless of viewport zoom level.
+    const bound = obj.getBoundingRect(false, true);
+    const work = boundsRect.getBoundingRect(false, true);
     
     // Calculate offset between object origin (left,top) and bounding rect
     const offsetLeft = obj.left - bound.left;
@@ -861,6 +867,21 @@ function onShapeMoving(e) {
     // Convert back to object origin position
     obj.left = newBoundLeft + offsetLeft;
     obj.top = newBoundTop + offsetTop;
+
+    // Translate notch marks in real-time so they follow the dragged shape
+    const prevLeft = obj._notchTrackLeft !== undefined ? obj._notchTrackLeft : obj.left;
+    const prevTop  = obj._notchTrackTop  !== undefined ? obj._notchTrackTop  : obj.top;
+    const dLeft = obj.left - prevLeft;
+    const dTop  = obj.top  - prevTop;
+    obj._notchTrackLeft = obj.left;
+    obj._notchTrackTop  = obj.top;
+    if ((dLeft !== 0 || dTop !== 0) && notchMarkObjects[obj.shapeName]) {
+        notchMarkObjects[obj.shapeName].forEach(line => {
+            line.left += dLeft;
+            line.top  += dTop;
+            line.setCoords();
+        });
+    }
 }
 
 // Get the current mm points for a shape based on its canvas position
@@ -937,6 +958,13 @@ function onGroupMoved(group) {
         }
 
         data.originalMmPoints = newPoints;
+        // Update notch nodeKey mm positions so computeNotchGeometry uses the new location
+        if (shapeNotches[name]) {
+            shapeNotches[name].forEach((nodeKey) => {
+                nodeKey.x += deltaMmX + cx;
+                nodeKey.y += deltaMmY + cy;
+            });
+        }
         // initialLeft/Top will be refreshed by redrawShapeFromData below
         emitShapeUpdate(name);
         console.log('  updated', name, 'mm X(' +
@@ -1035,7 +1063,17 @@ function onShapeMoved(e) {
     data.originalMmPoints = newPoints.map(p => [p[0], p[1]]);
     data.initialLeft = obj.left;
     data.initialTop = obj.top;
-    
+
+    // Update notch nodeKey mm positions so computeNotchGeometry uses the new location
+    const effectiveDeltaX = deltaMmX + constrainX;
+    const effectiveDeltaY = deltaMmY + constrainY;
+    if (shapeNotches[name]) {
+        shapeNotches[name].forEach((nodeKey) => {
+            nodeKey.x += effectiveDeltaX;
+            nodeKey.y += effectiveDeltaY;
+        });
+    }
+
     // Log result
     const newX = newPoints.map(p => p[0]);
     const newY = newPoints.map(p => p[1]);
