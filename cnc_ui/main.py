@@ -988,7 +988,6 @@ async def handle_file_upload(event, label):
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
         machine_state.set_toolpath_generated(False)
-        label.set_text(f'Loaded: {filename}')
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
     except Exception as e:
@@ -1831,7 +1830,7 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
-                                nest_offset = ui.number(value=5, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
                                 
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)

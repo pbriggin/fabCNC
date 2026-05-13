@@ -334,9 +334,7 @@ function initCanvas(elementId) {
         }
     });
     canvas.on('mouse:out', function(opt) {
-        if (opt.target && opt.target.shapeName) {
-            tooltip.style.display = 'none';
-        }
+        tooltip.style.display = 'none';
     });
     // ────────────────────────────────────────────────────────────────────────
     
@@ -1694,6 +1692,10 @@ function deleteShape() {
     
     saveUndoState();
     
+    // Hide any lingering shape tooltip
+    const tooltipEl = document.getElementById('shape-tooltip');
+    if (tooltipEl) tooltipEl.style.display = 'none';
+    
     // Discard selection first (important for multi-select)
     canvas.discardActiveObject();
     
@@ -1835,7 +1837,7 @@ function showToast(message, type = 'info', duration = 3000) {
     }
 }
 
-function nestShapes(keepOrientation = true, spacing = 5) {
+function nestShapes(keepOrientation = true, spacing = 15) {
     console.log('=== NESTING START ===');
     
     const allShapeNames = Object.keys(shapes).filter(name => shapes[name] && shapes[name].shapeName);
