@@ -697,7 +697,8 @@ function clearShapes() {
     undoStack = [];  // Clear undo history
     clipboard = null;  // Clear clipboard
     
-    // Clear all notch data
+    // Exit notch mode and clear all notch data
+    notchMode = false;
     shapeNotches = {};
     notchNodeObjects.forEach(obj => canvas.remove(obj));
     notchNodeObjects = [];
@@ -820,7 +821,10 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     // Store initial left/top position AFTER adding to canvas
     shapeData[name].initialLeft = polyline.left;
     shapeData[name].initialTop = polyline.top;
-    
+
+    // If notch mode is active, show node circles for the newly added shape
+    if (notchMode) showNotchNodes();
+
     console.log('addShape stored:', name,
         'initialLeft:', polyline.left.toFixed(1),
         'initialTop:', polyline.top.toFixed(1));
@@ -1081,6 +1085,7 @@ function onShapeMoved(e) {
     
     // Redraw notch marks so they follow the shape
     drawNotchMarksForShape(name);
+    if (notchMode) showNotchNodes();
 
     // Send update to Python backend
     if (window.emitEvent) {
@@ -1712,6 +1717,13 @@ function deleteShape() {
         deletedNames.push(name);
     });
     
+    // Exit notch mode if no shapes remain
+    if (Object.keys(shapes).length === 0) {
+        notchMode = false;
+    } else if (notchMode) {
+        showNotchNodes();
+    }
+
     canvas.renderAll();
     
     // Notify Python
@@ -3267,7 +3279,14 @@ function showToolpath(toolpathData) {
     
     // Clear any existing toolpath
     clearToolpathObjects();
-    
+
+    // Exit notch mode when toolpath is generated
+    if (notchMode) {
+        notchMode = false;
+        hideNotchNodes();
+        Object.values(shapes).forEach(shape => { shape.selectable = false; }); // keep locked by toolpath
+    }
+
     // Lock the canvas (hides Polyline shapes)
     lockCanvas();
 

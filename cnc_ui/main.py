@@ -1851,7 +1851,7 @@ def main_page():
                                 notch_mode_state['active'] = not notch_mode_state['active']
                                 btn = notch_mode_state['btn']
                                 if notch_mode_state['active']:
-                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35; color: #ffffff;')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35; color: #1a1a1a; font-weight: 700;')
                                     btn.set_text('✂ Notch  (ON)')
                                 else:
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
