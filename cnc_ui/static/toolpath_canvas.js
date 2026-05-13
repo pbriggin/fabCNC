@@ -676,6 +676,11 @@ function onGroupMoved(group) {
     group.getObjects().forEach(subObj => {
         if (subObj.shapeName) redrawShapeFromData(subObj.shapeName);
     });
+
+    // Redraw notch marks so they follow each moved shape
+    group.getObjects().forEach(subObj => {
+        if (subObj.shapeName) drawNotchMarksForShape(subObj.shapeName);
+    });
 }
 
 function onShapeMoved(e) {
@@ -765,6 +770,9 @@ function onShapeMoved(e) {
         'new mm X(' + Math.min(...newX).toFixed(1) + '-' + Math.max(...newX).toFixed(1) + ')',
         'Y(' + Math.min(...newY).toFixed(1) + '-' + Math.max(...newY).toFixed(1) + ')');
     
+    // Redraw notch marks so they follow the shape
+    drawNotchMarksForShape(name);
+
     // Send update to Python backend
     if (window.emitEvent) {
         window.emitEvent('shape_moved', {
@@ -2267,8 +2275,8 @@ function computeNotchGeometry(points, nodeKey) {
     if (area >= 0) { nx = -ty; ny = tx; }
     else           { nx = ty;  ny = -tx; }
 
-    const HALF_WIDTH = 3;  // mm — half the opening width along the boundary
-    const DEPTH = 4;       // mm — how deep the apex goes into the shape
+    const HALF_WIDTH = 4;  // mm — half the opening width along the boundary
+    const DEPTH = 5;       // mm — how deep the apex goes into the shape
 
     // Base points: on the boundary, either side of the midpoint
     const e1 = [p[0] + HALF_WIDTH * tx, p[1] + HALF_WIDTH * ty];
