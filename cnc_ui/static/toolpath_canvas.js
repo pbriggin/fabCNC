@@ -498,13 +498,15 @@ function drawRulers() {
     rulerRightLine = rulerTopLine = rulerRightHandle = rulerTopHandle = null;
     rulerBoundsRect = rulerRightLabel = rulerTopLabel = null;
 
-    const rx       = toCanvasX(rulerRightMm);
-    const ty       = toCanvasY(rulerTopMm);
-    const workLeft = toCanvasX(0);
-    const workTop  = toCanvasY(WORK_HEIGHT);   // top of the work area in canvas Y
+    const rx        = toCanvasX(rulerRightMm);
+    const ty        = toCanvasY(rulerTopMm);
+    const workLeft  = toCanvasX(0);
+    const workRight = toCanvasX(WORK_WIDTH);
+    const workTop   = toCanvasY(WORK_HEIGHT);   // top of the work area in canvas Y
+    const workBottom = toCanvasY(0);            // bottom of the work area in canvas Y
 
-    // --- right ruler: dashed vertical line ---
-    rulerRightLine = new fabric.Line([rx, 0, rx, canvasHeight], {
+    // --- right ruler: dashed vertical line, clipped to work area height ---
+    rulerRightLine = new fabric.Line([rx, workTop, rx, workBottom], {
         stroke: RULER_COLOR, strokeWidth: 1.5,
         strokeDashArray: [6, 4],
         selectable: false, evented: false,
@@ -512,8 +514,8 @@ function drawRulers() {
         _isRulerLine: true
     });
 
-    // --- top ruler: dashed horizontal line ---
-    rulerTopLine = new fabric.Line([0, ty, canvasWidth, ty], {
+    // --- top ruler: dashed horizontal line, clipped to work area width ---
+    rulerTopLine = new fabric.Line([workLeft, ty, workRight, ty], {
         stroke: RULER_COLOR, strokeWidth: 1.5,
         strokeDashArray: [6, 4],
         selectable: false, evented: false,
@@ -535,10 +537,10 @@ function drawRulers() {
         _isRulerHandle: 'right'
     });
 
-    // --- top ruler handle: triangle tab at the left of the ruler line ---
-    // Triangle sits just right of the left axis; points rightward (into work area).
+    // --- top ruler handle: triangle tab to the LEFT of the left axis (in padding) ---
+    // Triangle sits outside the work area; points rightward (into work area).
     rulerTopHandle = new fabric.Triangle({
-        left: workLeft + 8, top: ty,
+        left: workLeft - 10, top: ty,
         width: 12, height: 14, angle: 90,
         fill: RULER_COLOR, stroke: '#fff', strokeWidth: 1,
         originX: 'center', originY: 'center',
@@ -567,7 +569,8 @@ function drawRulers() {
     });
 
     rulerTopLabel = new fabric.Text(topText, {
-        left: workLeft + 4, top: ty - 15,
+        left: workLeft - 8, top: ty - 15,
+        originX: 'right',
         fontSize: 10, fill: RULER_COLOR,
         fontFamily: 'Roboto, sans-serif',
         selectable: false, evented: false,
@@ -608,7 +611,9 @@ function onRulerHandleMoving(obj) {
         rulerRightMm = Math.max(0, Math.min(WORK_WIDTH, fromCanvasX(obj.left)));
 
         if (rulerRightLine) {
-            rulerRightLine.set({ x1: obj.left, x2: obj.left });
+            const wTop    = toCanvasY(WORK_HEIGHT);
+            const wBottom = toCanvasY(0);
+            rulerRightLine.set({ x1: obj.left, x2: obj.left, y1: wTop, y2: wBottom });
             rulerRightLine.setCoords();
         }
         if (rulerRightLabel) {
@@ -631,14 +636,16 @@ function onRulerHandleMoving(obj) {
         rulerTopMm = Math.max(0, Math.min(WORK_HEIGHT, fromCanvasY(obj.top)));
 
         if (rulerTopLine) {
-            rulerTopLine.set({ y1: obj.top, y2: obj.top });
+            const wLeft  = toCanvasX(0);
+            const wRight = toCanvasX(WORK_WIDTH);
+            rulerTopLine.set({ y1: obj.top, y2: obj.top, x1: wLeft, x2: wRight });
             rulerTopLine.setCoords();
         }
         if (rulerTopLabel) {
             const txt = currentUnit === 'in'
                 ? (rulerTopMm / 25.4).toFixed(1) + '"'
                 : Math.round(rulerTopMm) + 'mm';
-            rulerTopLabel.set({ text: txt, top: obj.top - 15 });
+            rulerTopLabel.set({ text: txt, top: obj.top - 15, originX: 'right' });
         }
         if (rulerBoundsRect) {
             rulerBoundsRect.set({
