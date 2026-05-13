@@ -23,19 +23,6 @@ let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
 // Unit display mode
 let currentUnit = 'mm';  // 'mm' or 'in'
 
-// Ruler state — adjustable right and top boundaries (in mm)
-let rulerRightMm = WORK_WIDTH;    // default = full width
-let rulerTopMm   = WORK_HEIGHT;   // default = full height
-// Fabric.js ruler objects
-let rulerRightLine   = null;
-let rulerTopLine     = null;
-let rulerRightHandle = null;
-let rulerTopHandle   = null;
-let rulerBoundsRect  = null;   // invisible rect used for drag-constraint reference
-let rulerRightLabel  = null;
-let rulerTopLabel    = null;
-const RULER_COLOR = '#FFA726';  // amber
-
 // Viewport zoom/pan state (separate from the mm→px scale)
 let viewZoom = 1;            // Current viewport zoom level
 let isPanning = false;       // True while alt+drag pan is active
@@ -48,6 +35,20 @@ const CANVAS_PADDING = 30;  // px - absolute padding around work area
 let scale = 1;
 let canvasWidth = 800;
 let canvasHeight = 500;
+
+// Ruler state — adjustable right and top boundaries (in mm)
+// Must be declared after WORK_WIDTH/WORK_HEIGHT constants above
+let rulerRightMm = WORK_WIDTH;    // default = full width
+let rulerTopMm   = WORK_HEIGHT;   // default = full height
+// Fabric.js ruler objects
+let rulerRightLine   = null;
+let rulerTopLine     = null;
+let rulerRightHandle = null;
+let rulerTopHandle   = null;
+let rulerBoundsRect  = null;   // invisible rect used for drag-constraint reference
+let rulerRightLabel  = null;
+let rulerTopLabel    = null;
+const RULER_COLOR = '#FFA726';  // amber
 
 // Colors for shapes (brighter for dark mode)
 const SHAPE_COLORS = ['#42A5F5', '#66BB6A', '#FFA726', '#EC407A', '#AB47BC', '#26C6DA'];
