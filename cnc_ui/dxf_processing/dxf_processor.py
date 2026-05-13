@@ -1,3 +1,4 @@
+import os
 import ezdxf
 from ezdxf.addons import drawing
 from ezdxf.path import make_path, Path
@@ -150,7 +151,8 @@ class DXFProcessor:
             # Apply the same post-processing as the full processor
             # 1. Merge shapes that share points
             # merged_shapes: {name: {'points': [...], 'breaks': [...]}}
-            merged_shapes = self._merge_connected_shapes(shapes_mm)
+            dxf_base = os.path.splitext(os.path.basename(dxf_path))[0]
+            merged_shapes = self._merge_connected_shapes(shapes_mm, base_name=dxf_base)
 
             # 2. Position shapes with bottom-left justification (no offset)
             positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=0.0, y_buffer_mm=0.0)
@@ -404,7 +406,7 @@ class DXFProcessor:
             except:
                 return []
     
-    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]]) -> Dict[str, any]:
+    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]], base_name: str = 'shape') -> Dict[str, any]:
         """
         Merge shapes that share endpoints into longer chains.
 
@@ -415,8 +417,8 @@ class DXFProcessor:
         """
         if len(shapes) <= 1:
             # Single shape: one segment starting at 0
-            name, pts = next(iter(shapes.items()))
-            return {name: {'points': pts, 'breaks': [0]}}
+            _, pts = next(iter(shapes.items()))
+            return {base_name: {'points': pts, 'breaks': [0]}}
 
         shape_list = list(shapes.items())
         merged_shapes = {}
@@ -470,7 +472,8 @@ class DXFProcessor:
                         else:
                             logger.info(f"Shapes {name1} and {name2} share points but cannot be merged")
 
-            merged_name = f"merged_shape_{len(merged_shapes)}"
+            count = len(merged_shapes)
+            merged_name = base_name if count == 0 else f"{base_name}_{count}"
             current_points = self._remove_duplicate_points(current_points, min_distance=0.05)
             # Clamp breaks to valid range after dedup (dedup may shorten the list slightly)
             n = len(current_points)

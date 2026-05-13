@@ -1105,29 +1105,28 @@ function alignCentersVertical() {
 
     saveUndoState();
 
-    // Collect current mm points and compute each shape's center X
-    const shapePoints = selectedShapes.map(shape => ({
-        shape,
-        points: getCurrentMmPoints(shape)
-    })).filter(s => s.points !== null);
+    // Use data.originalMmPoints directly — avoids the broken shape.left delta
+    // calculation that occurs when shapes are inside an activeSelection group
+    const shapeEntries = selectedShapes.map(shape => ({
+        name: shape.shapeName,
+        data: shapeData[shape.shapeName]
+    })).filter(s => s.data && s.data.originalMmPoints);
 
-    if (shapePoints.length < 2) return false;
+    if (shapeEntries.length < 2) return false;
 
-    const centerXs = shapePoints.map(s => {
-        const xVals = s.points.map(p => p[0]);
+    const centerXs = shapeEntries.map(s => {
+        const xVals = s.data.originalMmPoints.map(p => p[0]);
         return (Math.min(...xVals) + Math.max(...xVals)) / 2;
     });
 
-    // Target: average of all center Xs
     const targetX = centerXs.reduce((a, b) => a + b, 0) / centerXs.length;
 
-    shapePoints.forEach((s, i) => {
+    shapeEntries.forEach((s, i) => {
         const dx = targetX - centerXs[i];
-        const data = shapeData[s.shape.shapeName];
-        data.originalMmPoints = s.points.map(p => [p[0] + dx, p[1]]);
-        data.initialLeft = null;
-        redrawShapeFromData(s.shape.shapeName);
-        emitShapeUpdate(s.shape.shapeName);
+        s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0] + dx, p[1]]);
+        s.data.initialLeft = null;
+        redrawShapeFromData(s.name);
+        emitShapeUpdate(s.name);
     });
 
     return true;
@@ -1140,29 +1139,28 @@ function alignCentersHorizontal() {
 
     saveUndoState();
 
-    // Collect current mm points and compute each shape's center Y
-    const shapePoints = selectedShapes.map(shape => ({
-        shape,
-        points: getCurrentMmPoints(shape)
-    })).filter(s => s.points !== null);
+    // Use data.originalMmPoints directly — avoids the broken shape.left delta
+    // calculation that occurs when shapes are inside an activeSelection group
+    const shapeEntries = selectedShapes.map(shape => ({
+        name: shape.shapeName,
+        data: shapeData[shape.shapeName]
+    })).filter(s => s.data && s.data.originalMmPoints);
 
-    if (shapePoints.length < 2) return false;
+    if (shapeEntries.length < 2) return false;
 
-    const centerYs = shapePoints.map(s => {
-        const yVals = s.points.map(p => p[1]);
+    const centerYs = shapeEntries.map(s => {
+        const yVals = s.data.originalMmPoints.map(p => p[1]);
         return (Math.min(...yVals) + Math.max(...yVals)) / 2;
     });
 
-    // Target: average of all center Ys
     const targetY = centerYs.reduce((a, b) => a + b, 0) / centerYs.length;
 
-    shapePoints.forEach((s, i) => {
+    shapeEntries.forEach((s, i) => {
         const dy = targetY - centerYs[i];
-        const data = shapeData[s.shape.shapeName];
-        data.originalMmPoints = s.points.map(p => [p[0], p[1] + dy]);
-        data.initialLeft = null;
-        redrawShapeFromData(s.shape.shapeName);
-        emitShapeUpdate(s.shape.shapeName);
+        s.data.originalMmPoints = s.data.originalMmPoints.map(p => [p[0], p[1] + dy]);
+        s.data.initialLeft = null;
+        redrawShapeFromData(s.name);
+        emitShapeUpdate(s.name);
     });
 
     return true;
