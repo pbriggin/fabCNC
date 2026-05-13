@@ -2837,79 +2837,69 @@ function computeNotchGeometry(points, nodeKey) {
     return { apex, e1, e2, nodePoint: p };
 }
 
-// Return nodes for a shape: one midpoint node per meaningful DXF segment, plus
-// one junction node at each join between two meaningful segments.
-// Segments shorter than MIN_SEGMENT_MM are skipped (tiny DXF connector lines).
+// Return one node per DXF segment (midpoint) plus junction nodes between segments.
+// Nodes closer than MIN_NODE_SPACING_MM to an already-placed node are dropped.
 function computeCardinalNodes(shapeName) {
     const data = shapeData[shapeName];
     if (!data || !data.originalMmPoints) return [];
     const pts = data.originalMmPoints;
     const n = pts.length;
 
-    const MIN_SEGMENT_MM = 15;  // skip segments shorter than this
+    const MIN_NODE_SPACING_MM = 15;
 
     const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
-        ? data.segmentBreaks
-        : [0];
+        ? data.segmentBreaks : [0];
 
-    // Pre-compute arc length of each segment
-    const segLens = breaks.map((start, si) => {
-        const end = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
-        let len = 0;
-        for (let i = start; i < end; i++) {
-            const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
-            len += Math.sqrt(dx*dx + dy*dy);
-        }
-        return len;
-    });
+    const candidates = [];
 
-    const nodes = [];
-
-    // --- Midpoint node per meaningful segment ---
+    // Midpoint node per segment
     for (let si = 0; si < breaks.length; si++) {
-        if (segLens[si] < MIN_SEGMENT_MM) continue;
-
         const start = breaks[si];
         const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
-
-        const half = segLens[si] / 2;
-        let walked = 0;
-        let mx = pts[start][0], my = pts[start][1];
-        let edgeIdx = start;
+        if (end <= start) continue;
+        let totalLen = 0;
         for (let i = start; i < end; i++) {
-            const dx = pts[i+1][0] - pts[i][0], dy = pts[i+1][1] - pts[i][1];
-            const segLen = Math.sqrt(dx*dx + dy*dy);
+            const dx = pts[i+1][0]-pts[i][0], dy = pts[i+1][1]-pts[i][1];
+            totalLen += Math.sqrt(dx*dx+dy*dy);
+        }
+        if (totalLen < 0.01) continue;
+        const half = totalLen / 2;
+        let walked = 0, mx = pts[start][0], my = pts[start][1], edgeIdx = start;
+        for (let i = start; i < end; i++) {
+            const dx = pts[i+1][0]-pts[i][0], dy = pts[i+1][1]-pts[i][1];
+            const segLen = Math.sqrt(dx*dx+dy*dy);
             if (walked + segLen >= half) {
                 const t = (half - walked) / segLen;
-                mx = pts[i][0] + t * dx;
-                my = pts[i][1] + t * dy;
-                edgeIdx = i;
-                break;
+                mx = pts[i][0] + t*dx; my = pts[i][1] + t*dy; edgeIdx = i; break;
             }
             walked += segLen;
         }
-        nodes.push({ edgeIdx, x: mx, y: my });
+        candidates.push({ edgeIdx, x: mx, y: my });
     }
 
-    // --- Junction node at each join between two meaningful segments ---
+    // Junction node at each segment boundary
     for (let si = 1; si < breaks.length; si++) {
-        // Skip if either the previous or current segment is too short
-        if (segLens[si - 1] < MIN_SEGMENT_MM || segLens[si] < MIN_SEGMENT_MM) continue;
-
         const jIdx = breaks[si];
         if (jIdx <= 0 || jIdx >= n - 1) continue;
-        nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
+        candidates.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
     }
 
-    // --- Wrap-around junction: join between last and first segment (closed shapes) ---
-    if (breaks.length > 1 &&
-        segLens[segLens.length - 1] >= MIN_SEGMENT_MM &&
-        segLens[0] >= MIN_SEGMENT_MM) {
-        const closeTol = 1.0;
-        const dx0 = pts[n-1][0] - pts[0][0], dy0 = pts[n-1][1] - pts[0][1];
-        if (Math.sqrt(dx0*dx0 + dy0*dy0) < closeTol) {
-            nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+    // Wrap-around junction for closed shapes
+    if (breaks.length > 1) {
+        const dx0 = pts[n-1][0]-pts[0][0], dy0 = pts[n-1][1]-pts[0][1];
+        if (Math.sqrt(dx0*dx0+dy0*dy0) < 1.0) {
+            candidates.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
         }
+    }
+
+    // Deduplicate: drop any candidate within MIN_NODE_SPACING_MM of a kept node
+    const nodes = [];
+    for (const c of candidates) {
+        const tooClose = nodes.some(k => {
+            const dx = c.x-k.x, dy = c.y-k.y;
+            return Math.sqrt(dx*dx+dy*dy) < MIN_NODE_SPACING_MM;
+        });
+        if (!tooClose) nodes.push(c);
     }
 
     return nodes;
