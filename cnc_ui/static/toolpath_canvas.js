@@ -150,6 +150,20 @@ function redrawAllShapes() {
 }
 
 function initCanvas(elementId) {
+    // ── REINIT GUARD: warn loudly if canvas is being re-initialized after shapes exist ──
+    const existingShapeCount = Object.keys(shapes).length;
+    const existingDataCount  = Object.keys(shapeData).length;
+    if (existingShapeCount > 0 || existingDataCount > 0) {
+        console.error(
+            '⚠️ CANVAS RE-INIT DETECTED while shapes exist!',
+            'shapes:', existingShapeCount, 'shapeData:', existingDataCount,
+            '— this will wipe the canvas. Stack trace below:'
+        );
+        console.trace('initCanvas called from:');
+    } else {
+        console.log('initCanvas called (no existing shapes)', new Error().stack.split('\n').slice(1,4).join(' | '));
+    }
+
     // Get canvas element and container
     const canvasEl = document.getElementById(elementId);
     if (!canvasEl) {
@@ -207,7 +221,29 @@ function initCanvas(elementId) {
     drawGrid();
     drawWorkArea();
     drawRulers();
-    
+
+    // ── Monitor NiceGUI WebSocket for disconnect/reconnect (helps diagnose canvas resets) ──
+    try {
+        const ws = window.__niceguiWebSocket || (window.__niceguiWebSocket = (() => {
+            // Find the NiceGUI socket - it's the only open WebSocket
+            const OrigWS = window.WebSocket;
+            window.WebSocket = function(...args) {
+                const sock = new OrigWS(...args);
+                window.__lastWebSocket = sock;
+                sock.addEventListener('close', ev => {
+                    console.warn('🔌 WebSocket CLOSED (code:', ev.code, 'reason:', ev.reason || 'none', ') — shapes at close:', Object.keys(shapes).length);
+                });
+                sock.addEventListener('open', () => {
+                    console.warn('🔌 WebSocket RE-OPENED — shapes at reconnect:', Object.keys(shapes).length);
+                });
+                return sock;
+            };
+            window.WebSocket.prototype = OrigWS.prototype;
+            Object.assign(window.WebSocket, OrigWS);
+            return null;
+        })());
+    } catch(e) { /* monitoring setup failed silently */ }
+
     // Save undo state before any transform starts
     canvas.on('mouse:down', function(e) {
         if (e.target && e.target._isRulerHandle) return;  // no undo save for ruler drags
@@ -2449,7 +2485,10 @@ function emitAllShapeUpdates() {
             allShapes[name] = shapeData[name].originalMmPoints;
         }
     });
+    const totalPoints = Object.values(allShapes).reduce((s, pts) => s + pts.length, 0);
+    console.log(`emitAllShapeUpdates: sending ${Object.keys(allShapes).length} shapes, ${totalPoints} total points`);
     window.emitEvent('shapes_updated', { shapes: allShapes });
+    console.log('emitAllShapeUpdates: sent OK');
 }
 
 // Clipboard for copy/paste
