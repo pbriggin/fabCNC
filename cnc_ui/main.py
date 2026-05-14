@@ -21,6 +21,9 @@ import subprocess
 import os
 import math
 import json
+import asyncio
+import shutil
+from datetime import datetime
 
 # Configure logging to see all debug output
 logging.basicConfig(
@@ -2084,7 +2087,67 @@ def main_page():
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
                                     .props('color=negative dense').style('font-size: 13px;')
-        
+
+                            ui.separator().classes('my-3')
+
+                            ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+
+                            async def send_debug_logs():
+                                """Copy uploads/canvases/toolpaths into a debug dump folder and push to git."""
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                upload_dir = file_manager.upload_dir
+                                gcode_dir = upload_dir / 'gcode_output'
+                                dump_dir = REPO_DIR / 'debug_dumps' / timestamp
+
+                                def _commit():
+                                    files_added = 0
+                                    dump_dir.mkdir(parents=True, exist_ok=True)
+
+                                    for f in sorted(upload_dir.glob('*.dxf')):
+                                        shutil.copy2(f, dump_dir / f.name)
+                                        files_added += 1
+                                    for f in sorted(upload_dir.glob('*.json')):
+                                        shutil.copy2(f, dump_dir / f.name)
+                                        files_added += 1
+                                    if gcode_dir.exists():
+                                        gcode_files = sorted(
+                                            gcode_dir.glob('*.gcode'),
+                                            key=lambda x: x.stat().st_mtime,
+                                            reverse=True
+                                        )[:30]
+                                        for f in gcode_files:
+                                            shutil.copy2(f, dump_dir / f.name)
+                                            files_added += 1
+
+                                    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+                                    subprocess.run(
+                                        ['git', 'add', str(dump_dir.relative_to(REPO_DIR))],
+                                        cwd=str(REPO_DIR), check=True, env=git_env
+                                    )
+                                    subprocess.run(
+                                        ['git', 'commit', '-m',
+                                         f'Debug log dump {timestamp} ({files_added} files) from {get_local_ip()}'],
+                                        cwd=str(REPO_DIR), check=True, env=git_env
+                                    )
+                                    subprocess.run(
+                                        ['git', 'push'],
+                                        cwd=str(REPO_DIR), check=True, env=git_env
+                                    )
+                                    return files_added
+
+                                ui.notify('Committing debug bundle to repo...', type='info')
+                                try:
+                                    files_added = await asyncio.to_thread(_commit)
+                                    ui.notify(
+                                        f'Pushed {files_added} files to repo (debug_dumps/{timestamp})',
+                                        type='positive'
+                                    )
+                                except Exception as e:
+                                    ui.notify(f'Failed to push debug logs: {e}', type='negative', timeout=8000)
+
+                            ui.button('Send logs to Good Pigeon', icon='send', on_click=send_debug_logs) \
+                                .props('color=primary dense').style('font-size: 13px;')
+
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label)
