@@ -2119,7 +2119,14 @@ def main_page():
                                             shutil.copy2(f, dump_dir / f.name)
                                             files_added += 1
 
-                                    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+                                    git_env = {
+                                        **os.environ,
+                                        'GIT_TERMINAL_PROMPT': '0',
+                                        'GIT_AUTHOR_NAME': 'fabCNC',
+                                        'GIT_AUTHOR_EMAIL': 'fabcnc@goodpigeongoods.com',
+                                        'GIT_COMMITTER_NAME': 'fabCNC',
+                                        'GIT_COMMITTER_EMAIL': 'fabcnc@goodpigeongoods.com',
+                                    }
                                     subprocess.run(
                                         ['git', 'add', str(dump_dir.relative_to(REPO_DIR))],
                                         cwd=str(REPO_DIR), check=True, env=git_env
