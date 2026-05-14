@@ -1702,6 +1702,17 @@ function duplicateShape() {
     const newPoints = points.map(p => [p[0] + 20, p[1] + 20]);
     
     addShape(newName, newPoints);
+
+    // Copy notches with the same offset applied
+    const srcNotches = shapeNotches[shape.shapeName];
+    if (srcNotches && srcNotches.size > 0) {
+        shapeNotches[newName] = new Map();
+        srcNotches.forEach((nodeKey, edgeIdx) => {
+            shapeNotches[newName].set(edgeIdx, { edgeIdx: nodeKey.edgeIdx, x: nodeKey.x + 20, y: nodeKey.y + 20 });
+        });
+        drawNotchMarksForShape(newName);
+    }
+
     return newName;
 }
 
@@ -1955,7 +1966,6 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 // Update shape with new points from Packaide
                 data.originalMmPoints = placement.points;
                 redrawShapeFromData(placement.name);
-                emitShapeUpdate(placement.name);
                 
                 // Track bounds
                 for (const pt of placement.points) {
@@ -1966,6 +1976,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
             showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
+            emitAllShapeUpdates();  // single batch update to Python
             return;
         }
         
@@ -2027,11 +2038,11 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         }
         data.originalMmPoints = p.full;
         redrawShapeFromData(p.info.name);
-        emitShapeUpdate(p.info.name);
     }
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
     showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
+    emitAllShapeUpdates();  // single batch update to Python
 }
 
 // Try nesting with a specific shape order
@@ -2426,6 +2437,21 @@ function emitShapeUpdate(shapeName) {
     }
 }
 
+// Helper: Emit all shape positions to Python in a single batch message.
+// Use this after nesting (instead of per-shape emitShapeUpdate) to avoid
+// flooding the NiceGUI WebSocket with many large messages, which causes
+// a disconnect/reconnect that re-initializes the canvas.
+function emitAllShapeUpdates() {
+    if (!window.emitEvent) return;
+    const allShapes = {};
+    Object.keys(shapeData).forEach(name => {
+        if (shapeData[name] && shapeData[name].originalMmPoints) {
+            allShapes[name] = shapeData[name].originalMmPoints;
+        }
+    });
+    window.emitEvent('shapes_updated', { shapes: allShapes });
+}
+
 // Clipboard for copy/paste
 let clipboard = null;
 
@@ -2491,36 +2517,84 @@ function undo() {
     return true;
 }
 
-// Copy selected shape to clipboard
+// Copy selected shape(s) to clipboard
 function copyShape() {
-    const shape = getSelectedShape();
-    if (!shape || !shapeData[shape.shapeName]) return false;
-    
-    const data = shapeData[shape.shapeName];
-    if (!data.originalMmPoints) return false;
-    
-    // Deep copy the points
-    clipboard = {
-        points: data.originalMmPoints.map(p => [p[0], p[1]]),
-        stroke: shape.stroke
-    };
-    console.log('Copied shape to clipboard');
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+
+    const items = [];
+    selectedShapes.forEach(shape => {
+        const name = shape.shapeName;
+        const data = shapeData[name];
+        if (!data || !data.originalMmPoints) return;
+        const srcNotches = shapeNotches[name];
+        items.push({
+            name: name,
+            points: data.originalMmPoints.map(p => [p[0], p[1]]),
+            stroke: shape.stroke,
+            segmentBreaks: data.segmentBreaks ? [...data.segmentBreaks] : undefined,
+            segmentTypes: data.segmentTypes ? [...data.segmentTypes] : undefined,
+            notches: srcNotches ? [...srcNotches.values()].map(nk => ({ edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y })) : []
+        });
+    });
+
+    if (items.length === 0) return false;
+    clipboard = { items };
+    console.log(`Copied ${items.length} shape(s) to clipboard`);
     return true;
 }
 
-// Paste shape from clipboard
+// Paste shape(s) from clipboard
 function pasteShape() {
-    if (!clipboard || !clipboard.points) return null;
-    
-    const newName = 'pasted_' + Date.now();
-    
-    // Offset by 10mm up and to the right
-    const newPoints = clipboard.points.map(p => [p[0] + 10, p[1] + 10]);
-    
-    // Pass the original stroke color
-    addShape(newName, newPoints, clipboard.stroke);
-    console.log('Pasted shape:', newName);
-    return newName;
+    if (!clipboard) return null;
+
+    // Support old single-shape clipboard format
+    const items = clipboard.items || (clipboard.points ? [{
+        name: 'pasted',
+        points: clipboard.points,
+        stroke: clipboard.stroke,
+        notches: clipboard.notches || []
+    }] : null);
+    if (!items || items.length === 0 || !items[0].points) return null;
+
+    saveUndoState();
+
+    const timestamp = Date.now();
+    const newNames = [];
+
+    items.forEach((item, idx) => {
+        // Strip previous _pasted_ suffix so names don't grow unboundedly
+        const baseName = item.name ? item.name.replace(/_pasted_\d+$/, '') : 'pasted';
+        const newName = baseName + '_pasted_' + (timestamp + idx);
+
+        const newPoints = item.points.map(p => [p[0] + 10, p[1] + 10]);
+        addShape(newName, newPoints, item.stroke, item.segmentBreaks, item.segmentTypes);
+
+        if (item.notches && item.notches.length > 0) {
+            shapeNotches[newName] = new Map();
+            item.notches.forEach(nodeKey => {
+                const offsetKey = { edgeIdx: nodeKey.edgeIdx, x: nodeKey.x + 10, y: nodeKey.y + 10 };
+                shapeNotches[newName].set(nodeKey.edgeIdx, offsetKey);
+            });
+            drawNotchMarksForShape(newName);
+        }
+
+        newNames.push(newName);
+    });
+
+    // Re-select all pasted shapes as a group
+    if (newNames.length > 1) {
+        const fabricObjs = newNames.map(n => shapes[n]).filter(Boolean);
+        if (fabricObjs.length > 1) {
+            canvas.discardActiveObject();
+            const sel = new fabric.ActiveSelection(fabricObjs, { canvas: canvas });
+            canvas.setActiveObject(sel);
+            canvas.renderAll();
+        }
+    }
+
+    console.log('Pasted shapes:', newNames);
+    return newNames.length > 0 ? newNames : null;
 }
 
 // Rotate shape(s) by exact degrees - supports multi-select
@@ -2865,6 +2939,9 @@ function computeCardinalNodes(shapeName) {
     const nodes = [];
 
     // --- One midpoint node per segment (every DXF entity gets exactly one node) ---
+    // Skip midpoint for short non-curved segments (< 10mm) — these are connector lines
+    // forming notch pockets or closures, not edges worth notching.
+    const MIN_LINE_LENGTH_MM = 10;
     for (let si = 0; si < breaks.length; si++) {
         const start = breaks[si];
         const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
@@ -2875,6 +2952,8 @@ function computeCardinalNodes(shapeName) {
             totalLen += Math.sqrt(dx*dx+dy*dy);
         }
         if (totalLen < 0.01) continue;
+        // Skip short connector lines (they are notch cuts / closures, not placeable edges)
+        if (!isCurved(si) && totalLen < MIN_LINE_LENGTH_MM) continue;
         const half = totalLen / 2;
         let walked = 0, mx = pts[start][0], my = pts[start][1];
         for (let i = start; i < end; i++) {

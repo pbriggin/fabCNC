@@ -1968,6 +1968,18 @@ def main_page():
                                     logger.info(f"Shape '{shape_name}' moved to new position")
                             
                             ui.on('shape_moved', on_shape_moved)
+
+                            # Handle batch shape update from nesting (single message instead of one per shape)
+                            def on_shapes_updated(e):
+                                global current_toolpath_shapes
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                shapes_data = data.get('shapes') if isinstance(data, dict) else None
+                                if shapes_data:
+                                    for name, points in shapes_data.items():
+                                        current_toolpath_shapes[name] = [tuple(p) for p in points]
+                                    logger.info(f"Nesting batch update: {len(shapes_data)} shapes updated")
+
+                            ui.on('shapes_updated', on_shapes_updated)
                             
                             # Handle shape deleted events from JavaScript
                             def on_shape_deleted(e):
