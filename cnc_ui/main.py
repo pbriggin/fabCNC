@@ -742,13 +742,12 @@ def create_file_controls():
     with ui.column().classes('w-full gap-2'):
         ui.label('Job File').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
-        loaded_file_label = ui.label('No file loaded').classes('text-body2').style('color: #777;')
-        
         upload = ui.upload(
-            label='Load DXF File',
+            label='Load DXF Files',
             auto_upload=True,
-            on_upload=lambda e: handle_file_upload(e, loaded_file_label)
-        ).props('accept=.dxf dense').classes('w-full dxf-upload').style('font-size: 13px;')
+            multiple=True,
+            on_upload=lambda e: handle_file_upload(e)
+        ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;')
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -771,8 +770,6 @@ def create_file_controls():
             ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
             ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
             ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
-        
-        return loaded_file_label
 
 
 def create_job_controls():
@@ -873,7 +870,7 @@ def home_all():
     cnc_controller.home_all()
 
 
-def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None, entity_types: dict = None):
+def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None):
     """Add shapes to canvas without clearing existing ones."""
     global toolpath_canvas
     
@@ -889,14 +886,12 @@ def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict 
                 y_vals = [p[1] for p in points]
                 logger.info(f"  Sending {shape_name} to canvas: {len(points)} pts, X({min(x_vals):.1f}-{max(x_vals):.1f}), Y({min(y_vals):.1f}-{max(y_vals):.1f})")
                 
-                # Convert points, segment breaks and entity types to JSON-safe format
+                # Convert points and segment breaks to JSON-safe format
                 points_json = json.dumps(points)
                 seg_breaks = breaks.get(shape_name, [0]) if breaks else [0]
                 breaks_json = json.dumps(seg_breaks)
-                seg_types = entity_types.get(shape_name, []) if entity_types else []
-                types_json = json.dumps(seg_types)
-                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}, {types_json}); }} catch(e) {{ alert(e.message); }}''')
-                logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments, types={seg_types}")
+                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}); }} catch(e) {{ alert(e.message); }}''')
+                logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments")
 
 
 def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
@@ -917,7 +912,7 @@ def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
     add_shapes_to_canvas(shapes)
 
 
-async def handle_file_upload(event, label):
+async def handle_file_upload(event):
     """Handle file upload event."""
     global current_gcode, current_toolpath_shapes, toolpath_canvas
     
@@ -948,8 +943,8 @@ async def handle_file_upload(event, label):
         ui.notify('Processing DXF file...', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
-        shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
-        current_toolpath_shapes.update(shapes)  # merge, don't replace
+        shapes, shape_breaks = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
+        current_toolpath_shapes.update(shapes)
         
         # Debug: Print shape details
         print(f"\n--- DXF Processing Results ---")
@@ -983,12 +978,12 @@ async def handle_file_upload(event, label):
         
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
-        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes) - len(shapes), breaks=shape_breaks, entity_types=shape_types)
+        # Offset color index by current shape count so each file gets distinct colors
+        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks)
         
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
         machine_state.set_toolpath_generated(False)
-        label.set_text(f'Loaded: {filename}')
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
     except Exception as e:
@@ -1584,6 +1579,16 @@ def main_page():
                 background: transparent !important;
             }
             
+            /* Hide number input spinners */
+            input[type=number]::-webkit-inner-spin-button,
+            input[type=number]::-webkit-outer-spin-button {
+                -webkit-appearance: none;
+                margin: 0;
+            }
+            input[type=number] {
+                -moz-appearance: textfield;
+            }
+
             /* Toolbar input fields - fixed height to match buttons */
             .toolbar-input .q-field__control {
                 height: 36px !important;
@@ -1831,7 +1836,7 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
-                                nest_offset = ui.number(value=5, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
                                 
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)
@@ -1852,21 +1857,51 @@ def main_page():
                                 notch_mode_state['active'] = not notch_mode_state['active']
                                 btn = notch_mode_state['btn']
                                 if notch_mode_state['active']:
-                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35; color: #ffffff;')
-                                    btn.set_text('✂ Notch  (ON)')
+                                    btn.props('dense unelevated')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #FF6B35 !important; color: #1a1a1a !important; font-weight: 700;')
+                                    btn.set_text('V Notch  (ON)')
                                 else:
+                                    btn.props('dense flat')
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
-                                    btn.set_text('✂ Notch')
+                                    btn.set_text('V Notch')
                                 ui.run_javascript(f"window.toolpathCanvas.setNotchMode({str(notch_mode_state['active']).lower()})")
 
-                            with ui.row().classes('items-center gap-2').style('background: #252525; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
-                                ui.label('Edit:').style('color: #777; font-size: 12px;')
-                                notch_btn = ui.button('✂ Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
+                            def deactivate_notch_btn():
+                                """Reset the notch button to OFF state (called when JS auto-disables notch mode)."""
+                                notch_mode_state['active'] = False
+                                btn = notch_mode_state['btn']
+                                if btn:
+                                    btn.props('dense flat')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
+                                    btn.set_text('V Notch')
+
+                            with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
+                                notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.label('Notches are cut first before shape outlines.').style('color: #555; font-size: 11px; font-style: italic;')
+                                ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
+                                ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint')
+                                ui.button(icon='horizontal_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeHorizontally()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Horizontally — equal X spacing (need 3+ shapes)')
+                                ui.button(icon='vertical_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeVertically()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Vertically — equal Y spacing (need 3+ shapes)')
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.element('div').style('flex: 1;')
                                 ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+
+                                # Units toggle: mm ↔ in
+                                units_state = {'unit': 'mm'}
+
+                                async def toggle_units():
+                                    if units_state['unit'] == 'mm':
+                                        units_state['unit'] = 'in'
+                                        units_btn.set_text('in')
+                                    else:
+                                        units_state['unit'] = 'mm'
+                                        units_btn.set_text('mm')
+                                    unit = units_state['unit']
+                                    await ui.run_javascript(f"window.toolpathCanvas.setUnits('{unit}')")
+
+                                units_btn = ui.button('mm', on_click=toggle_units).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa; min-width: 52px;').tooltip('Toggle axis units between mm and inches')
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
@@ -1948,6 +1983,14 @@ def main_page():
                                         ui.notify('Toolpath cleared - shape deleted', type='info')
                             
                             ui.on('shape_deleted', on_shape_deleted)
+
+                            # Handle notch mode auto-disabled from JS (clear/delete/toolpath)
+                            def on_notch_mode_changed(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if isinstance(data, dict) and not data.get('active', True):
+                                    deactivate_notch_btn()
+
+                            ui.on('notch_mode_changed', on_notch_mode_changed)
                         
                         # Right column: Jog Controls only (fixed width)
                         with ui.column().classes('gap-2 items-center').style('flex: 0 0 320px; padding: 0 0 10px 0; box-sizing: border-box;'):
