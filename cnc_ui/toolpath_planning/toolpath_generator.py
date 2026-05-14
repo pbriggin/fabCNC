@@ -158,7 +158,7 @@ class ToolpathGenerator:
             "",
         ] + ([
             "; Home all axes for safe starting position",
-            "G28 ; Home X, Y, Z",
+            "G28 X Y Z ; Home X, Y, Z (explicit axes - avoids homing A twice)",
             "G28 A ; Home A (rotation)",
         ] if self.home_all else [
             "; Home Z and A axes for safe starting position (preserves XY zero)",

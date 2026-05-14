@@ -946,7 +946,7 @@ async def handle_file_upload(event, label):
         ui.notify('Processing DXF file...', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
-        shapes, shape_breaks = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
+        shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
         current_toolpath_shapes = shapes
         
         # Debug: Print shape details
@@ -981,7 +981,7 @@ async def handle_file_upload(event, label):
         
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
-        add_shapes_to_canvas(shapes, breaks=shape_breaks)
+        add_shapes_to_canvas(shapes, breaks=shape_breaks, entity_types=shape_types)
         
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
