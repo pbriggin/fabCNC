@@ -336,15 +336,13 @@ def check_for_updates():
             ['git', '-C', str(REPO_DIR), 'fetch', 'origin', 'main'],
             capture_output=True, timeout=15
         )
-        local = subprocess.run(
-            ['git', '-C', str(REPO_DIR), 'rev-parse', 'HEAD'],
+        # Count commits on origin/main that are not in HEAD
+        result = subprocess.run(
+            ['git', '-C', str(REPO_DIR), 'rev-list', '--count', 'HEAD..origin/main'],
             capture_output=True, text=True, timeout=5
-        ).stdout.strip()
-        remote = subprocess.run(
-            ['git', '-C', str(REPO_DIR), 'rev-parse', 'origin/main'],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip()
-        return bool(local and remote and local != remote)
+        )
+        count = int(result.stdout.strip() or '0')
+        return count > 0
     except Exception as e:
         logger.warning(f"Update check failed: {e}")
         return False
@@ -1752,8 +1750,15 @@ def main_page():
             await loop.run_in_executor(
                 executor,
                 lambda: subprocess.run(
-                    ['git', '-C', str(REPO_DIR), 'pull', 'origin', 'main'],
+                    ['git', '-C', str(REPO_DIR), 'fetch', 'origin', 'main'],
                     capture_output=True, timeout=60
+                )
+            )
+            await loop.run_in_executor(
+                executor,
+                lambda: subprocess.run(
+                    ['git', '-C', str(REPO_DIR), 'reset', '--hard', 'origin/main'],
+                    capture_output=True, timeout=30
                 )
             )
         # Tell the browser to reload after a delay, then exit.
