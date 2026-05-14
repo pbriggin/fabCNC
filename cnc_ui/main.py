@@ -2129,7 +2129,7 @@ def main_page():
                                 """Open the debug bundle download URL in a new browser tab."""
                                 await ui.run_javascript("window.open('/debug-bundle', '_blank')")
 
-                            ui.button('Send logs to Good Pigeon', icon='send', on_click=send_debug_logs) \
+                            ui.button('Download Device Logs', icon='download', on_click=send_debug_logs) \
                                 .props('color=primary dense').style('font-size: 13px;')
 
         # Start periodic UI update timer (10 Hz = 100ms)
