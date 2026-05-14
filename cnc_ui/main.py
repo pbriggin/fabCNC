@@ -2136,8 +2136,26 @@ def main_page():
                                          f'Debug log dump {timestamp} ({files_added} files) from {get_local_ip()}'],
                                         cwd=str(REPO_DIR), check=True, env=git_env
                                     )
+                                    # Build push URL with token if available
+                                    github_token = os.environ.get('GITHUB_TOKEN', '')
+                                    if github_token:
+                                        remote_url = subprocess.check_output(
+                                            ['git', 'remote', 'get-url', 'origin'],
+                                            cwd=str(REPO_DIR), env=git_env
+                                        ).decode().strip()
+                                        # Inject token into https://github.com/... URL
+                                        if remote_url.startswith('https://'):
+                                            authed_url = remote_url.replace(
+                                                'https://',
+                                                f'https://x-access-token:{github_token}@'
+                                            )
+                                        else:
+                                            authed_url = remote_url
+                                        push_cmd = ['git', 'push', authed_url]
+                                    else:
+                                        push_cmd = ['git', 'push']
                                     subprocess.run(
-                                        ['git', 'push'],
+                                        push_cmd,
                                         cwd=str(REPO_DIR), check=True, env=git_env
                                     )
                                     return files_added
