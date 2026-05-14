@@ -10,6 +10,7 @@ from cnc.controller import cnc_controller
 from cnc.files import file_manager
 from pathlib import Path
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import matplotlib.pyplot as plt
 from dxf_processing.dxf_processor import DXFProcessor
@@ -24,7 +25,6 @@ import json
 import asyncio
 import io
 import zipfile
-import urllib.request
 from datetime import datetime
 
 # Configure logging to see all debug output
@@ -46,6 +46,32 @@ update_state = {'available': False}
 
 # Mount static files directory
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
+
+
+@app.get('/debug-bundle')
+def debug_bundle():
+    """Generate and stream a zip of all uploads, canvas saves, and recent gcode."""
+    upload_dir = file_manager.upload_dir
+    gcode_dir = upload_dir / 'gcode_output'
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(upload_dir.glob('*.dxf')):
+            zf.write(f, f'uploads/{f.name}')
+        for f in sorted(upload_dir.glob('*.json')):
+            zf.write(f, f'canvases/{f.name}')
+        if gcode_dir.exists():
+            for f in sorted(gcode_dir.glob('*.gcode'), key=lambda x: x.stat().st_mtime, reverse=True)[:30]:
+                zf.write(f, f'toolpaths/{f.name}')
+    buf.seek(0)
+
+    filename = f'fabcnc_logs_{timestamp}.zip'
+    return StreamingResponse(
+        buf,
+        media_type='application/zip',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
 
 
 def get_local_ip():
@@ -2100,61 +2126,8 @@ def main_page():
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
                             async def send_debug_logs():
-                                """Zip uploads/canvases/toolpaths and upload anonymously to transfer.sh."""
-                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                                upload_dir = file_manager.upload_dir
-                                gcode_dir = upload_dir / 'gcode_output'
-
-                                zip_buf = io.BytesIO()
-                                files_added = 0
-                                try:
-                                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                                        for f in sorted(upload_dir.glob('*.dxf')):
-                                            zf.write(f, f'uploads/{f.name}')
-                                            files_added += 1
-                                        for f in sorted(upload_dir.glob('*.json')):
-                                            zf.write(f, f'canvases/{f.name}')
-                                            files_added += 1
-                                        if gcode_dir.exists():
-                                            gcode_files = sorted(
-                                                gcode_dir.glob('*.gcode'),
-                                                key=lambda x: x.stat().st_mtime,
-                                                reverse=True
-                                            )[:30]
-                                            for f in gcode_files:
-                                                zf.write(f, f'toolpaths/{f.name}')
-                                                files_added += 1
-                                except Exception as e:
-                                    ui.notify(f'Failed to create zip: {e}', type='negative')
-                                    return
-
-                                zip_buf.seek(0)
-                                zip_bytes = zip_buf.read()
-
-                                def _upload():
-                                    filename = f'fabcnc_logs_{timestamp}.zip'
-                                    req = urllib.request.Request(
-                                        f'https://transfer.sh/{filename}',
-                                        data=zip_bytes,
-                                        method='PUT'
-                                    )
-                                    req.add_header('Content-Type', 'application/zip')
-                                    req.add_header('Max-Days', '7')
-                                    with urllib.request.urlopen(req, timeout=60) as resp:
-                                        return resp.read().decode().strip()
-
-                                ui.notify('Uploading debug bundle...', type='info')
-                                try:
-                                    url = await asyncio.to_thread(_upload)
-                                    with ui.dialog() as dlg, ui.card().style('min-width: 420px; padding: 20px;'):
-                                        ui.label('Debug bundle ready').classes('text-body1 font-bold')
-                                        ui.label(f'{files_added} files — link expires in 7 days') \
-                                            .classes('text-body2').style('color: #888; margin-bottom: 8px;')
-                                        ui.input(value=url).props('readonly outlined dense').classes('w-full')
-                                        ui.button('Close', on_click=dlg.close).props('flat dense').classes('mt-2')
-                                    dlg.open()
-                                except Exception as e:
-                                    ui.notify(f'Failed to upload debug logs: {e}', type='negative', timeout=8000)
+                                """Open the debug bundle download URL in a new browser tab."""
+                                await ui.run_javascript("window.open('/debug-bundle', '_blank')")
 
                             ui.button('Send logs to Good Pigeon', icon='send', on_click=send_debug_logs) \
                                 .props('color=primary dense').style('font-size: 13px;')
