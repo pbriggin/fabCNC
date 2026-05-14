@@ -22,7 +22,9 @@ import os
 import math
 import json
 import asyncio
-import shutil
+import io
+import zipfile
+import urllib.request
 from datetime import datetime
 
 # Configure logging to see all debug output
@@ -2093,82 +2095,61 @@ def main_page():
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
                             async def send_debug_logs():
-                                """Copy uploads/canvases/toolpaths into a debug dump folder and push to git."""
+                                """Zip uploads/canvases/toolpaths and upload anonymously to transfer.sh."""
                                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                                 upload_dir = file_manager.upload_dir
                                 gcode_dir = upload_dir / 'gcode_output'
-                                dump_dir = REPO_DIR / 'debug_dumps' / timestamp
 
-                                def _commit():
-                                    files_added = 0
-                                    dump_dir.mkdir(parents=True, exist_ok=True)
-
-                                    for f in sorted(upload_dir.glob('*.dxf')):
-                                        shutil.copy2(f, dump_dir / f.name)
-                                        files_added += 1
-                                    for f in sorted(upload_dir.glob('*.json')):
-                                        shutil.copy2(f, dump_dir / f.name)
-                                        files_added += 1
-                                    if gcode_dir.exists():
-                                        gcode_files = sorted(
-                                            gcode_dir.glob('*.gcode'),
-                                            key=lambda x: x.stat().st_mtime,
-                                            reverse=True
-                                        )[:30]
-                                        for f in gcode_files:
-                                            shutil.copy2(f, dump_dir / f.name)
-                                            files_added += 1
-
-                                    git_env = {
-                                        **os.environ,
-                                        'GIT_TERMINAL_PROMPT': '0',
-                                        'GIT_AUTHOR_NAME': 'fabCNC',
-                                        'GIT_AUTHOR_EMAIL': 'fabcnc@goodpigeongoods.com',
-                                        'GIT_COMMITTER_NAME': 'fabCNC',
-                                        'GIT_COMMITTER_EMAIL': 'fabcnc@goodpigeongoods.com',
-                                    }
-                                    subprocess.run(
-                                        ['git', 'add', str(dump_dir.relative_to(REPO_DIR))],
-                                        cwd=str(REPO_DIR), check=True, env=git_env
-                                    )
-                                    subprocess.run(
-                                        ['git', 'commit', '-m',
-                                         f'Debug log dump {timestamp} ({files_added} files) from {get_local_ip()}'],
-                                        cwd=str(REPO_DIR), check=True, env=git_env
-                                    )
-                                    # Build push URL with token if available
-                                    github_token = os.environ.get('GITHUB_TOKEN', '')
-                                    if github_token:
-                                        remote_url = subprocess.check_output(
-                                            ['git', 'remote', 'get-url', 'origin'],
-                                            cwd=str(REPO_DIR), env=git_env
-                                        ).decode().strip()
-                                        # Inject token into https://github.com/... URL
-                                        if remote_url.startswith('https://'):
-                                            authed_url = remote_url.replace(
-                                                'https://',
-                                                f'https://x-access-token:{github_token}@'
-                                            )
-                                        else:
-                                            authed_url = remote_url
-                                        push_cmd = ['git', 'push', authed_url]
-                                    else:
-                                        push_cmd = ['git', 'push']
-                                    subprocess.run(
-                                        push_cmd,
-                                        cwd=str(REPO_DIR), check=True, env=git_env
-                                    )
-                                    return files_added
-
-                                ui.notify('Committing debug bundle to repo...', type='info')
+                                zip_buf = io.BytesIO()
+                                files_added = 0
                                 try:
-                                    files_added = await asyncio.to_thread(_commit)
-                                    ui.notify(
-                                        f'Pushed {files_added} files to repo (debug_dumps/{timestamp})',
-                                        type='positive'
-                                    )
+                                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                        for f in sorted(upload_dir.glob('*.dxf')):
+                                            zf.write(f, f'uploads/{f.name}')
+                                            files_added += 1
+                                        for f in sorted(upload_dir.glob('*.json')):
+                                            zf.write(f, f'canvases/{f.name}')
+                                            files_added += 1
+                                        if gcode_dir.exists():
+                                            gcode_files = sorted(
+                                                gcode_dir.glob('*.gcode'),
+                                                key=lambda x: x.stat().st_mtime,
+                                                reverse=True
+                                            )[:30]
+                                            for f in gcode_files:
+                                                zf.write(f, f'toolpaths/{f.name}')
+                                                files_added += 1
                                 except Exception as e:
-                                    ui.notify(f'Failed to push debug logs: {e}', type='negative', timeout=8000)
+                                    ui.notify(f'Failed to create zip: {e}', type='negative')
+                                    return
+
+                                zip_buf.seek(0)
+                                zip_bytes = zip_buf.read()
+
+                                def _upload():
+                                    filename = f'fabcnc_logs_{timestamp}.zip'
+                                    req = urllib.request.Request(
+                                        f'https://transfer.sh/{filename}',
+                                        data=zip_bytes,
+                                        method='PUT'
+                                    )
+                                    req.add_header('Content-Type', 'application/zip')
+                                    req.add_header('Max-Days', '7')
+                                    with urllib.request.urlopen(req, timeout=60) as resp:
+                                        return resp.read().decode().strip()
+
+                                ui.notify('Uploading debug bundle...', type='info')
+                                try:
+                                    url = await asyncio.to_thread(_upload)
+                                    with ui.dialog() as dlg, ui.card().style('min-width: 420px; padding: 20px;'):
+                                        ui.label('Debug bundle ready').classes('text-body1 font-bold')
+                                        ui.label(f'{files_added} files — link expires in 7 days') \
+                                            .classes('text-body2').style('color: #888; margin-bottom: 8px;')
+                                        ui.input(value=url).props('readonly outlined dense').classes('w-full')
+                                        ui.button('Close', on_click=dlg.close).props('flat dense').classes('mt-2')
+                                    dlg.open()
+                                except Exception as e:
+                                    ui.notify(f'Failed to upload debug logs: {e}', type='negative', timeout=8000)
 
                             ui.button('Send logs to Good Pigeon', icon='send', on_click=send_debug_logs) \
                                 .props('color=primary dense').style('font-size: 13px;')
