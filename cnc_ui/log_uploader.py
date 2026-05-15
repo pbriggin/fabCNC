@@ -181,6 +181,48 @@ def build_bundle(*, full: bool = False) -> tuple[bytes, str, dict]:
 
 
 # ── Upload transport ──────────────────────────────────────────────────────────
+def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
+    """Upload a log zip as a Discord file attachment via a webhook URL."""
+    cfg = logging_setup.load_config()["upload"]
+    url = cfg["url"]
+    if "?" not in url:
+        url += "?wait=true"
+
+    device_id = cfg.get("device_id") or socket.gethostname()
+    ts = manifest.get("created_at", "")[:19].replace("T", " ")
+    content = (
+        f"\U0001f4cb **fabCNC log bundle**\n"
+        f"`device:` {device_id}   `time:` {ts} UTC   `size:` {len(zip_bytes)//1024} KB"
+    )
+    payload_json = json.dumps({"content": content}).encode("utf-8")
+
+    boundary = f"WebKitFormBoundary{uuid.uuid4().hex}"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="payload_json"\r\n'
+        f"Content-Type: application/json\r\n\r\n".encode("utf-8")
+        + payload_json
+        + f"\r\n--{boundary}\r\n"
+          f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+          f"Content-Type: application/zip\r\n\r\n".encode("utf-8")
+        + zip_bytes
+        + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    )
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
+    started = time.time()
+    with _urlrequest.urlopen(req, timeout=60) as resp:
+        status = resp.status
+        resp_body = resp.read(2048).decode("utf-8", errors="replace")
+    return {
+        "status": status,
+        "duration_s": round(time.time() - started, 2),
+        "response": resp_body[:512],
+        "bytes": len(zip_bytes),
+        "filename": filename,
+    }
+
+
 def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
     cfg = logging_setup.load_config()["upload"]
     url = cfg["url"]
@@ -188,6 +230,11 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
         raise RuntimeError("upload.url not configured")
 
     method = cfg.get("method", "POST").upper()
+
+    # Discord webhook — use the dedicated formatter.
+    if method == "DISCORD" or "discord.com/api/webhooks" in url:
+        return _do_discord_upload(zip_bytes, filename, manifest)
+
     auth = cfg.get("auth_header", "")
     headers = {"X-Device-Id": cfg.get("device_id", socket.gethostname())}
     if auth:
