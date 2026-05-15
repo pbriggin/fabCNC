@@ -1998,7 +1998,15 @@ def main_page():
                                     log_event('transform', 'nest_clicked', offset_mm=offset_val,
                                               keep_orientation=keep_orientation.value,
                                               shape_count=len(current_toolpath_shapes))
-                                    result = await ui.run_javascript(f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})')
+                                    try:
+                                        result = await ui.run_javascript(
+                                            f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})',
+                                            timeout=30.0
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f'nestShapes JS call failed or timed out: {e}')
+                                        ui.notify('Nesting timed out — try with fewer shapes', type='warning')
+                                        return
                                     if result and isinstance(result, dict):
                                         log_event('transform', 'nest_result',
                                                   success=result.get('success'),

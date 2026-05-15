@@ -1959,28 +1959,36 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
         console.log('Packaide result:', result);
         
         if (result.status === 'ok' && result.placements && result.placements.length > 0) {
-            // Apply Packaide placements
+            // Apply Packaide placements — batch all redraws then do a single canvas.renderAll()
             let maxX = 0, maxY = 0;
             
-            for (const placement of result.placements) {
-                const data = shapeData[placement.name];
-                if (!data) {
-                    console.warn('Missing shapeData for', placement.name);
-                    continue;
+            _batchRedrawMode = true;
+            canvas.renderOnAddRemove = false;
+            try {
+                for (const placement of result.placements) {
+                    const data = shapeData[placement.name];
+                    if (!data) {
+                        console.warn('Missing shapeData for', placement.name);
+                        continue;
+                    }
+                    
+                    // Update shape with new points from Packaide
+                    data.originalMmPoints = placement.points;
+                    redrawShapeFromData(placement.name);
+                    // Note: emitShapeUpdate intentionally skipped here — emitting one event
+                    // per shape floods the WebSocket on large layouts. Python re-fetches
+                    // all positions via getPositions() before toolpath generation.
+                    
+                    // Track bounds
+                    for (const pt of placement.points) {
+                        if (pt[0] > maxX) maxX = pt[0];
+                        if (pt[1] > maxY) maxY = pt[1];
+                    }
                 }
-                
-                // Update shape with new points from Packaide
-                data.originalMmPoints = placement.points;
-                redrawShapeFromData(placement.name);
-                // Note: emitShapeUpdate intentionally skipped here — emitting one event
-                // per shape floods the WebSocket on large layouts. Python re-fetches
-                // all positions via getPositions() before toolpath generation.
-                
-                // Track bounds
-                for (const pt of placement.points) {
-                    if (pt[0] > maxX) maxX = pt[0];
-                    if (pt[1] > maxY) maxY = pt[1];
-                }
+            } finally {
+                _batchRedrawMode = false;
+                canvas.renderOnAddRemove = true;
+                canvas.renderAll();  // single render for all placement updates
             }
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
@@ -2037,16 +2045,24 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         return;
     }
     
-    // Apply the best result
-    for (const p of bestResult.placements) {
-        const data = shapeData[p.info.name];
-        if (!data) {
-            console.error('Missing shapeData for', p.info.name);
-            continue;
+    // Apply the best result — batch all redraws then do a single canvas.renderAll()
+    _batchRedrawMode = true;
+    canvas.renderOnAddRemove = false;
+    try {
+        for (const p of bestResult.placements) {
+            const data = shapeData[p.info.name];
+            if (!data) {
+                console.error('Missing shapeData for', p.info.name);
+                continue;
+            }
+            data.originalMmPoints = p.full;
+            redrawShapeFromData(p.info.name);
+            // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
         }
-        data.originalMmPoints = p.full;
-        redrawShapeFromData(p.info.name);
-        // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
+    } finally {
+        _batchRedrawMode = false;
+        canvas.renderOnAddRemove = true;
+        canvas.renderAll();  // single render for all local nest updates
     }
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
@@ -2362,6 +2378,9 @@ function mirrorCopy(axis) {
 }
 
 // Helper: Redraw a single shape from its data
+// When true, redrawShapeFromData skips canvas.renderAll() — caller does one batch render
+let _batchRedrawMode = false;
+
 function redrawShapeFromData(shapeName) {
     console.log('redrawShapeFromData:', shapeName, 'exists in shapes:', !!shapes[shapeName], 'exists in shapeData:', !!shapeData[shapeName]);
     
@@ -2426,7 +2445,7 @@ function redrawShapeFromData(shapeName) {
     ensureRulerHandlesFront();
     
     console.log('redrawShapeFromData done:', shapeName, 'now in shapes:', !!shapes[shapeName], 'total shapes:', Object.keys(shapes).length);
-    canvas.renderAll();
+    if (!_batchRedrawMode) canvas.renderAll();
 }
 
 // Helper: Emit shape update to Python
