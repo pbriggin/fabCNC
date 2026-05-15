@@ -162,6 +162,85 @@ journalctl -u wifi-provision -f      # view provisioning logs
 - Physical E-stop required; no software E-stop is implemented
 - Job controls are disabled during manual operations and vice versa
 
+## Logging & Remote Diagnostics
+
+fabCNC writes structured logs to `cnc_ui/logs/` and can ship them to a remote
+endpoint on a schedule — designed for headless Raspberry Pi installs where SSH
+isn't available.
+
+### Files written
+
+| File | Format | Contents |
+|------|--------|----------|
+| `app.log` | Human-readable | Everything the app prints (rotating, 10 MB × 10) |
+| `events.jsonl` | One JSON object per line | File imports, canvas saves/loads/clears, shape transforms / copies / nests / moves / deletes, V-notches, jogs, home, system events |
+| `controller.jsonl` | JSON lines | Every serial command sent (`tx`) and received (`rx`), plus job start / pause / resume / stop / complete / error |
+| `toolpath.jsonl` | JSON lines | Toolpath-generation summaries (shape count, segments, corners, cut settings, generated gcode line count, notches) |
+
+All four files rotate (default 10 MB × 10 backups).
+
+### Configure via `logging_config.json`
+
+Edit [`logging_config.json`](logging_config.json) at the repo root — commit and
+`git pull` on the Pi to push changes. Restart the fabcnc service to apply
+(or use the **Restart Service** button in the System tab).
+
+```json
+{
+  "enabled": true,
+  "log_dir": "cnc_ui/logs",
+  "console_level": "INFO",
+  "file_level": "DEBUG",
+  "max_file_size_mb": 10,
+  "backup_count": 10,
+  "upload": {
+    "enabled": true,
+    "url": "https://your-webhook.example.com/fabcnc-logs",
+    "method": "POST",
+    "interval_minutes": 60,
+    "device_id": "shop-pi-1",
+    "auth_header": "Bearer YOUR_TOKEN",
+    "include_gcode": true,
+    "include_uploads": false,
+    "max_bundle_mb": 50
+  }
+}
+```
+
+### Remote upload destinations
+
+Any HTTPS endpoint that accepts an upload works:
+
+- **POST multipart** (default): standard form upload with two fields, `manifest`
+  (JSON metadata) and `file` (the zip). Works with FastAPI / Express / Flask
+  receivers, n8n / Zapier / Make "Catch Hook" nodes, or services like
+  [webhook.site](https://webhook.site) for ad-hoc debugging.
+- **PUT raw** (`"method": "PUT"`): the entire request body is the zip — point at
+  a pre-signed S3 / GCS / R2 URL.
+
+The Pi only pushes *new bytes since the last successful upload*, tracked in
+`cnc_ui/logs/.uploader_state.json`, so traffic stays small.
+
+### How to fetch logs
+
+Three ways:
+
+1. **Automatic push** — set `upload.enabled=true` and `upload.url=…`. The
+   uploader thread runs every `interval_minutes`.
+2. **One-click upload from the GUI** — open the System tab and click
+   **Upload Logs Now**. Same bundle, sent immediately.
+3. **Download from any browser** — `http://<pi>:8080/debug-bundle` returns a
+   zip of logs + canvas saves + recent gcode. Useful before remote-upload is
+   wired up.
+
+### Diagnostic endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/debug-bundle` | GET | Stream a zip with logs + uploads + canvases + recent gcode |
+| `/logs/upload-now` | POST | Trigger an immediate remote upload (`?full=true` for a full re-send) |
+| `/logs/status` | GET | JSON: current config (auth header redacted), log files, last upload state |
+
 ## License
 
 MIT License

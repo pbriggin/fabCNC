@@ -12,6 +12,18 @@ from typing import Optional
 from .state import machine_state
 import logging
 
+try:
+    # Structured logging helpers — present whenever main.py has been imported.
+    from logging_setup import (
+        log_serial_tx,
+        log_serial_rx,
+        log_controller_event,
+    )
+except Exception:  # pragma: no cover — keep the controller importable standalone
+    def log_serial_tx(*a, **kw): pass
+    def log_serial_rx(*a, **kw): pass
+    def log_controller_event(*a, **kw): pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,9 +128,11 @@ class CNCController:
                 logger.info(f">>> SENT: {command}")
             else:
                 logger.debug(f">>> SENT: {command}")
+            log_serial_tx(command, streaming=self.streaming_mode)
             return True
         except Exception as e:
             logger.error(f"Error sending command '{command}': {e}")
+            log_serial_tx(command, error=str(e), streaming=self.streaming_mode)
             return False
     
     def send_command(self, command: str) -> bool:
@@ -138,6 +152,8 @@ class CNCController:
                 if self.serial_port.in_waiting:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     logger.info(f"<<< RECV: {line}")
+                    if line:
+                        log_serial_rx(line, mode="sync")
                     response_lines.append(line)
                     
                     if line.startswith("ok"):
@@ -163,6 +179,7 @@ class CNCController:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
                         logger.debug(f"<<< READ: {line}")
+                        log_serial_rx(line, mode="async")
                         
                         # Track 'ok' responses for streaming flow control
                         if line.startswith("ok"):
@@ -354,10 +371,21 @@ class CNCController:
             gcode_lines: List of G-code commands to execute
         """
         if not machine_state.is_idle() or not machine_state.job_loaded or not self.connected:
+            log_controller_event(
+                "job_start_rejected",
+                idle=machine_state.is_idle(),
+                job_loaded=machine_state.job_loaded,
+                connected=self.connected,
+            )
             return
         
         self.stop_requested = False
         self.pause_requested = False
+        log_controller_event(
+            "job_start",
+            command_count=len(gcode_lines),
+            filename=machine_state.loaded_filename,
+        )
         
         # Stream via serial
         self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
@@ -368,17 +396,20 @@ class CNCController:
         if machine_state.is_running():
             self.pause_requested = True
             machine_state.set_status("Paused", busy=True, paused=True)
+            log_controller_event("job_pause")
     
     def resume_job(self) -> None:
         """Resume a paused job."""
         if machine_state.paused:
             self.pause_requested = False
             machine_state.set_status("Running", busy=True, paused=False)
+            log_controller_event("job_resume")
     
     def stop_job(self) -> None:
         """Stop the currently running job immediately."""
         self.stop_requested = True
         self.pause_requested = False
+        log_controller_event("job_stop_requested")
         
         # Send emergency stop
         if self.connected:
@@ -390,6 +421,7 @@ class CNCController:
         
         machine_state.reset_job()
         machine_state.set_status("Stopped", busy=False)
+        log_controller_event("job_stopped")
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:
         """Send a G-code command and return the response."""
@@ -558,13 +590,28 @@ class CNCController:
                 logger.info("Job complete!")
                 machine_state.set_status("Complete", busy=False)
                 machine_state.update_job_progress(1.0)
+                log_controller_event(
+                    "job_complete",
+                    sent=sent_count,
+                    acked=self.ok_count,
+                    elapsed_s=round(time.time() - job_start_time, 2),
+                    total_wait_s=round(total_wait_time, 2),
+                    max_wait_s=round(max_wait_time, 2),
+                )
             else:
                 machine_state.reset_job()
                 machine_state.set_status("Stopped", busy=False)
+                log_controller_event(
+                    "job_aborted",
+                    sent=sent_count,
+                    acked=self.ok_count,
+                    elapsed_s=round(time.time() - job_start_time, 2),
+                )
                 
         except Exception as e:
             logger.error(f"Job execution error: {e}", exc_info=True)
             machine_state.set_status("Error", busy=False)
+            log_controller_event("job_error", error=str(e))
         finally:
             self.streaming_mode = False
 

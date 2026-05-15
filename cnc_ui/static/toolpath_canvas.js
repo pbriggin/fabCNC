@@ -1806,8 +1806,12 @@ function gridArray(countX, countY) {
     // Calculate shape bounds for auto-spacing
     const xVals = points.map(p => p[0]);
     const yVals = points.map(p => p[1]);
-    const shapeWidth = Math.max(...xVals) - Math.min(...xVals);
-    const shapeHeight = Math.max(...yVals) - Math.min(...yVals);
+    const baseMinX = Math.min(...xVals);
+    const baseMaxX = Math.max(...xVals);
+    const baseMinY = Math.min(...yVals);
+    const baseMaxY = Math.max(...yVals);
+    const shapeWidth = baseMaxX - baseMinX;
+    const shapeHeight = baseMaxY - baseMinY;
     
     // Auto spacing = shape size + 15mm buffer
     const spacingX = shapeWidth + 15;
@@ -1815,14 +1819,24 @@ function gridArray(countX, countY) {
     
     const strokeColor = shape.stroke;
     const newNames = [];
-    
+    let skipped = 0;
+
     for (let i = 0; i < countX; i++) {
         for (let j = 0; j < countY; j++) {
             if (i === 0 && j === 0) continue; // Skip original position
             
-            const newName = shape.shapeName + '_grid_' + i + '_' + j + '_' + Date.now();
             const offsetX = spacingX * i;
             const offsetY = spacingY * j;
+
+            // Skip copies that would land outside the work area — avoids
+            // addShape silently clamping them all to the same boundary position
+            if (baseMaxX + offsetX > rulerRightMm || baseMinX + offsetX < 0 ||
+                baseMaxY + offsetY > rulerTopMm  || baseMinY + offsetY < 0) {
+                skipped++;
+                continue;
+            }
+
+            const newName = shape.shapeName + '_grid_' + i + '_' + j + '_' + Date.now();
             
             const newPoints = points.map(p => [
                 p[0] + offsetX,
@@ -1834,6 +1848,10 @@ function gridArray(countX, countY) {
         }
     }
     
+    if (skipped > 0) {
+        console.warn('Grid: skipped', skipped, 'copies that would exceed work area bounds');
+        showToast(`Grid: ${skipped} copies skipped (would exceed work area)`, 'warning');
+    }
     console.log('Grid created:', countX, 'x', countY, 'spacing:', spacingX.toFixed(1), 'x', spacingY.toFixed(1));
     return newNames;
 }
@@ -2502,6 +2520,7 @@ function copyShape() {
     clipboard = {
         points: data.originalMmPoints.map(p => [p[0], p[1]]),
         stroke: shape.stroke
+        // lastPastePoints intentionally absent — first paste starts from clipboard.points
     };
     console.log('Copied shape to clipboard');
     return true;
@@ -2513,11 +2532,17 @@ function pasteShape() {
     
     const newName = 'pasted_' + Date.now();
     
-    // Offset by 10mm up and to the right
-    const newPoints = clipboard.points.map(p => [p[0] + 10, p[1] + 10]);
+    // Each paste cascades 10mm off the previous paste's position so repeated
+    // pastes don't stack on top of each other.
+    const basePoints = clipboard.lastPastePoints || clipboard.points;
+    const newPoints = basePoints.map(p => [p[0] + 10, p[1] + 10]);
     
     // Pass the original stroke color
     addShape(newName, newPoints, clipboard.stroke);
+    
+    // Update the cascade origin for the next paste
+    clipboard.lastPastePoints = newPoints;
+    
     console.log('Pasted shape:', newName);
     return newName;
 }
@@ -3532,3 +3557,66 @@ function updateToolhead(x, y) {
     canvas.bringToFront(toolheadIndicator);
     canvas.renderAll();
 }
+
+// ============ LOGGING SHIM ============
+// Wrap every exported toolpathCanvas method so that calling it (from Python
+// via ui.run_javascript or from keyboard shortcuts) emits a `canvas_action`
+// event to the backend. This gives us a complete record of GUI activity
+// without modifying every individual call site.
+(function attachCanvasLoggingShim() {
+    if (!window.toolpathCanvas) return;
+    // Actions that fire continuously or have no user intent — skip them.
+    const SKIP = new Set([
+        'init', 'resize', 'getPositions', 'getCanvasData', 'getNotches',
+        'getRulerBounds', 'isToolpathLocked', 'updateToolhead',
+        'saveUndoState', 'addShape', 'clearShapes', 'showToolpath',
+        'clearToolpath'
+    ]);
+    // Actions that produce huge return values — log a brief summary instead.
+    const SUMMARIZE = new Set(['saveCanvasState', 'loadCanvasState']);
+
+    function summarizeArg(v) {
+        if (v === null || v === undefined) return v;
+        const t = typeof v;
+        if (t === 'string') return v.length > 120 ? v.slice(0, 120) + '…' : v;
+        if (t === 'number' || t === 'boolean') return v;
+        if (Array.isArray(v)) return { _array: true, length: v.length };
+        if (t === 'object') {
+            const keys = Object.keys(v);
+            return { _obj: true, keys: keys.slice(0, 10), keyCount: keys.length };
+        }
+        return String(v);
+    }
+
+    function emit(action, args, result) {
+        if (!window.emitEvent) return;
+        try {
+            const payload = {
+                action: action,
+                args: Array.from(args).map(summarizeArg),
+            };
+            if (result !== undefined && !SUMMARIZE.has(action)) {
+                payload.result = summarizeArg(result);
+            }
+            window.emitEvent('canvas_action', payload);
+        } catch (e) { /* swallow */ }
+    }
+
+    const api = window.toolpathCanvas;
+    Object.keys(api).forEach(name => {
+        if (SKIP.has(name)) return;
+        const fn = api[name];
+        if (typeof fn !== 'function') return;
+        api[name] = function() {
+            const result = fn.apply(this, arguments);
+            // Defer emit so Promise return values don't block.
+            if (result && typeof result.then === 'function') {
+                result.then(r => emit(name, arguments, r)).catch(() => emit(name, arguments));
+            } else {
+                emit(name, arguments, result);
+            }
+            return result;
+        };
+    });
+    console.log('toolpathCanvas logging shim installed');
+})();

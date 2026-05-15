@@ -1,0 +1,21 @@
+{
+  "_comment": "fabCNC structured-logging configuration. Edit and commit to change device behaviour without SSH.",
+  "enabled": true,
+  "log_dir": "cnc_ui/logs",
+  "console_level": "INFO",
+  "file_level": "DEBUG",
+  "max_file_size_mb": 10,
+  "backup_count": 10,
+  "upload": {
+    "_comment": "Set 'url' to any HTTPS endpoint that accepts a POST multipart upload (or PUT for pre-signed URLs).",
+    "enabled": false,
+    "url": "",
+    "method": "POST",
+    "interval_minutes": 60,
+    "device_id": "",
+    "auth_header": "",
+    "include_gcode": true,
+    "include_uploads": false,
+    "max_bundle_mb": 50
+  }
+}

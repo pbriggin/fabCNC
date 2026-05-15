@@ -4,13 +4,33 @@ NiceGUI-based CNC web controller UI.
 Provides manual jogging, homing, file upload, and job execution controls.
 """
 
+# main.py
+"""
+NiceGUI-based CNC web controller UI.
+Provides manual jogging, homing, file upload, and job execution controls.
+"""
+
+# Initialise structured logging (file rotation + JSONL channels) FIRST so the
+# controller's serial I/O and every other module use the configured handlers
+# from the moment they're imported.
+from logging_setup import (
+    setup_logging,
+    log_event,
+    log_toolpath,
+    get_log_dir,
+    load_config as load_logging_config,
+)
+import log_uploader
+
+setup_logging()
+
 from nicegui import ui, app
 from cnc.state import machine_state
 from cnc.controller import cnc_controller
 from cnc.files import file_manager
 from pathlib import Path
 from fastapi import Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import matplotlib.pyplot as plt
 from dxf_processing.dxf_processor import DXFProcessor
@@ -27,12 +47,6 @@ import io
 import zipfile
 from datetime import datetime
 
-# Configure logging to see all debug output
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S'
-)
 logger = logging.getLogger(__name__)
 
 # Application version
@@ -50,7 +64,7 @@ app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), na
 
 @app.get('/debug-bundle')
 def debug_bundle():
-    """Generate and stream a zip of all uploads, canvas saves, and recent gcode."""
+    """Generate and stream a zip of all uploads, canvas saves, recent gcode AND structured logs."""
     upload_dir = file_manager.upload_dir
     gcode_dir = upload_dir / 'gcode_output'
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -64,14 +78,53 @@ def debug_bundle():
         if gcode_dir.exists():
             for f in sorted(gcode_dir.glob('*.gcode'), key=lambda x: x.stat().st_mtime, reverse=True)[:30]:
                 zf.write(f, f'toolpaths/{f.name}')
+        # Include structured logs so a single download captures everything.
+        log_dir = get_log_dir()
+        if log_dir.exists():
+            for f in sorted(log_dir.glob('*.log')) + sorted(log_dir.glob('*.jsonl')):
+                zf.write(f, f'logs/{f.name}')
+            for f in sorted(log_dir.glob('*.log.*')) + sorted(log_dir.glob('*.jsonl.*')):
+                zf.write(f, f'logs/backups/{f.name}')
     buf.seek(0)
 
     filename = f'fabcnc_logs_{timestamp}.zip'
+    log_event('system', 'debug_bundle_downloaded', filename=filename, bytes=buf.getbuffer().nbytes)
     return StreamingResponse(
         buf,
         media_type='application/zip',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
     )
+
+
+@app.post('/logs/upload-now')
+def logs_upload_now(full: bool = False):
+    """Trigger an immediate remote log upload using the configured webhook."""
+    result = log_uploader.upload_now(full=full)
+    return JSONResponse(result, status_code=200 if result.get('ok') else 500)
+
+
+@app.get('/logs/status')
+def logs_status():
+    """Inspect the current logging configuration + last upload state."""
+    cfg = load_logging_config()
+    log_dir = get_log_dir()
+    files = []
+    if log_dir.exists():
+        for f in sorted(log_dir.iterdir()):
+            if f.is_file():
+                files.append({'name': f.name, 'bytes': f.stat().st_size,
+                              'mtime': datetime.fromtimestamp(f.stat().st_mtime).isoformat()})
+    state_file = log_dir / '.uploader_state.json'
+    state = {}
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+        except Exception:
+            pass
+    # Strip the auth header from the response.
+    safe_cfg = json.loads(json.dumps(cfg))
+    safe_cfg['upload']['auth_header'] = '***' if safe_cfg['upload'].get('auth_header') else ''
+    return JSONResponse({'config': safe_cfg, 'files': files, 'uploader_state': state})
 
 
 def get_local_ip():
@@ -155,6 +208,8 @@ async def jog_endpoint(request: Request):
         return {'status': 'error', 'message': 'Invalid axis'}
     
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
+    log_event('jog', 'jog_request', axis=axis, direction=direction, distance=distance,
+              feed_rate=jog_params['feed_rate'], source='js_endpoint')
     return {'status': 'ok'}
 
 # API endpoint for Packaide nesting
@@ -884,18 +939,22 @@ def create_job_controls():
 async def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
     if not await safety_confirm():
+        log_event('jog', 'jog_cancelled', axis=axis, distance=distance)
         return
     print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
+    log_event('jog', 'jog_button', axis=axis, distance=distance, feed_rate=jog_params['feed_rate'])
     cnc_controller.jog(axis, distance, jog_params['feed_rate'])
 
 
 def home_axis(axis: str):
     """Handle home axis button click."""
+    log_event('home', 'home_axis', axis=axis)
     cnc_controller.home_axis(axis)
 
 
 def home_all():
     """Handle home all button click."""
+    log_event('home', 'home_all')
     cnc_controller.home_all()
 
 
@@ -967,6 +1026,8 @@ async def handle_file_upload(event):
         saved_path = file_manager.save_uploaded_file(tmp_path, filename)
         os.unlink(tmp_path)
         print(f"Saved to: {saved_path}")
+        log_event('file', 'dxf_import_started', filename=filename, saved_path=str(saved_path),
+                  size_bytes=len(content))
         
         # Process DXF file
         ui.notify('Processing DXF file...', type='info')
@@ -1015,8 +1076,11 @@ async def handle_file_upload(event):
         machine_state.set_toolpath_generated(False)
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
+        log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(shapes),
+                  shape_names=list(shapes.keys()))
     except Exception as e:
         ui.notify(f'Error processing DXF: {str(e)}', type='negative')
+        log_event('file', 'dxf_import_error', filename=locals().get('filename'), error=str(e))
         import traceback
         traceback.print_exc()
 
@@ -1088,6 +1152,9 @@ async def save_canvas_state():
                 
                 ui.notify(f'Saved: {safe_name}', type='positive')
                 logger.info(f'Canvas state saved to {filepath}')
+                log_event('canvas', 'canvas_saved', filename=safe_name,
+                          shape_count=len(state.get('shapes', {})),
+                          cut_settings=cut_settings.copy())
                 dialog.close()
                 
             except Exception as e:
@@ -1148,6 +1215,9 @@ async def load_canvas_state():
                 machine_state.set_job_loaded(True, os.path.basename(filepath))
                 machine_state.set_toolpath_generated(False)  # Clear toolpath since shapes changed
                 ui.notify(f'Canvas loaded: {os.path.basename(filepath)}', type='positive')
+                log_event('canvas', 'canvas_loaded', filename=os.path.basename(filepath),
+                          shape_count=len(current_toolpath_shapes),
+                          cut_settings=saved_cut)
                 dialog.close()
                 
             except Exception as e:
@@ -1159,6 +1229,7 @@ async def load_canvas_state():
             try:
                 os.remove(filepath)
                 row.delete()
+                log_event('canvas', 'canvas_deleted', filename=os.path.basename(filepath))
                 ui.notify(f'Deleted: {os.path.basename(filepath)}', type='info')
             except Exception as e:
                 ui.notify(f'Error deleting: {str(e)}', type='negative')
@@ -1180,6 +1251,8 @@ async def load_canvas_state():
 def clear_canvas():
     """Clear all shapes from canvas."""
     global current_toolpath_shapes
+    log_event('canvas', 'canvas_cleared', shape_count=len(current_toolpath_shapes),
+              shape_names=list(current_toolpath_shapes.keys()))
     current_toolpath_shapes = {}
     ui.run_javascript('window.toolpathCanvas.clearShapes()')
     machine_state.set_job_loaded(False)
@@ -1199,6 +1272,7 @@ async def toggle_toolpath(button):
         button.set_text('Generate Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
         current_gcode = []
+        log_event('toolpath', 'toolpath_cleared')
         ui.notify('Toolpath cleared - shapes are now editable', type='info')
     else:
         # Generate toolpath mode
@@ -1268,6 +1342,16 @@ async def toggle_toolpath(button):
         button.set_text('Clear Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
         
+        log_toolpath('toolpath_generated',
+                     shape_count=len(current_toolpath_shapes),
+                     shape_names=list(current_toolpath_shapes.keys()),
+                     segments=total_segments,
+                     corners=total_corners,
+                     gcode_lines=len(current_gcode),
+                     z_cut_height=z_cut_height['value'],
+                     cut_settings=cut_settings.copy(),
+                     notch_count=sum(len(v) for v in notches.values()) if notches else 0,
+                     home_before_toolpath=home_before_toolpath['enabled'])
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
 
 
@@ -1348,6 +1432,8 @@ async def outline_job():
     w = max_x - min_x
     h = max_y - min_y
     ui.notify(f'Outlining job area: {w:.0f} x {h:.0f} mm', type='info')
+    log_event('job', 'outline_clicked', width_mm=w, height_mm=h,
+              min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y)
     cnc_controller.start_job(outline_gcode)
 
 
@@ -1376,6 +1462,9 @@ async def start_job():
     print(f"{'='*60}\n")
     
     ui.notify('Starting job...', type='info')
+    log_event('job', 'job_start_clicked', gcode_lines=len(current_gcode),
+              g0_count=g0_count, g1_count=g1_count,
+              filename=machine_state.loaded_filename)
     
     # Start job without callback - we'll monitor completion via state
     cnc_controller.start_job(current_gcode)
@@ -1383,18 +1472,21 @@ async def start_job():
 
 def pause_job():
     """Handle pause job button click."""
+    log_event('job', 'pause_clicked')
     cnc_controller.pause_job()
     ui.notify('Job paused', type='warning')
 
 
 def resume_job():
     """Handle resume job button click."""
+    log_event('job', 'resume_clicked')
     cnc_controller.resume_job()
     ui.notify('Job resumed', type='positive')
 
 
 def stop_job():
     """Handle stop job button click."""
+    log_event('job', 'stop_clicked')
     cnc_controller.stop_job()
     ui.notify('Job stopped', type='negative')
 
@@ -1844,22 +1936,26 @@ def main_page():
                         with ui.column().style('flex: 1 1 0; min-width: 400px; gap: 10px; height: 100%; box-sizing: border-box;'):
                             # Toolbar row above canvas - no wrap
                             with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 6px 10px; width: 100%; flex-wrap: nowrap; flex-shrink: 0;'):
+                                def _run_js_logged(action: str, js: str, **extras):
+                                    log_event('transform', action, **extras)
+                                    ui.run_javascript(js)
+
                                 # Transform tools
-                                ui.button('⬌', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror X')
-                                ui.button('⬍', on_click=lambda: ui.run_javascript('window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror Y')
+                                ui.button('⬌', on_click=lambda: _run_js_logged('mirror_x', 'window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror X')
+                                ui.button('⬍', on_click=lambda: _run_js_logged('mirror_y', 'window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror Y')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
                                 ui.label('°').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('↻', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CW')
-                                ui.button('↺', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CCW')
+                                ui.button('↻', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})', degrees=rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CW')
+                                ui.button('↺', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})', degrees=-rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CCW')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
                                 ui.label('%').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('Scale', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.scaleShape({scale_input.value / 100})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
@@ -1867,7 +1963,7 @@ def main_page():
                                 grid_x = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
                                 ui.label('×').classes('text-body2')
                                 grid_y = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
-                                ui.button('Grid', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
@@ -1877,8 +1973,16 @@ def main_page():
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)
                                     keep_orient = str(keep_orientation.value).lower()
+                                    log_event('transform', 'nest_clicked', offset_mm=offset_val,
+                                              keep_orientation=keep_orientation.value,
+                                              shape_count=len(current_toolpath_shapes))
                                     result = await ui.run_javascript(f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})')
                                     if result and isinstance(result, dict):
+                                        log_event('transform', 'nest_result',
+                                                  success=result.get('success'),
+                                                  width=result.get('width'),
+                                                  height=result.get('height'),
+                                                  error=result.get('error'))
                                         if not result.get('success'):
                                             ui.notify(result.get('error', 'Nesting failed'), type='negative')
                                         elif 'width' in result and 'height' in result:
@@ -2000,6 +2104,14 @@ def main_page():
                                     # Update the stored shapes with new positions
                                     current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
                                     logger.info(f"Shape '{shape_name}' moved to new position")
+                                    try:
+                                        xs = [p[0] for p in new_points]
+                                        ys = [p[1] for p in new_points]
+                                        log_event('canvas', 'shape_moved', shape=shape_name,
+                                                  bbox=[min(xs), min(ys), max(xs), max(ys)],
+                                                  point_count=len(new_points))
+                                    except Exception:
+                                        log_event('canvas', 'shape_moved', shape=shape_name)
                             
                             ui.on('shape_moved', on_shape_moved)
                             
@@ -2012,6 +2124,7 @@ def main_page():
                                 if shape_name and shape_name in current_toolpath_shapes:
                                     del current_toolpath_shapes[shape_name]
                                     logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
+                                    log_event('canvas', 'shape_deleted', shape=shape_name)
                                     # Clear toolpath if it was generated since shapes changed
                                     if machine_state.toolpath_generated:
                                         machine_state.set_toolpath_generated(False)
@@ -2020,11 +2133,24 @@ def main_page():
                             
                             ui.on('shape_deleted', on_shape_deleted)
 
+                            # Generic canvas action emitter from JavaScript — catches
+                            # transforms, copy/paste, undo, zoom, notch add/remove, etc.
+                            def on_canvas_action(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if not isinstance(data, dict):
+                                    data = {}
+                                action = data.pop('action', 'unknown')
+                                log_event('canvas', action, **data)
+
+                            ui.on('canvas_action', on_canvas_action)
+
                             # Handle notch mode auto-disabled from JS (clear/delete/toolpath)
                             def on_notch_mode_changed(e):
                                 data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
                                 if isinstance(data, dict) and not data.get('active', True):
                                     deactivate_notch_btn()
+                                log_event('canvas', 'notch_mode_changed',
+                                          active=bool(data.get('active', False)) if isinstance(data, dict) else False)
 
                             ui.on('notch_mode_changed', on_notch_mode_changed)
                         
@@ -2047,9 +2173,12 @@ def main_page():
                             cmd = gcode_input.value.strip()
                             if cmd:
                                 response_log.push(f'>>> {cmd}')
+                                log_event('manual_gcode', 'send', command=cmd)
                                 response = cnc_controller.send_command_with_response(cmd, timeout=10.0)
                                 for line in response.split('\n'):
                                     response_log.push(f'<<< {line}')
+                                log_event('manual_gcode', 'response', command=cmd,
+                                          response=response[:500])
                                 gcode_input.value = ''
                         
                         ui.button('Send', on_click=send_gcode, icon='send').props('color=primary dense')
@@ -2132,6 +2261,30 @@ def main_page():
                             ui.button('Download Device Logs', icon='download', on_click=send_debug_logs) \
                                 .props('color=primary dense').style('font-size: 13px;')
 
+                            async def upload_logs_now():
+                                cfg = load_logging_config()
+                                if not cfg['upload'].get('url'):
+                                    ui.notify('Configure logging_config.json -> upload.url first', type='warning')
+                                    return
+                                ui.notify('Uploading logs…', type='info')
+                                # Run in a thread so the event loop isn't blocked.
+                                loop = asyncio.get_event_loop()
+                                result = await loop.run_in_executor(None, log_uploader.upload_now, False)
+                                if result.get('ok'):
+                                    ui.notify(f"Upload OK — {result.get('bytes', 0)//1024} KB to HTTP {result.get('status')}",
+                                              type='positive')
+                                else:
+                                    ui.notify(f"Upload failed: {result.get('error')}", type='negative')
+
+                            ui.button('Upload Logs Now', icon='cloud_upload', on_click=upload_logs_now) \
+                                .props('color=primary dense outline').style('font-size: 13px;')
+
+                            log_cfg = load_logging_config()
+                            ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #888;')
+                            upload_url = log_cfg['upload'].get('url') or '(not configured)'
+                            upload_enabled = '✓' if log_cfg['upload'].get('enabled') else '✗'
+                            ui.label(f"Remote upload {upload_enabled}: {upload_url}").classes('text-caption').style('color: #888;')
+
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label)
@@ -2139,6 +2292,8 @@ def main_page():
 
 
 if __name__ in {"__main__", "__mp_main__"}:
+    # Kick off the periodic log uploader (no-op when disabled in config).
+    log_uploader.start_uploader()
     # Run the NiceGUI app
     # Bind to 0.0.0.0 to allow access from other computers on the network
     ui.run(
