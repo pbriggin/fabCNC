@@ -3,4 +3,5 @@ ezdxf>=1.0.0
 numpy>=1.24.0
 matplotlib>=3.7.0
 pyserial>=3.5
+certifi>=2024.0.0
 # packaide (shape nesting) — built from source by setup.sh; not on PyPI

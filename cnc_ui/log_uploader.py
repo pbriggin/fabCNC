@@ -33,11 +33,13 @@ import io
 import json
 import logging
 import socket
+import ssl
 import threading
 import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from urllib import error as _urlerror
 from pathlib import Path
 from typing import Optional
 from urllib import request as _urlrequest
@@ -45,6 +47,15 @@ from urllib import request as _urlrequest
 import logging_setup
 
 logger = logging.getLogger(__name__)
+
+# Build an SSL context that works on macOS (no system keychain) and Pi alike.
+def _ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    return ssl.create_default_context()
 
 _uploader_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
@@ -197,23 +208,34 @@ def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
     payload_json = json.dumps({"content": content}).encode("utf-8")
 
     boundary = f"WebKitFormBoundary{uuid.uuid4().hex}"
-    body = (
+
+    # Build each multipart part explicitly to avoid implicit-concat ambiguity.
+    part_json = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="payload_json"\r\n'
-        f"Content-Type: application/json\r\n\r\n".encode("utf-8")
-        + payload_json
-        + f"\r\n--{boundary}\r\n"
-          f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
-          f"Content-Type: application/zip\r\n\r\n".encode("utf-8")
-        + zip_bytes
-        + f"\r\n--{boundary}--\r\n".encode("utf-8")
-    )
-    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        f"Content-Type: application/json\r\n\r\n"
+    ).encode("utf-8") + payload_json
+
+    part_file = (
+        f"\r\n--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+        f"Content-Type: application/zip\r\n\r\n"
+    ).encode("utf-8") + zip_bytes
+
+    body = part_json + part_file + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}",
+               "User-Agent": "DiscordBot (https://github.com/pbriggin/fabCNC, 1.0)"}
     req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
     started = time.time()
-    with _urlrequest.urlopen(req, timeout=60) as resp:
-        status = resp.status
-        resp_body = resp.read(2048).decode("utf-8", errors="replace")
+    try:
+        with _urlrequest.urlopen(req, timeout=60, context=_ssl_context()) as resp:
+            status = resp.status
+            resp_body = resp.read(2048).decode("utf-8", errors="replace")
+    except _urlerror.HTTPError as exc:
+        discord_error = exc.read(2048).decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from Discord: {discord_error}") from exc
+
     return {
         "status": status,
         "duration_s": round(time.time() - started, 2),
@@ -262,7 +284,7 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
 
     req = _urlrequest.Request(url, data=body, method=method, headers=headers)
     started = time.time()
-    with _urlrequest.urlopen(req, timeout=60) as resp:
+    with _urlrequest.urlopen(req, timeout=60, context=_ssl_context()) as resp:
         status = resp.status
         resp_body = resp.read(2048).decode("utf-8", errors="replace")
     duration = time.time() - started
