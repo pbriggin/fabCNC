@@ -11,7 +11,7 @@
     "enabled": true,
     "url": "https://discord.com/api/webhooks/1504880086099296358/KeT2ZvjgVb4Yg04XcCfbMMOp7PsHkEPhAL8sAR2WG7aBPPqHQcnKFNCzLzx1PQlHSEti",
     "method": "discord",
-    "interval_minutes": 15,
+    "interval_minutes": 0,
     "device_id": "",
     "auth_header": "",
     "include_gcode": true,
