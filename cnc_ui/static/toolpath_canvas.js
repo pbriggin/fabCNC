@@ -1972,7 +1972,9 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 // Update shape with new points from Packaide
                 data.originalMmPoints = placement.points;
                 redrawShapeFromData(placement.name);
-                emitShapeUpdate(placement.name);
+                // Note: emitShapeUpdate intentionally skipped here — emitting one event
+                // per shape floods the WebSocket on large layouts. Python re-fetches
+                // all positions via getPositions() before toolpath generation.
                 
                 // Track bounds
                 for (const pt of placement.points) {
@@ -2044,7 +2046,7 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         }
         data.originalMmPoints = p.full;
         redrawShapeFromData(p.info.name);
-        emitShapeUpdate(p.info.name);
+        // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
     }
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
@@ -3207,6 +3209,7 @@ window.toolpathCanvas = {
     resetZoom: resetZoom,
     // Toolpath visualization
     showToolpath: showToolpath,
+    fetchAndShowToolpath: fetchAndShowToolpath,
     clearToolpath: clearToolpath,
     isToolpathLocked: isToolpathLocked,
     updateToolhead: updateToolhead
@@ -3282,6 +3285,21 @@ function clearToolpath() {
     canvas.renderAll();
     console.log('Toolpath cleared');
     return true;
+}
+
+// Fetch toolpath visualization data from the server and render it.
+// Used instead of passing the (potentially large) viz JSON as inline JS.
+async function fetchAndShowToolpath() {
+    try {
+        const response = await fetch('/toolpath-preview');
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const toolpathData = await response.json();
+        showToolpath(toolpathData);
+        return true;
+    } catch (err) {
+        console.error('fetchAndShowToolpath error:', err);
+        return false;
+    }
 }
 
 // Show toolpath visualization from toolpath data

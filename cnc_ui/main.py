@@ -212,6 +212,14 @@ async def jog_endpoint(request: Request):
               feed_rate=jog_params['feed_rate'], source='js_endpoint')
     return {'status': 'ok'}
 
+# Stores the latest toolpath visualization data for /toolpath-preview
+_pending_viz_data = {}
+
+@app.get('/toolpath-preview')
+def toolpath_preview():
+    """Serve latest toolpath visualization data as JSON (avoids embedding in WebSocket message)."""
+    return JSONResponse(_pending_viz_data)
+
 # API endpoint for Packaide nesting
 @app.post('/nest')
 async def nest_endpoint(request: Request):
@@ -1134,7 +1142,8 @@ async def save_canvas_state():
                 overwrite_confirmed['value'] = False
                 
                 # Get canvas data from JavaScript
-                canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()')
+                # Use a generous timeout — the canvas JSON can be large on complex layouts
+                canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()', timeout=15.0)
                 
                 if not canvas_json:
                     ui.notify('No canvas data to save', type='warning')
@@ -1193,7 +1202,7 @@ async def load_canvas_state():
                     canvas_json = f.read()
                 
                 # Load into JavaScript canvas
-                await ui.run_javascript(f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})')
+                await ui.run_javascript(f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})', timeout=15.0)
                 
                 # Parse and update Python state
                 state = json.loads(canvas_json)
@@ -1285,7 +1294,7 @@ async def toggle_toolpath(button):
         # Fetch current shape positions from JavaScript canvas (in case shapes were moved)
         print("=== FETCHING POSITIONS FROM CANVAS ===")
         try:
-            positions_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getPositions())')
+            positions_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getPositions())', timeout=10.0)
             print(f"positions_json type: {type(positions_json)}, value: {str(positions_json)[:200] if positions_json else 'None'}")
             if positions_json:
                 positions = json.loads(positions_json)
@@ -1309,7 +1318,7 @@ async def toggle_toolpath(button):
         # Fetch notch data from canvas (in mm coords, geometry pre-computed)
         notches = {}
         try:
-            notches_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getNotches())')
+            notches_json = await ui.run_javascript('JSON.stringify(window.toolpathCanvas.getNotches())', timeout=5.0)
             if notches_json:
                 notches = json.loads(notches_json)
                 total_notches = sum(len(v) for v in notches.values())
@@ -1319,18 +1328,31 @@ async def toggle_toolpath(button):
             print(f"Could not fetch notches: {e}")
         
         # Generate visualization data for the canvas
-        viz_data = toolpath_generator.generate_visualization_data(current_toolpath_shapes)
-        
-        # Send visualization data to JavaScript
-        viz_json = json.dumps(viz_data)
-        try:
-            await ui.run_javascript(f'window.toolpathCanvas.showToolpath({viz_json})', timeout=5.0)
-        except TimeoutError:
-            pass  # Visualization still renders; just didn't get JS ack in time
-        
-        # Generate actual G-code for later execution
-        gcode_str = toolpath_generator.generate_toolpath(current_toolpath_shapes, source_filename="preview", notches=notches)
+        # Run CPU-intensive toolpath generation off the asyncio event loop to avoid
+        # blocking Socket.IO keepalives (which would cause the client to disconnect).
+        loop = asyncio.get_event_loop()
+        import concurrent.futures as _cf
+        shapes_snapshot = dict(current_toolpath_shapes)
+        notches_snapshot = dict(notches)
+        with _cf.ThreadPoolExecutor(max_workers=1) as _exec:
+            viz_data, gcode_str = await loop.run_in_executor(
+                _exec,
+                lambda: (
+                    toolpath_generator.generate_visualization_data(shapes_snapshot),
+                    toolpath_generator.generate_toolpath(shapes_snapshot, source_filename="preview", notches=notches_snapshot)
+                )
+            )
         current_gcode = gcode_str.split('\n')
+
+        # Store viz data server-side; JS fetches it via GET /toolpath-preview so we
+        # avoid embedding (potentially megabytes of) JSON inline in the WebSocket message.
+        _pending_viz_data.clear()
+        _pending_viz_data.update(viz_data)
+        try:
+            await ui.run_javascript('window.toolpathCanvas.fetchAndShowToolpath()', timeout=15.0)
+        except TimeoutError:
+            pass  # Visualization renders via fetch regardless of the JS ack
+
         
         # Count corners and segments for info
         total_segments = sum(len(shape['segments']) for shape in viz_data['shapes'].values())
