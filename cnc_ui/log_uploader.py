@@ -57,6 +57,41 @@ def _ssl_context() -> ssl.SSLContext:
         pass
     return ssl.create_default_context()
 
+
+def _get_device_id() -> str:
+    """Return a stable, unique identifier for this device.
+
+    Priority:
+    1. logging_config.json upload.device_id (user-set)
+    2. Raspberry Pi hardware serial from /proc/cpuinfo  (unique per board)
+    3. Last 6 hex digits of the primary MAC address
+    4. hostname
+    """
+    cfg_id = (logging_setup.load_config()["upload"].get("device_id") or "").strip()
+    if cfg_id:
+        return cfg_id
+
+    # Pi serial number
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("Serial"):
+                    serial = line.split(":")[-1].strip().lstrip("0")
+                    if serial:
+                        return f"pi-{serial[-8:]}"
+    except OSError:
+        pass
+
+    # MAC address fallback
+    try:
+        import uuid as _uuid
+        mac = f"{_uuid.getnode():012x}"
+        return f"pi-{mac[-6:]}"
+    except Exception:
+        pass
+
+    return socket.gethostname()
+
 _uploader_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 _state_lock = threading.Lock()
@@ -95,7 +130,7 @@ def build_bundle(*, full: bool = False) -> tuple[bytes, str, dict]:
     cfg = logging_setup.load_config()
     log_dir = logging_setup.get_log_dir()
     upload_cfg = cfg["upload"]
-    device_id = upload_cfg.get("device_id") or socket.gethostname()
+    device_id = _get_device_id()
 
     state = _read_state() if not full else {}
     offsets: dict[str, int] = state.get("offsets", {})
@@ -199,7 +234,7 @@ def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
     if "?" not in url:
         url += "?wait=true"
 
-    device_id = cfg.get("device_id") or socket.gethostname()
+    device_id = _get_device_id()
     ts = manifest.get("created_at", "")[:19].replace("T", " ")
     content = (
         f"\U0001f4cb **fabCNC log bundle**\n"
@@ -258,7 +293,7 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
         return _do_discord_upload(zip_bytes, filename, manifest)
 
     auth = cfg.get("auth_header", "")
-    headers = {"X-Device-Id": cfg.get("device_id", socket.gethostname())}
+    headers = {"X-Device-Id": _get_device_id()}
     if auth:
         headers["Authorization"] = auth
 

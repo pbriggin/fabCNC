@@ -19,10 +19,12 @@ try:
         log_serial_rx,
         log_controller_event,
     )
+    import log_uploader as _log_uploader
 except Exception:  # pragma: no cover — keep the controller importable standalone
     def log_serial_tx(*a, **kw): pass
     def log_serial_rx(*a, **kw): pass
     def log_controller_event(*a, **kw): pass
+    _log_uploader = None
 
 logger = logging.getLogger(__name__)
 
@@ -598,6 +600,13 @@ class CNCController:
                     total_wait_s=round(total_wait_time, 2),
                     max_wait_s=round(max_wait_time, 2),
                 )
+                if _log_uploader:
+                    threading.Thread(
+                        target=_log_uploader.upload_now,
+                        args=(False,),
+                        daemon=True,
+                        name="log-upload-on-complete",
+                    ).start()
             else:
                 machine_state.reset_job()
                 machine_state.set_status("Stopped", busy=False)
@@ -607,6 +616,13 @@ class CNCController:
                     acked=self.ok_count,
                     elapsed_s=round(time.time() - job_start_time, 2),
                 )
+                if _log_uploader:
+                    threading.Thread(
+                        target=_log_uploader.upload_now,
+                        args=(False,),
+                        daemon=True,
+                        name="log-upload-on-abort",
+                    ).start()
                 
         except Exception as e:
             logger.error(f"Job execution error: {e}", exc_info=True)
