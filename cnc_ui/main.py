@@ -2266,8 +2266,11 @@ def main_page():
                                 else:
                                     ui.notify(f"Send failed: {result.get('error')}", type='negative', timeout=8000)
 
-                            ui.button('Send Logs to Dev', icon='cloud_upload', on_click=send_logs_to_dev) \
-                                .props('color=primary dense outline').style('font-size: 13px;')
+                            with ui.row().classes('gap-2'):
+                                ui.button('Send Logs to Dev', icon='cloud_upload', on_click=send_logs_to_dev) \
+                                    .props('color=primary dense outline').style('font-size: 13px;')
+                                ui.button('Download Logs', icon='download', on_click=lambda: ui.navigate.to('/debug-bundle', new_tab=True)) \
+                                    .props('color=secondary dense outline').style('font-size: 13px;')
 
                             log_cfg = load_logging_config()
                             ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
