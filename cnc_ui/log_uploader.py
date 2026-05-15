@@ -68,7 +68,14 @@ def _get_device_id() -> str:
     4. Last 6 hex digits of the primary MAC address
     5. hostname
     """
-    cfg_id = (logging_setup.load_config()["upload"].get("device_id") or "").strip()
+    # Read device_id directly from the config file to avoid load_config() filling
+    # in the hostname when device_id is blank.
+    try:
+        import json as _json
+        raw = _json.loads(logging_setup.CONFIG_PATH.read_text())
+        cfg_id = (raw.get("upload", {}).get("device_id") or "").strip()
+    except Exception:
+        cfg_id = ""
     if cfg_id:
         return cfg_id
 
