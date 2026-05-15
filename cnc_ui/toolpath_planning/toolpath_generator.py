@@ -157,7 +157,6 @@ class ToolpathGenerator:
             "",
             "G21 ; Set units to millimeters",
             "G90 ; Set absolute positioning",
-            "G17 ; Select XY plane",
             "M17 ; Enable all steppers",
             "",
         ] + ([
