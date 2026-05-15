@@ -109,6 +109,15 @@ _uploader_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 _state_lock = threading.Lock()
 
+# Set to True by notify_job_run(); the periodic uploader only fires when True.
+_job_run_since_last_periodic: bool = False
+
+
+def notify_job_run() -> None:
+    """Call this when a job starts or completes to allow the next periodic upload."""
+    global _job_run_since_last_periodic
+    _job_run_since_last_periodic = True
+
 
 # ── State file (tracks last uploaded bundle, byte offsets per log) ────────────
 def _state_path() -> Path:
@@ -385,10 +394,15 @@ def _uploader_loop(interval_s: float) -> None:
     if _stop_event.wait(min(30.0, interval_s)):
         return
     while not _stop_event.is_set():
-        try:
-            upload_now(full=False)
-        except Exception as e:
-            logger.exception(f"Uploader iteration crashed: {e}")
+        global _job_run_since_last_periodic
+        if _job_run_since_last_periodic:
+            _job_run_since_last_periodic = False
+            try:
+                upload_now(full=False)
+            except Exception as e:
+                logger.exception(f"Uploader iteration crashed: {e}")
+        else:
+            logger.debug("Periodic upload skipped — no job run since last upload")
         if _stop_event.wait(interval_s):
             break
     logger.info("Log uploader thread stopped")

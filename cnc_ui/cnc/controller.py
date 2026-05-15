@@ -388,7 +388,9 @@ class CNCController:
             command_count=len(gcode_lines),
             filename=machine_state.loaded_filename,
         )
-        
+        if _log_uploader:
+            _log_uploader.notify_job_run()
+
         # Stream via serial
         self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
         self.job_thread.start()
