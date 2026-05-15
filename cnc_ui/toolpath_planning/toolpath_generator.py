@@ -78,6 +78,10 @@ class ToolpathGenerator:
         """
         gcode_lines = []
         
+        # Reset A tracking so the gcode pass always starts from a clean 0°
+        # (generate_visualization_data may have left current_a at a non-zero value)
+        self.current_a = 0.0
+        
         # Add header
         gcode_lines.extend(self._generate_header())
         

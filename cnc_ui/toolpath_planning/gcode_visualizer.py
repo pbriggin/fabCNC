@@ -9,6 +9,7 @@ Parses GCODE files and displays:
 - Corner handling (special markers)
 """
 
+import csv
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -218,6 +219,49 @@ class GCodeVisualizer:
         ax.scatter(x_array[-1], y_array[-1], c='red', s=100, marker='s', 
                   label='End', zorder=5)
     
+    @staticmethod
+    def extract_shapes_from_gcode(gcode_content: str) -> dict:
+        """
+        Parse gcode content and return a dict of {shape_name: [(x, y), ...]}
+        containing only G1 (cut) move coordinates per shape section.
+        """
+        sections = re.split(r';\s*Shape:\s*(\S+)', gcode_content)
+        shapes = {}
+        for i in range(1, len(sections), 2):
+            name = sections[i]
+            body = sections[i + 1]
+            points = [
+                (float(x), float(y))
+                for x, y in re.findall(r'G1 X([-\d.]+) Y([-\d.]+)', body)
+            ]
+            if points:
+                shapes[name] = points
+        return shapes
+
+    def export_shapes_to_csv(self, gcode_filename: str, csv_filename: str) -> int:
+        """
+        Read *gcode_filename*, extract per-shape G1 XY coordinates, and write
+        them to *csv_filename* with columns: shape_name, point_index, x, y.
+
+        Returns the total number of points written.
+        """
+        with open(gcode_filename, 'r') as f:
+            gcode_content = f.read()
+
+        shapes = self.extract_shapes_from_gcode(gcode_content)
+
+        total_points = 0
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['shape_name', 'point_index', 'x', 'y'])
+            for shape_name, points in shapes.items():
+                for idx, (x, y) in enumerate(points):
+                    writer.writerow([shape_name, idx, x, y])
+                    total_points += 1
+
+        logger.info(f"Exported {total_points} points across {len(shapes)} shapes to {csv_filename}")
+        return total_points
+
     def get_statistics(self):
         """Get statistics about the GCODE file as a dictionary."""
         if not self.x_positions:
@@ -277,6 +321,7 @@ def main():
     parser.add_argument('gcode_file', help='Path to the GCODE file')
     parser.add_argument('-o', '--output', help='Output image filename')
     parser.add_argument('--no-display', action='store_true', help='Don\'t display the plot')
+    parser.add_argument('--csv', help='Export per-shape XY coordinates to this CSV file')
     
     args = parser.parse_args()
     
@@ -289,7 +334,12 @@ def main():
         
         # Print statistics
         visualizer.print_statistics()
-        
+
+        # Export CSV if requested
+        if args.csv:
+            count = visualizer.export_shapes_to_csv(args.gcode_file, args.csv)
+            print(f"Exported {count} points to {args.csv}")
+
         # Create visualization
         if args.output or not args.no_display:
             visualizer.create_visualization(args.output)
