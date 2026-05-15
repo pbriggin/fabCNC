@@ -1926,7 +1926,7 @@ def main_page():
             update_btn.set_text('Software Up To Date')
             update_btn.props('dense flat no-caps icon=check_circle color=grey-6')
             update_btn.style('font-size: 11px; min-width: 140px; background: none; border: none;')
-    ui.timer(30.0, _check_update_timer)
+    ui.timer(300.0, _check_update_timer)  # Every 5 min — was 30 s; frequent git fetch stresses WiFi
     
     # Register JavaScript functions for jog control
     ui.run_javascript('''

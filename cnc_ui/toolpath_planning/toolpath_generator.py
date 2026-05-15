@@ -13,6 +13,7 @@ import math
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dxf_processing.dxf_processor import DXFProcessor
 
@@ -146,6 +147,20 @@ class ToolpathGenerator:
             f.write(gcode)
         
         logger.info(f"Saved GCODE to: {output_path} ({len(gcode.splitlines())} lines)")
+        
+        # Prune old gcode files — keep only the 50 most recent so the SD card
+        # doesn't fill up (a full disk makes the Pi entirely unresponsive).
+        try:
+            all_gcode = sorted(
+                Path(self.output_dir).glob('*.gcode'),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
+            for old_file in all_gcode[50:]:
+                old_file.unlink(missing_ok=True)
+        except Exception as prune_err:
+            logger.warning(f"gcode prune failed: {prune_err}")
+        
         return output_path
     
     def _generate_header(self) -> List[str]:

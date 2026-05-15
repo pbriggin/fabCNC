@@ -197,6 +197,25 @@ WCSVC
     fi
 fi
 
+# ── Disable WiFi power management (Linux only) ──────────────────────────────
+# The Pi's WiFi driver enters power-saving sleep and becomes completely
+# unreachable (SSH + HTTP both fail) until a hard reboot. Disabling it here
+# prevents that. NetworkManager conf.d persists across reboots.
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    echo ""
+    echo "==> Disabling WiFi power management..."
+    sudo mkdir -p /etc/NetworkManager/conf.d
+    sudo tee /etc/NetworkManager/conf.d/wifi-power-save-off.conf > /dev/null <<'WIFICONF'
+[connection]
+wifi.powersave = 2
+WIFICONF
+    # Also disable immediately on any active wlan interface (no reboot needed)
+    for IFACE in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+        sudo iw dev "$IFACE" set power_save off 2>/dev/null || true
+    done
+    echo "    WiFi power management disabled (persistent via NetworkManager)."
+fi
+
 # ── Systemd auto-start (Linux only) ─────────────────────────────────────────
 if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
     echo ""
@@ -219,6 +238,9 @@ WorkingDirectory=${REPO_DIR}/cnc_ui
 ExecStart=${VENV_ABS}/bin/python3 ${REPO_DIR}/cnc_ui/main.py
 Restart=always
 RestartSec=10
+# Make the app last to be killed if the Pi runs low on memory.
+# Without this the OOM killer may target sshd or NetworkManager instead.
+OOMScoreAdjust=-500
 StandardOutput=journal
 StandardError=journal
 
