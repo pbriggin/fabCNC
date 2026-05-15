@@ -63,15 +63,22 @@ def _get_device_id() -> str:
 
     Priority:
     1. logging_config.json upload.device_id (user-set)
-    2. Raspberry Pi hardware serial from /proc/cpuinfo  (unique per board)
-    3. Last 6 hex digits of the primary MAC address
-    4. hostname
+    2. /sys/firmware/devicetree/base/serial-number  (Pi 4/5, unique per board)
+    3. /proc/cpuinfo Serial line (older Pi)
+    4. Last 6 hex digits of the primary MAC address
+    5. hostname
     """
     cfg_id = (logging_setup.load_config()["upload"].get("device_id") or "").strip()
     if cfg_id:
         return cfg_id
 
-    # Pi serial number
+    try:
+        serial = open("/sys/firmware/devicetree/base/serial-number").read().strip().rstrip("\x00").lstrip("0")
+        if serial:
+            return f"pi-{serial[-8:]}"
+    except OSError:
+        pass
+
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
@@ -82,7 +89,6 @@ def _get_device_id() -> str:
     except OSError:
         pass
 
-    # MAC address fallback
     try:
         import uuid as _uuid
         mac = f"{_uuid.getnode():012x}"
