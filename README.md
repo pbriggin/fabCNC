@@ -179,9 +179,29 @@ isn't available.
 
 All four files rotate (default 10 MB × 10 backups).
 
+### Configure from the GUI (no SSH needed)
+
+Open the **System** tab → **Remote Log Upload**. Fill in:
+
+| Field | What to put |
+|-------|-------------|
+| Enable automatic uploads | Tick to start pushing in the background |
+| Upload URL | A webhook you control (see below) |
+| Method | `POST` for most receivers, `PUT` for pre-signed S3/R2 URLs |
+| Every (minutes) | Push interval. `0` = manual only |
+| Device ID | Anything — used to label this machine in the upload |
+| Auth header | Optional, e.g. `Bearer my-token` |
+| Include recent gcode / DXFs | Bundle extra artefacts with each upload |
+
+Click **Save** to persist (writes `logging_config.json` and restarts the
+background uploader live — no service restart needed), **Test Upload** to
+send one bundle immediately and confirm the URL works, or **Upload Now** to
+push a fresh incremental bundle.
+
 ### Configure via `logging_config.json`
 
-Edit [`logging_config.json`](logging_config.json) at the repo root — commit and
+You can also edit [`logging_config.json`](logging_config.json) directly and
+`git pull` on the Pi if you have shell access. Same effect as the GUI form.
 `git pull` on the Pi to push changes. Restart the fabcnc service to apply
 (or use the **Restart Service** button in the System tab).
 

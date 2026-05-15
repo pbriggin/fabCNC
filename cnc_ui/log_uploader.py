@@ -302,3 +302,15 @@ def start_uploader() -> None:
 
 def stop_uploader() -> None:
     _stop_event.set()
+
+
+def restart_uploader() -> None:
+    """Stop and re-launch the uploader thread (picks up new config)."""
+    global _uploader_thread
+    stop_uploader()
+    if _uploader_thread and _uploader_thread.is_alive():
+        _uploader_thread.join(timeout=5.0)
+    _uploader_thread = None
+    # Force a fresh config read on next call.
+    logging_setup.load_config(force=True)
+    start_uploader()

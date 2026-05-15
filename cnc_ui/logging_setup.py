@@ -108,6 +108,30 @@ def get_log_dir() -> Path:
     return Path(load_config()["log_dir"])
 
 
+def save_upload_config(updates: dict[str, Any]) -> dict[str, Any]:
+    """Persist changes to the ``upload`` section of logging_config.json.
+
+    Only keys present in ``updates`` are touched, so this is safe to call
+    from a partial GUI form. Returns the new merged config.
+    """
+    # Start with whatever is on disk (or defaults).
+    on_disk: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        try:
+            on_disk = json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            on_disk = {}
+    upload = dict(on_disk.get("upload") or {})
+    upload.update({k: v for k, v in updates.items() if v is not None})
+    on_disk["upload"] = upload
+    # Keep top-level defaults if file was missing.
+    on_disk.setdefault("enabled", True)
+    on_disk.setdefault("log_dir", "cnc_ui/logs")
+    CONFIG_PATH.write_text(json.dumps(on_disk, indent=2))
+    # Force re-read so subsequent log_event / uploader calls see new values.
+    return load_config(force=True)
+
+
 # ── Internal state ────────────────────────────────────────────────────────────
 _initialised = False
 _init_lock = threading.Lock()

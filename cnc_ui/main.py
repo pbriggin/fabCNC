@@ -2261,29 +2261,148 @@ def main_page():
                             ui.button('Download Device Logs', icon='download', on_click=send_debug_logs) \
                                 .props('color=primary dense').style('font-size: 13px;')
 
-                            async def upload_logs_now():
-                                cfg = load_logging_config()
-                                if not cfg['upload'].get('url'):
-                                    ui.notify('Configure logging_config.json -> upload.url first', type='warning')
-                                    return
-                                ui.notify('Uploading logs…', type='info')
-                                # Run in a thread so the event loop isn't blocked.
-                                loop = asyncio.get_event_loop()
-                                result = await loop.run_in_executor(None, log_uploader.upload_now, False)
-                                if result.get('ok'):
-                                    ui.notify(f"Upload OK — {result.get('bytes', 0)//1024} KB to HTTP {result.get('status')}",
-                                              type='positive')
-                                else:
-                                    ui.notify(f"Upload failed: {result.get('error')}", type='negative')
+                            ui.separator().classes('my-3')
 
-                            ui.button('Upload Logs Now', icon='cloud_upload', on_click=upload_logs_now) \
-                                .props('color=primary dense outline').style('font-size: 13px;')
+                            # ────────────── Remote Log Upload Configuration ──────────────
+                            # On-site operators configure this once; no SSH / git pull needed.
+                            ui.label('Remote Log Upload').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+                            ui.label(
+                                'Push device logs to a URL you control so you can debug from anywhere. '
+                                'Use a free webhook from webhook.site for a quick test, or your own receiver.'
+                            ).classes('text-caption').style('color: #888; max-width: 520px;')
+
+                            from logging_setup import save_upload_config
+                            _upload_cfg = load_logging_config()['upload']
+
+                            with ui.column().classes('gap-2').style('max-width: 520px; margin-top: 6px;'):
+                                upload_enabled_in = ui.checkbox(
+                                    'Enable automatic uploads',
+                                    value=bool(_upload_cfg.get('enabled')),
+                                )
+                                upload_url_in = ui.input(
+                                    'Upload URL',
+                                    value=_upload_cfg.get('url', ''),
+                                    placeholder='https://webhook.site/your-uuid-here',
+                                ).props('outlined dense').classes('w-full')
+                                with ui.row().classes('w-full gap-2'):
+                                    upload_method_in = ui.select(
+                                        ['POST', 'PUT'],
+                                        value=_upload_cfg.get('method', 'POST'),
+                                        label='Method',
+                                    ).props('outlined dense').style('min-width: 100px;')
+                                    upload_interval_in = ui.number(
+                                        label='Every (minutes)',
+                                        value=int(_upload_cfg.get('interval_minutes', 60) or 60),
+                                        min=0, max=1440, format='%.0f',
+                                    ).props('outlined dense').style('width: 130px;')
+                                    upload_device_in = ui.input(
+                                        'Device ID',
+                                        value=_upload_cfg.get('device_id', '') or socket.gethostname(),
+                                    ).props('outlined dense').style('flex: 1;')
+                                upload_auth_in = ui.input(
+                                    'Auth header (optional)',
+                                    value=_upload_cfg.get('auth_header', ''),
+                                    placeholder='Bearer your-token',
+                                    password=True, password_toggle_button=True,
+                                ).props('outlined dense').classes('w-full')
+                                with ui.row().classes('gap-4'):
+                                    upload_include_gcode_in = ui.checkbox(
+                                        'Include recent gcode',
+                                        value=bool(_upload_cfg.get('include_gcode', True)),
+                                    )
+                                    upload_include_uploads_in = ui.checkbox(
+                                        'Include DXF / canvas saves',
+                                        value=bool(_upload_cfg.get('include_uploads', False)),
+                                    )
+
+                                upload_status_label = ui.label('').classes('text-caption').style('color: #888;')
+
+                                def _gather_form() -> dict:
+                                    return {
+                                        'enabled': bool(upload_enabled_in.value),
+                                        'url': (upload_url_in.value or '').strip(),
+                                        'method': upload_method_in.value or 'POST',
+                                        'interval_minutes': int(upload_interval_in.value or 0),
+                                        'device_id': (upload_device_in.value or '').strip(),
+                                        'auth_header': upload_auth_in.value or '',
+                                        'include_gcode': bool(upload_include_gcode_in.value),
+                                        'include_uploads': bool(upload_include_uploads_in.value),
+                                    }
+
+                                def _refresh_status_label():
+                                    cfg = load_logging_config()['upload']
+                                    url = cfg.get('url') or '(not configured)'
+                                    flag = '✓' if cfg.get('enabled') and cfg.get('url') else '✗'
+                                    upload_status_label.set_text(
+                                        f"Status: {flag}  every {cfg.get('interval_minutes', 0)} min  →  {url}"
+                                    )
+
+                                _refresh_status_label()
+
+                                def save_settings():
+                                    form = _gather_form()
+                                    if form['enabled'] and not form['url']:
+                                        ui.notify('Enter an upload URL before enabling.', type='warning')
+                                        return
+                                    save_upload_config(form)
+                                    log_event('system', 'logging_config_updated',
+                                              enabled=form['enabled'],
+                                              url=form['url'],
+                                              method=form['method'],
+                                              interval_minutes=form['interval_minutes'],
+                                              device_id=form['device_id'],
+                                              include_gcode=form['include_gcode'],
+                                              include_uploads=form['include_uploads'])
+                                    log_uploader.restart_uploader()
+                                    _refresh_status_label()
+                                    ui.notify('Logging settings saved.', type='positive')
+
+                                async def test_upload():
+                                    form = _gather_form()
+                                    if not form['url']:
+                                        ui.notify('Enter an upload URL first.', type='warning')
+                                        return
+                                    # Save first so the test uses the values shown.
+                                    save_upload_config(form)
+                                    _refresh_status_label()
+                                    ui.notify('Sending test bundle…', type='info')
+                                    loop = asyncio.get_event_loop()
+                                    result = await loop.run_in_executor(None, log_uploader.upload_now, True)
+                                    if result.get('ok'):
+                                        ui.notify(
+                                            f"Test OK — HTTP {result.get('status')} "
+                                            f"({result.get('bytes', 0)//1024} KB in {result.get('duration_s')}s)",
+                                            type='positive',
+                                        )
+                                    else:
+                                        ui.notify(f"Test failed: {result.get('error')}", type='negative', timeout=8000)
+
+                                async def upload_now_click():
+                                    cfg = load_logging_config()['upload']
+                                    if not cfg.get('url'):
+                                        ui.notify('Save an upload URL first.', type='warning')
+                                        return
+                                    ui.notify('Uploading…', type='info')
+                                    loop = asyncio.get_event_loop()
+                                    result = await loop.run_in_executor(None, log_uploader.upload_now, False)
+                                    if result.get('ok'):
+                                        ui.notify(
+                                            f"Upload OK — {result.get('bytes', 0)//1024} KB → HTTP {result.get('status')}",
+                                            type='positive',
+                                        )
+                                    else:
+                                        ui.notify(f"Upload failed: {result.get('error')}", type='negative', timeout=8000)
+
+                                with ui.row().classes('gap-2'):
+                                    ui.button('Save', icon='save', on_click=save_settings) \
+                                        .props('color=primary dense').style('font-size: 13px;')
+                                    ui.button('Test Upload', icon='science', on_click=test_upload) \
+                                        .props('color=primary dense outline').style('font-size: 13px;')
+                                    ui.button('Upload Now', icon='cloud_upload', on_click=upload_now_click) \
+                                        .props('color=primary dense outline').style('font-size: 13px;')
 
                             log_cfg = load_logging_config()
-                            ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #888;')
-                            upload_url = log_cfg['upload'].get('url') or '(not configured)'
-                            upload_enabled = '✓' if log_cfg['upload'].get('enabled') else '✗'
-                            ui.label(f"Remote upload {upload_enabled}: {upload_url}").classes('text-caption').style('color: #888;')
+                            ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
 
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
