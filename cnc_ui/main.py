@@ -2254,13 +2254,6 @@ def main_page():
 
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
-                            async def send_debug_logs():
-                                """Open the debug bundle download URL in a new browser tab."""
-                                await ui.run_javascript("window.open('/debug-bundle', '_blank')")
-
-                            ui.button('Download Device Logs', icon='download', on_click=send_debug_logs) \
-                                .props('color=primary dense').style('font-size: 13px;')
-
                             async def send_logs_to_dev():
                                 ui.notify('Sending logs…', type='info')
                                 loop = asyncio.get_event_loop()
