@@ -50,7 +50,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.43"
+APP_VERSION = "v1.0.44"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent

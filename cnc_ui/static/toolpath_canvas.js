@@ -1861,8 +1861,52 @@ function gridArray(countX, countY) {
 // Show a notification using NiceGUI/Quasar's notification system
 // Track active toasts so we can cap the visible count (older ones get
 // dismissed early to keep the bottom of the UI from filling up).
+// We patch Quasar.Notify.create globally so notifications from BOTH the
+// JS side (showToast) AND the Python side (ui.notify in NiceGUI) are
+// counted against the same cap — otherwise file-upload spam from the
+// server can stack up underneath JS toasts.
 const _MAX_VISIBLE_TOASTS = 3;
 const _activeToasts = [];
+function _registerToastDismiss(dismiss, timeoutMs) {
+    if (typeof dismiss !== 'function') return dismiss;
+    _activeToasts.push(dismiss);
+    if (timeoutMs && timeoutMs > 0) {
+        setTimeout(() => {
+            const idx = _activeToasts.indexOf(dismiss);
+            if (idx !== -1) _activeToasts.splice(idx, 1);
+        }, timeoutMs + 100);
+    }
+    while (_activeToasts.length > _MAX_VISIBLE_TOASTS) {
+        const oldest = _activeToasts.shift();
+        try { oldest(); } catch (_) {}
+    }
+    return dismiss;
+}
+function _installQuasarNotifyCap() {
+    if (typeof Quasar === 'undefined' || !Quasar.Notify || Quasar.Notify.__capped) return false;
+    const _origCreate = Quasar.Notify.create.bind(Quasar.Notify);
+    Quasar.Notify.create = function(opts) {
+        const dismiss = _origCreate(opts);
+        // Best-effort: Quasar's default timeout is 5000ms when not specified.
+        let timeoutMs = 5000;
+        if (opts && typeof opts === 'object') {
+            if (typeof opts.timeout === 'number') timeoutMs = opts.timeout;
+        }
+        return _registerToastDismiss(dismiss, timeoutMs);
+    };
+    Quasar.Notify.__capped = true;
+    return true;
+}
+// Try immediately; Quasar may not be loaded yet, so retry a few times.
+(function _tryInstallCap() {
+    if (_installQuasarNotifyCap()) return;
+    let attempts = 0;
+    const iv = setInterval(() => {
+        attempts++;
+        if (_installQuasarNotifyCap() || attempts > 50) clearInterval(iv);
+    }, 100);
+})();
+
 function showToast(message, type = 'info', duration = 3000) {
     const colors = {
         'info': 'info',
@@ -1871,29 +1915,16 @@ function showToast(message, type = 'info', duration = 3000) {
         'error': 'negative'
     };
     
-    // Use Quasar's notification system (same as NiceGUI's ui.notify)
+    // Use Quasar's notification system (same as NiceGUI's ui.notify).
+    // The patched Quasar.Notify.create above handles the visibility cap.
     if (typeof Quasar !== 'undefined' && Quasar.Notify) {
-        const dismiss = Quasar.Notify.create({
+        Quasar.Notify.create({
             message: message,
             type: colors[type] || 'info',
             position: 'bottom',
             timeout: duration === 0 ? 0 : duration,
             actions: duration === 0 ? [{ icon: 'close', color: 'white' }] : []
         });
-        _activeToasts.push(dismiss);
-        // Auto-cleanup the tracking entry when the toast times out so the
-        // array doesn't grow unbounded.
-        if (duration > 0) {
-            setTimeout(() => {
-                const idx = _activeToasts.indexOf(dismiss);
-                if (idx !== -1) _activeToasts.splice(idx, 1);
-            }, duration + 100);
-        }
-        // Dismiss oldest if we exceed the cap.
-        while (_activeToasts.length > _MAX_VISIBLE_TOASTS) {
-            const oldest = _activeToasts.shift();
-            try { oldest(); } catch (_) {}
-        }
     } else {
         console.log(`[${type}] ${message}`);
     }
