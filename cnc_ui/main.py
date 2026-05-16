@@ -50,7 +50,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "v1.0.36"
+APP_VERSION = "v1.0.40"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -60,6 +60,61 @@ update_state = {'available': False}
 
 # Mount static files directory
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
+
+
+# === SOCKET.IO LIFECYCLE LOGGING =====================================
+# Log every NiceGUI client connect/disconnect so we can correlate browser
+# socket drops with nest crashes. NiceGUI exposes app.on_connect /
+# app.on_disconnect; these fire on the underlying Socket.IO session.
+def _on_client_connect(client):
+    try:
+        cid = getattr(client, 'id', '?')
+        logger.info(f"[WS] client connect id={cid}")
+        log_event('system', 'ws_connect', client_id=str(cid))
+    except Exception as exc:
+        logger.warning(f"[WS] connect logging failed: {exc}")
+
+def _on_client_disconnect(client):
+    try:
+        cid = getattr(client, 'id', '?')
+        logger.warning(f"[WS] client DISCONNECT id={cid}")
+        log_event('system', 'ws_disconnect', client_id=str(cid))
+    except Exception as exc:
+        logger.warning(f"[WS] disconnect logging failed: {exc}")
+
+try:
+    app.on_connect(_on_client_connect)
+    app.on_disconnect(_on_client_disconnect)
+    logger.info("[WS] lifecycle hooks installed")
+except Exception as exc:
+    logger.warning(f"Could not install WS lifecycle hooks: {exc}")
+
+
+@app.post('/client-log')
+async def client_log(request: Request):
+    """Receive a batch of client-side diagnostic events buffered in localStorage.
+
+    Used to recover logs after the browser drops its WebSocket (so emitEvent
+    calls were lost) and reloads the page. The JS posts whatever it has in
+    localStorage on every page load.
+    """
+    try:
+        payload = await request.json()
+        events = payload.get('events') or []
+        reason = payload.get('reason', 'unknown')
+        logger.warning(f"[CLIENT-LOG] flushing {len(events)} buffered events reason={reason}")
+        for ev in events:
+            try:
+                cp = ev.get('checkpoint', '?') if isinstance(ev, dict) else '?'
+                logger.info(f"[NEST JS RECOVERED] {cp}: {ev}")
+                if isinstance(ev, dict):
+                    log_event('transform', 'nest_diagnostic_recovered', **ev)
+            except Exception:
+                pass
+        return {'status': 'ok', 'received': len(events)}
+    except Exception as exc:
+        logger.exception(f"[CLIENT-LOG] failed: {exc}")
+        return {'status': 'error', 'message': str(exc)}
 
 
 @app.get('/debug-bundle')

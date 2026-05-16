@@ -2048,7 +2048,8 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
         // Fall back to local algorithm if Packaide fails
         console.log('Packaide returned no placements, falling back to local algorithm');
         showToast('Using local algorithm...', 'info', 2000);
-        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        _nestDiag('about_to_call_local', { from: 'packaide_no_placements' });
+        await nestShapesLocal(shapeInfos, keepOrientation, spacing);
         
     } catch (error) {
         console.error('Packaide error:', error);
@@ -2060,7 +2061,8 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
         console.log('Falling back to local nesting algorithm');
         showToast('Server busy, using local algorithm...', 'warning', 2000);
         try {
-            nestShapesLocal(shapeInfos, keepOrientation, spacing);
+            _nestDiag('about_to_call_local', { from: 'packaide_catch' });
+            await nestShapesLocal(shapeInfos, keepOrientation, spacing);
         } catch (localErr) {
             _nestDiag('local_nest_catch', {
                 message: String(localErr && localErr.message || localErr),
@@ -2071,8 +2073,14 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
     }
 }
 
-// Local nesting algorithm (fallback)
-function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
+// Local nesting algorithm (fallback) — async so we can yield to event loop
+// between strategies and prevent NiceGUI WebSocket from timing out.
+async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
+    const _tLocalStart = performance.now();
+    const _totalPts = shapeInfos.reduce((s, si) => s + ((si.fullPoints && si.fullPoints.length) || 0), 0);
+    _nestDiag('local_nest_start', { shapeCount: shapeInfos.length, totalPoints: _totalPts, keepOrientation, spacing });
+    _startNestHeartbeat('local_nest');
+    const _yield = () => new Promise(r => setTimeout(r, 0));
     // Try multiple sorting strategies and pick the best result
     const strategies = [
         { name: 'area-desc', sort: (a, b) => b.area - a.area },
@@ -2087,27 +2095,36 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
     let bestArea = Infinity;
     
     for (const strategy of strategies) {
+        await _yield();  // yield to event loop so WebSocket heartbeats can flush
+        const _tStrat = performance.now();
         const sortedInfos = [...shapeInfos].sort(strategy.sort);
-        const result = tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        const result = await tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        const _stratMs = (performance.now() - _tStrat).toFixed(1);
         
         if (result.success) {
             const area = result.width * result.height;
+            _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: true, area: Math.round(area), w: Math.round(result.width), h: Math.round(result.height) });
             console.log(`Strategy ${strategy.name}: ${result.width.toFixed(0)}x${result.height.toFixed(0)} = ${area.toFixed(0)}`);
             if (area < bestArea) {
                 bestArea = area;
                 bestResult = result;
             }
+        } else {
+            _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: false });
         }
     }
     
     if (!bestResult) {
         undo();
+        _nestDiag('local_nest_failed', { totalMs: (performance.now() - _tLocalStart).toFixed(1) });
+        _stopNestHeartbeat();
         console.log('=== NESTING FAILED ===');
         showToast('Could not nest shapes - not enough space', 'error', 4000);
         return;
     }
     
     // Apply the best result — batch all redraws then do a single canvas.renderAll()
+    const _tRedraw = performance.now();
     _batchRedrawMode = true;
     canvas.renderOnAddRemove = false;
     try {
@@ -2126,16 +2143,40 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         canvas.renderOnAddRemove = true;
         canvas.renderAll();  // single render for all local nest updates
     }
+    _nestDiag('local_redraw_done', {
+        ms: (performance.now() - _tRedraw).toFixed(1),
+        totalMs: (performance.now() - _tLocalStart).toFixed(1),
+        placed: bestResult.placements.length,
+        w: Math.round(bestResult.width),
+        h: Math.round(bestResult.height)
+    });
+    _stopNestHeartbeat();
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
     showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
 }
 
-// Try nesting with a specific shape order
-function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
+// Try nesting with a specific shape order. Async so we can yield to the event
+// loop between shape placements; otherwise long runs block the WebSocket and
+// NiceGUI tears down the page (= visible "canvas reset").
+async function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
+    const _tTryStart = performance.now();
     const placedShapes = [];
+    const _yieldEvery = 2;  // yield after every 2 shapes
+    const _logEvery = 3;    // emit progress diag every 3 shapes
     
     for (let i = 0; i < shapeInfos.length; i++) {
+        if (i > 0 && i % _yieldEvery === 0) {
+            await new Promise(r => setTimeout(r, 0));
+        }
+        if (i > 0 && i % _logEvery === 0) {
+            _nestDiag('try_nest_progress', {
+                i,
+                of: shapeInfos.length,
+                placed: placedShapes.length,
+                elapsed: (performance.now() - _tTryStart).toFixed(0)
+            });
+        }
         const info = shapeInfos[i];
         
         let bestPos = null, bestRotation = 0;
@@ -2444,21 +2485,88 @@ function mirrorCopy(axis) {
 let _batchRedrawMode = false;
 
 // === NEST DIAGNOSTIC HELPERS =========================================
-// Emit a diagnostic checkpoint to Python so it shows up in app.log.
-// Also logs to console for browser-side debugging.
-function _nestDiag(checkpoint, info) {
-    const msg = { checkpoint, t: performance.now().toFixed(1), ...info };
-    try { console.log('[NEST DIAG]', JSON.stringify(msg)); } catch (e) {}
-    if (window.emitEvent) {
-        try { window.emitEvent('nest_diagnostic', msg); } catch (e) {}
+// Goal: capture nest failures even when the WebSocket dies mid-operation.
+// Strategy:
+//   1. emitEvent('nest_diagnostic', ...) — fast path via Socket.IO
+//   2. localStorage ring buffer — survives page reloads / socket drops
+//   3. On page load, POST any buffered events to /client-log via fetch
+//      (HTTP, independent of WebSocket health)
+//   4. Monitor Socket.IO connection state and log transitions
+const _NEST_LS_KEY = 'nestDiagBuffer';
+const _NEST_LS_MAX = 500;
+
+function _nestBufferPush(msg) {
+    try {
+        const raw = localStorage.getItem(_NEST_LS_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        arr.push(msg);
+        if (arr.length > _NEST_LS_MAX) arr.splice(0, arr.length - _NEST_LS_MAX);
+        localStorage.setItem(_NEST_LS_KEY, JSON.stringify(arr));
+    } catch (e) {
+        // localStorage may be full or unavailable — degrade silently
     }
 }
 
-// Global error catchers — emit any uncaught error/promise rejection to Python.
-// Without this, a JS error during nesting silently kills the operation and the
-// only symptom is the canvas appearing to "refresh" when the connection drops.
+function _nestDiag(checkpoint, info) {
+    const msg = {
+        checkpoint,
+        t: performance.now().toFixed(1),
+        wall: Date.now(),
+        wsState: window._wsLastState || 'unknown',
+        ...info
+    };
+    try { console.log('[NEST DIAG]', JSON.stringify(msg)); } catch (e) {}
+    _nestBufferPush(msg);
+    if (window.emitEvent) {
+        try { window.emitEvent('nest_diagnostic', msg); } catch (e) {
+            // emitEvent failed — message is still in localStorage and will be
+            // recovered on next page load via /client-log.
+            console.warn('[NEST DIAG] emitEvent failed:', e);
+        }
+    }
+}
+
+// Flush any buffered diagnostics from a previous (crashed) session via HTTP.
+// Runs once per page load, BEFORE we start touching the WebSocket again.
+function _flushNestBuffer(reason) {
+    try {
+        const raw = localStorage.getItem(_NEST_LS_KEY);
+        if (!raw) return;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr) || arr.length === 0) return;
+        console.warn('[NEST DIAG] flushing', arr.length, 'buffered events to /client-log');
+        // Use sendBeacon if available — fires even during page unload.
+        const body = JSON.stringify({ events: arr, reason });
+        let sent = false;
+        if (navigator.sendBeacon) {
+            try {
+                sent = navigator.sendBeacon('/client-log', new Blob([body], { type: 'application/json' }));
+            } catch (e) {}
+        }
+        if (!sent) {
+            fetch('/client-log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body
+            }).catch(e => console.warn('[NEST DIAG] /client-log POST failed:', e));
+        }
+        localStorage.removeItem(_NEST_LS_KEY);
+    } catch (e) {
+        console.warn('[NEST DIAG] flush failed:', e);
+    }
+}
+
+// Install global hooks once. Page-load flush + error capture + WS monitoring.
 if (!window._nestErrorHookInstalled) {
     window._nestErrorHookInstalled = true;
+
+    // Flush any buffered events from a previous (possibly crashed) session.
+    _flushNestBuffer('page_load');
+
+    // Also flush on unload — last chance to ship anything still buffered.
+    window.addEventListener('beforeunload', () => _flushNestBuffer('beforeunload'));
+    window.addEventListener('pagehide',     () => _flushNestBuffer('pagehide'));
+
     window.addEventListener('error', (e) => {
         _nestDiag('window_error', {
             message: String(e.message || ''),
@@ -2475,6 +2583,78 @@ if (!window._nestErrorHookInstalled) {
             stack: r.stack ? String(r.stack).slice(0, 800) : ''
         });
     });
+
+    // === Socket.IO connection state monitoring ===
+    // NiceGUI exposes the Socket.IO client at window.socket once connected.
+    // Poll until it appears, then attach lifecycle listeners.
+    window._wsLastState = 'init';
+    function _hookSocket() {
+        const sock = window.socket || (window.io && window.io.socket);
+        if (!sock || sock._nestHooked) return false;
+        sock._nestHooked = true;
+        window._wsLastState = sock.connected ? 'connected' : 'connecting';
+        _nestDiag('ws_hook_installed', { connected: !!sock.connected, id: sock.id || null });
+
+        sock.on('connect', () => {
+            window._wsLastState = 'connected';
+            _nestDiag('ws_connect', { id: sock.id || null });
+        });
+        sock.on('disconnect', (reason) => {
+            window._wsLastState = 'disconnected:' + String(reason);
+            // Cannot reach server via WS — record to localStorage only.
+            const msg = { checkpoint: 'ws_disconnect', t: performance.now().toFixed(1), wall: Date.now(), reason: String(reason) };
+            try { console.warn('[NEST DIAG] WS DISCONNECT', reason); } catch (e) {}
+            _nestBufferPush(msg);
+            // Try an immediate HTTP flush so we don't have to wait for reload.
+            _flushNestBuffer('ws_disconnect');
+        });
+        sock.on('connect_error', (err) => {
+            window._wsLastState = 'connect_error';
+            _nestBufferPush({ checkpoint: 'ws_connect_error', t: performance.now().toFixed(1), wall: Date.now(), message: String(err && err.message || err) });
+        });
+        sock.io && sock.io.on && sock.io.on('reconnect_attempt', (n) => {
+            window._wsLastState = 'reconnect_attempt:' + n;
+            _nestBufferPush({ checkpoint: 'ws_reconnect_attempt', t: performance.now().toFixed(1), wall: Date.now(), attempt: n });
+        });
+        sock.io && sock.io.on && sock.io.on('reconnect', (n) => {
+            window._wsLastState = 'reconnected';
+            _nestDiag('ws_reconnect', { attempts: n });
+        });
+        return true;
+    }
+    if (!_hookSocket()) {
+        const _hookInterval = setInterval(() => {
+            if (_hookSocket()) clearInterval(_hookInterval);
+        }, 200);
+        // Give up looking after 30s.
+        setTimeout(() => clearInterval(_hookInterval), 30000);
+    }
+}
+
+// Heartbeat: while a nest operation is running, emit a tick every 250ms.
+// If the WebSocket dies, the ticks queue in localStorage and we can later
+// see EXACTLY when the JS thread stopped responding.
+let _nestHeartbeatTimer = null;
+let _nestHeartbeatCount = 0;
+function _startNestHeartbeat(label) {
+    _stopNestHeartbeat();
+    _nestHeartbeatCount = 0;
+    const _hbStart = performance.now();
+    _nestHeartbeatTimer = setInterval(() => {
+        _nestHeartbeatCount++;
+        _nestDiag('heartbeat', {
+            label,
+            n: _nestHeartbeatCount,
+            elapsed: (performance.now() - _hbStart).toFixed(0),
+            wsState: window._wsLastState
+        });
+    }, 250);
+}
+function _stopNestHeartbeat() {
+    if (_nestHeartbeatTimer) {
+        clearInterval(_nestHeartbeatTimer);
+        _nestHeartbeatTimer = null;
+    }
 }
 
 function redrawShapeFromData(shapeName) {
