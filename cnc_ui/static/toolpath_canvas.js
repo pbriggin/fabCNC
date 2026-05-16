@@ -1883,23 +1883,42 @@ function showToast(message, type = 'info', duration = 3000) {
 
 function nestShapes(keepOrientation = true, spacing = 15) {
     console.log('=== NESTING START ===');
+    const _t0 = performance.now();
     
     const allShapeNames = Object.keys(shapes).filter(name => shapes[name] && shapes[name].shapeName);
+    _nestDiag('nest_entry', {
+        shapeCount: allShapeNames.length,
+        keepOrientation: keepOrientation,
+        spacing: spacing,
+        undoStackSize: undoStack.length
+    });
     if (allShapeNames.length === 0) {
         showToast('No shapes to nest', 'warning');
         return { success: false, error: 'No shapes to nest' };
     }
     
-    saveUndoState();
+    const _tUndoStart = performance.now();
+    try {
+        saveUndoState();
+    } catch (err) {
+        _nestDiag('save_undo_error', { message: String(err && err.message || err), stack: err && err.stack ? String(err.stack).slice(0, 800) : '' });
+        return { success: false, error: 'saveUndoState failed: ' + String(err) };
+    }
+    _nestDiag('save_undo_done', { ms: (performance.now() - _tUndoStart).toFixed(1) });
     
     // Get shape info for each shape
+    const _tInfoStart = performance.now();
+    let _totalPoints = 0;
+    let _totalSimplePoints = 0;
     const shapeInfos = allShapeNames.map(name => {
         const shape = shapes[name];
         const points = getCurrentMmPoints(shape);
         if (!points || points.length < 2) return null;
+        _totalPoints += points.length;
         
         // Simplify polygon for collision (max 60 points for better accuracy with concave shapes)
         const simplified = simplifyPolygon(points, 60);
+        _totalSimplePoints += simplified.length;
         
         // Use full points bbox so normalizedFull always starts at 0,0 and has correct dimensions.
         // Using the simplified bbox could drop extreme vertices, giving normalizedFull negative
@@ -1918,6 +1937,12 @@ function nestShapes(keepOrientation = true, spacing = 15) {
             color: shape.stroke || '#42A5F5'
         };
     }).filter(s => s !== null);
+    _nestDiag('shape_infos_built', {
+        ms: (performance.now() - _tInfoStart).toFixed(1),
+        validShapes: shapeInfos.length,
+        totalPoints: _totalPoints,
+        totalSimplePoints: _totalSimplePoints
+    });
     
     if (shapeInfos.length === 0) {
         showToast('No valid shapes', 'warning');
@@ -1930,11 +1955,13 @@ function nestShapes(keepOrientation = true, spacing = 15) {
     // Try Packaide first (async call)
     nestShapesPackaide(shapeInfos, keepOrientation, spacing);
     
+    _nestDiag('nest_sync_return', { totalMs: (performance.now() - _t0).toFixed(1) });
     return { success: true, pending: true, message: 'Nesting with Packaide...' };
 }
 
 // Async nesting using Packaide backend
 async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
+    const _tStart = performance.now();
     try {
         // Prepare shapes for Packaide
         const shapesForNest = shapeInfos.map(info => ({
@@ -1942,26 +1969,42 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             points: info.fullPoints,
             closed: true
         }));
+        const _bodyStr = JSON.stringify({
+            shapes: shapesForNest,
+            sheetWidth: rulerRightMm,
+            sheetHeight: rulerTopMm,
+            offset: spacing,
+            rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
+        });
+        _nestDiag('fetch_start', {
+            shapeCount: shapesForNest.length,
+            bodyBytes: _bodyStr.length,
+            sheet: [rulerRightMm, rulerTopMm]
+        });
+        const _tFetch = performance.now();
         
         const response = await fetch('/nest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                shapes: shapesForNest,
-                sheetWidth: rulerRightMm,
-                sheetHeight: rulerTopMm,
-                offset: spacing,
-                rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
-            })
+            body: _bodyStr
         });
+        _nestDiag('fetch_response', { ms: (performance.now() - _tFetch).toFixed(1), status: response.status, ok: response.ok });
         
         const result = await response.json();
+        _nestDiag('fetch_parsed', {
+            ms: (performance.now() - _tFetch).toFixed(1),
+            status: result && result.status,
+            placed: result && result.placed,
+            failed: result && result.failed,
+            placementCount: result && result.placements ? result.placements.length : 0
+        });
         console.log('Packaide result:', result);
         
         if (result.status === 'ok' && result.placements && result.placements.length > 0) {
             // Apply Packaide placements — batch all redraws then do a single canvas.renderAll()
             let maxX = 0, maxY = 0;
             
+            const _tRedraw = performance.now();
             _batchRedrawMode = true;
             canvas.renderOnAddRemove = false;
             try {
@@ -1990,6 +2033,12 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 canvas.renderOnAddRemove = true;
                 canvas.renderAll();  // single render for all placement updates
             }
+            _nestDiag('redraw_done', {
+                ms: (performance.now() - _tRedraw).toFixed(1),
+                placed: result.placed,
+                bounds: [maxX.toFixed(0), maxY.toFixed(0)],
+                totalMs: (performance.now() - _tStart).toFixed(1)
+            });
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
             showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
@@ -2003,9 +2052,22 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
         
     } catch (error) {
         console.error('Packaide error:', error);
+        _nestDiag('packaide_catch', {
+            ms: (performance.now() - _tStart).toFixed(1),
+            message: String(error && error.message || error),
+            stack: error && error.stack ? String(error.stack).slice(0, 800) : ''
+        });
         console.log('Falling back to local nesting algorithm');
         showToast('Server busy, using local algorithm...', 'warning', 2000);
-        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        try {
+            nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        } catch (localErr) {
+            _nestDiag('local_nest_catch', {
+                message: String(localErr && localErr.message || localErr),
+                stack: localErr && localErr.stack ? String(localErr.stack).slice(0, 800) : ''
+            });
+            showToast('Nesting failed: ' + String(localErr), 'error', 4000);
+        }
     }
 }
 
@@ -2380,6 +2442,40 @@ function mirrorCopy(axis) {
 // Helper: Redraw a single shape from its data
 // When true, redrawShapeFromData skips canvas.renderAll() — caller does one batch render
 let _batchRedrawMode = false;
+
+// === NEST DIAGNOSTIC HELPERS =========================================
+// Emit a diagnostic checkpoint to Python so it shows up in app.log.
+// Also logs to console for browser-side debugging.
+function _nestDiag(checkpoint, info) {
+    const msg = { checkpoint, t: performance.now().toFixed(1), ...info };
+    try { console.log('[NEST DIAG]', JSON.stringify(msg)); } catch (e) {}
+    if (window.emitEvent) {
+        try { window.emitEvent('nest_diagnostic', msg); } catch (e) {}
+    }
+}
+
+// Global error catchers — emit any uncaught error/promise rejection to Python.
+// Without this, a JS error during nesting silently kills the operation and the
+// only symptom is the canvas appearing to "refresh" when the connection drops.
+if (!window._nestErrorHookInstalled) {
+    window._nestErrorHookInstalled = true;
+    window.addEventListener('error', (e) => {
+        _nestDiag('window_error', {
+            message: String(e.message || ''),
+            filename: String(e.filename || ''),
+            lineno: e.lineno || 0,
+            colno: e.colno || 0,
+            stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 800) : ''
+        });
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason || {};
+        _nestDiag('unhandled_rejection', {
+            message: String(r.message || r),
+            stack: r.stack ? String(r.stack).slice(0, 800) : ''
+        });
+    });
+}
 
 function redrawShapeFromData(shapeName) {
     console.log('redrawShapeFromData:', shapeName, 'exists in shapes:', !!shapes[shapeName], 'exists in shapeData:', !!shapeData[shapeName]);

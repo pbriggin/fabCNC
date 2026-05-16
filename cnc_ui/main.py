@@ -234,7 +234,9 @@ async def nest_endpoint(request: Request):
     """
     import asyncio
     import concurrent.futures
+    import time
     
+    _t0 = time.monotonic()
     try:
         data = await request.json()
         
@@ -243,6 +245,15 @@ async def nest_endpoint(request: Request):
         sheet_height = data.get('sheetHeight', 1660)
         offset = data.get('offset', 2)  # mm spacing
         rotations = data.get('rotations', 4)  # Try 4 rotations by default
+        total_points = sum(len(s.get('points') or []) for s in input_shapes)
+        logger.info(f"[NEST] /nest received: shapes={len(input_shapes)} total_points={total_points} "
+                    f"sheet={sheet_width}x{sheet_height} offset={offset} rotations={rotations}")
+        try:
+            log_event('transform', 'nest_request', shape_count=len(input_shapes),
+                      total_points=total_points, sheet=[sheet_width, sheet_height],
+                      offset=offset, rotations=rotations)
+        except Exception:
+            pass
         
         if not input_shapes:
             return {'status': 'error', 'message': 'No shapes provided'}
@@ -256,15 +267,32 @@ async def nest_endpoint(request: Request):
                 input_shapes, sheet_width, sheet_height, offset, rotations
             )
         
+        elapsed = time.monotonic() - _t0
+        logger.info(f"[NEST] /nest done in {elapsed:.2f}s status={result.get('status')} "
+                    f"placed={result.get('placed')} failed={result.get('failed')}")
+        try:
+            log_event('transform', 'nest_response', duration_s=round(elapsed, 2),
+                      status=result.get('status'), placed=result.get('placed'),
+                      failed=result.get('failed'),
+                      placement_count=len(result.get('placements') or []))
+        except Exception:
+            pass
         return result
         
     except Exception as e:
-        logger.error(f"Nesting error: {e}")
+        elapsed = time.monotonic() - _t0
+        logger.exception(f"[NEST] /nest error after {elapsed:.2f}s: {e}")
+        try:
+            log_event('transform', 'nest_error', duration_s=round(elapsed, 2), error=str(e))
+        except Exception:
+            pass
         return {'status': 'error', 'message': str(e)}
 
 
 def run_packaide_nesting(input_shapes, sheet_width, sheet_height, offset, rotations):
     """Run Packaide nesting in a separate thread to avoid blocking the event loop."""
+    import time
+    _t_pack_start = time.monotonic()
     try:
         import packaide
         from xml.dom import minidom
@@ -309,6 +337,7 @@ def run_packaide_nesting(input_shapes, sheet_width, sheet_height, offset, rotati
         logger.info(f"Nesting {len(shape_ids)} shapes on {sheet_width}x{sheet_height} sheet with offset={offset}, rotations={rotations}")
         
         # Run Packaide
+        _t_call = time.monotonic()
         result, placed, fails = packaide.pack(
             [sheet_svg],
             shapes_svg,
@@ -319,7 +348,7 @@ def run_packaide_nesting(input_shapes, sheet_width, sheet_height, offset, rotati
             persist=True
         )
         
-        logger.info(f"Packaide result: placed={placed}, fails={fails}")
+        logger.info(f"Packaide result: placed={placed}, fails={fails} (packaide.pack took {time.monotonic() - _t_call:.2f}s)")
         
         # Parse the result SVG to extract new positions
         # Packaide returns SVG with transforms that need to be applied
@@ -1995,16 +2024,27 @@ def main_page():
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)
                                     keep_orient = str(keep_orientation.value).lower()
+                                    logger.info(f"[NEST] do_nest start: offset={offset_val} keep={keep_orient} "
+                                                f"py_shape_count={len(current_toolpath_shapes)}")
                                     log_event('transform', 'nest_clicked', offset_mm=offset_val,
                                               keep_orientation=keep_orientation.value,
                                               shape_count=len(current_toolpath_shapes))
+                                    import time as _time
+                                    _t_js = _time.monotonic()
                                     try:
                                         result = await ui.run_javascript(
                                             f'window.toolpathCanvas.nestShapes({keep_orient}, {offset_val})',
                                             timeout=30.0
                                         )
+                                        logger.info(f"[NEST] do_nest JS sync-return after {_time.monotonic() - _t_js:.2f}s: {result!r}")
                                     except Exception as e:
-                                        logger.warning(f'nestShapes JS call failed or timed out: {e}')
+                                        logger.exception(f"[NEST] do_nest run_javascript failed after {_time.monotonic() - _t_js:.2f}s: {e}")
+                                        try:
+                                            log_event('transform', 'nest_js_error',
+                                                      duration_s=round(_time.monotonic() - _t_js, 2),
+                                                      error=str(e))
+                                        except Exception:
+                                            pass
                                         ui.notify('Nesting timed out — try with fewer shapes', type='warning')
                                         return
                                     if result and isinstance(result, dict):
@@ -2144,6 +2184,22 @@ def main_page():
                                         log_event('canvas', 'shape_moved', shape=shape_name)
                             
                             ui.on('shape_moved', on_shape_moved)
+                            
+                            # Handle nest diagnostic events from JavaScript (timing checkpoints,
+                            # uncaught errors, etc.). All logged to app.log for post-mortem.
+                            def on_nest_diagnostic(e):
+                                try:
+                                    data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                except Exception:
+                                    data = {}
+                                checkpoint = data.get('checkpoint', '?') if isinstance(data, dict) else '?'
+                                logger.info(f"[NEST JS] {checkpoint}: {data}")
+                                try:
+                                    log_event('transform', 'nest_diagnostic', **data) if isinstance(data, dict) else None
+                                except Exception:
+                                    pass
+                            
+                            ui.on('nest_diagnostic', on_nest_diagnostic)
                             
                             # Handle shape deleted events from JavaScript
                             def on_shape_deleted(e):
