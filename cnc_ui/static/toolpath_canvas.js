@@ -1859,6 +1859,54 @@ function gridArray(countX, countY) {
 // Nesting algorithm - pack all shapes tightly to minimize bounding area
 // keepOrientation: if false, will try rotating shapes for better fit
 // Show a notification using NiceGUI/Quasar's notification system
+// Track active toasts so we can cap the visible count (older ones get
+// dismissed early to keep the bottom of the UI from filling up).
+// We patch Quasar.Notify.create globally so notifications from BOTH the
+// JS side (showToast) AND the Python side (ui.notify in NiceGUI) are
+// counted against the same cap — otherwise file-upload spam from the
+// server can stack up underneath JS toasts.
+const _MAX_VISIBLE_TOASTS = 3;
+const _activeToasts = [];
+function _registerToastDismiss(dismiss, timeoutMs) {
+    if (typeof dismiss !== 'function') return dismiss;
+    _activeToasts.push(dismiss);
+    if (timeoutMs && timeoutMs > 0) {
+        setTimeout(() => {
+            const idx = _activeToasts.indexOf(dismiss);
+            if (idx !== -1) _activeToasts.splice(idx, 1);
+        }, timeoutMs + 100);
+    }
+    while (_activeToasts.length > _MAX_VISIBLE_TOASTS) {
+        const oldest = _activeToasts.shift();
+        try { oldest(); } catch (_) {}
+    }
+    return dismiss;
+}
+function _installQuasarNotifyCap() {
+    if (typeof Quasar === 'undefined' || !Quasar.Notify || Quasar.Notify.__capped) return false;
+    const _origCreate = Quasar.Notify.create.bind(Quasar.Notify);
+    Quasar.Notify.create = function(opts) {
+        const dismiss = _origCreate(opts);
+        // Best-effort: Quasar's default timeout is 5000ms when not specified.
+        let timeoutMs = 5000;
+        if (opts && typeof opts === 'object') {
+            if (typeof opts.timeout === 'number') timeoutMs = opts.timeout;
+        }
+        return _registerToastDismiss(dismiss, timeoutMs);
+    };
+    Quasar.Notify.__capped = true;
+    return true;
+}
+// Try immediately; Quasar may not be loaded yet, so retry a few times.
+(function _tryInstallCap() {
+    if (_installQuasarNotifyCap()) return;
+    let attempts = 0;
+    const iv = setInterval(() => {
+        attempts++;
+        if (_installQuasarNotifyCap() || attempts > 50) clearInterval(iv);
+    }, 100);
+})();
+
 function showToast(message, type = 'info', duration = 3000) {
     const colors = {
         'info': 'info',
@@ -1867,7 +1915,8 @@ function showToast(message, type = 'info', duration = 3000) {
         'error': 'negative'
     };
     
-    // Use Quasar's notification system (same as NiceGUI's ui.notify)
+    // Use Quasar's notification system (same as NiceGUI's ui.notify).
+    // The patched Quasar.Notify.create above handles the visibility cap.
     if (typeof Quasar !== 'undefined' && Quasar.Notify) {
         Quasar.Notify.create({
             message: message,
@@ -1881,25 +1930,140 @@ function showToast(message, type = 'info', duration = 3000) {
     }
 }
 
+// === NEST PROGRESS OVERLAY ===========================================
+// Persistent fullscreen overlay shown during long nest operations so the
+// user knows the app hasn't frozen. Updates as strategies complete.
+// Cancellation: clicking the Cancel button sets `_nestCancelled`; the
+// nest pipeline polls this in `_maybeYield` and aborts via a sentinel.
+let _nestCancelled = false;
+class NestCancelled extends Error { constructor() { super('nest cancelled'); this.name = 'NestCancelled'; } }
+function isNestCancelled() { return _nestCancelled; }
+function _ensureNestOverlay() {
+    let el = document.getElementById('nestProgressOverlay');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'nestProgressOverlay';
+    el.style.cssText = [
+        'position:fixed', 'inset:0',
+        'background:rgba(0,0,0,0.55)',
+        'display:none',
+        'align-items:center', 'justify-content:center',
+        'z-index:99999',
+        'font-family:system-ui,sans-serif',
+        'color:#fff',
+        'backdrop-filter:blur(2px)'
+    ].join(';') + ';';
+    el.innerHTML = `
+        <div style="background:#222;border:1px solid #444;border-radius:12px;padding:24px 32px;min-width:320px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,0.5);text-align:center;">
+            <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:12px;">
+                <div class="nest-spinner" style="width:24px;height:24px;border:3px solid #444;border-top-color:#4fc3f7;border-radius:50%;animation:nestSpin 0.9s linear infinite;"></div>
+                <div id="nestProgressTitle" style="font-size:16px;font-weight:600;">Nesting…</div>
+            </div>
+            <div id="nestProgressDetail" style="font-size:13px;color:#bbb;line-height:1.5;">Preparing…</div>
+            <div style="margin-top:12px;height:6px;background:#333;border-radius:3px;overflow:hidden;">
+                <div id="nestProgressBar" style="height:100%;width:0%;background:#4fc3f7;transition:width 0.2s ease;"></div>
+            </div>
+            <div id="nestProgressElapsed" style="margin-top:8px;font-size:11px;color:#888;">0.0s</div>
+            <button id="nestProgressCancel" style="margin-top:16px;background:#444;color:#fff;border:1px solid #666;border-radius:6px;padding:8px 20px;font-size:13px;cursor:pointer;font-family:inherit;">Cancel</button>
+        </div>
+    `;
+    // Inject keyframes once.
+    if (!document.getElementById('nestSpinKeyframes')) {
+        const style = document.createElement('style');
+        style.id = 'nestSpinKeyframes';
+        style.textContent = '@keyframes nestSpin{to{transform:rotate(360deg);}}'
+            + '#nestProgressCancel:hover{background:#555;border-color:#888;}'
+            + '#nestProgressCancel:disabled{opacity:0.5;cursor:not-allowed;}';
+        document.head.appendChild(style);
+    }
+    document.body.appendChild(el);
+    const cancelBtn = el.querySelector('#nestProgressCancel');
+    cancelBtn.addEventListener('click', () => {
+        _nestCancelled = true;
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = 'Cancelling…';
+        const detailEl = document.getElementById('nestProgressDetail');
+        if (detailEl) detailEl.textContent = 'Cancelling…';
+        _nestDiag('nest_cancel_clicked', {});
+    });
+    return el;
+}
+
+let _nestOverlayStart = 0;
+let _nestOverlayTicker = null;
+function showNestOverlay(title, detail) {
+    _nestCancelled = false;
+    const el = _ensureNestOverlay();
+    el.style.display = 'flex';
+    document.getElementById('nestProgressTitle').textContent = title || 'Nesting…';
+    document.getElementById('nestProgressDetail').textContent = detail || '';
+    document.getElementById('nestProgressBar').style.width = '0%';
+    const cancelBtn = document.getElementById('nestProgressCancel');
+    if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+    _nestOverlayStart = performance.now();
+    if (_nestOverlayTicker) clearInterval(_nestOverlayTicker);
+    _nestOverlayTicker = setInterval(() => {
+        const elEl = document.getElementById('nestProgressElapsed');
+        if (elEl) elEl.textContent = ((performance.now() - _nestOverlayStart) / 1000).toFixed(1) + 's';
+    }, 100);
+}
+function updateNestOverlay({ title, detail, percent } = {}) {
+    const el = document.getElementById('nestProgressOverlay');
+    if (!el || el.style.display === 'none') return;
+    if (title !== undefined) document.getElementById('nestProgressTitle').textContent = title;
+    if (detail !== undefined) document.getElementById('nestProgressDetail').textContent = detail;
+    if (percent !== undefined) {
+        const p = Math.max(0, Math.min(100, percent));
+        document.getElementById('nestProgressBar').style.width = p + '%';
+    }
+}
+function hideNestOverlay() {
+    const el = document.getElementById('nestProgressOverlay');
+    if (el) el.style.display = 'none';
+    if (_nestOverlayTicker) {
+        clearInterval(_nestOverlayTicker);
+        _nestOverlayTicker = null;
+    }
+}
+
 function nestShapes(keepOrientation = true, spacing = 15) {
     console.log('=== NESTING START ===');
+    const _t0 = performance.now();
     
     const allShapeNames = Object.keys(shapes).filter(name => shapes[name] && shapes[name].shapeName);
+    _nestDiag('nest_entry', {
+        shapeCount: allShapeNames.length,
+        keepOrientation: keepOrientation,
+        spacing: spacing,
+        undoStackSize: undoStack.length
+    });
     if (allShapeNames.length === 0) {
         showToast('No shapes to nest', 'warning');
         return { success: false, error: 'No shapes to nest' };
     }
     
-    saveUndoState();
+    const _tUndoStart = performance.now();
+    try {
+        saveUndoState();
+    } catch (err) {
+        _nestDiag('save_undo_error', { message: String(err && err.message || err), stack: err && err.stack ? String(err.stack).slice(0, 800) : '' });
+        return { success: false, error: 'saveUndoState failed: ' + String(err) };
+    }
+    _nestDiag('save_undo_done', { ms: (performance.now() - _tUndoStart).toFixed(1) });
     
     // Get shape info for each shape
+    const _tInfoStart = performance.now();
+    let _totalPoints = 0;
+    let _totalSimplePoints = 0;
     const shapeInfos = allShapeNames.map(name => {
         const shape = shapes[name];
         const points = getCurrentMmPoints(shape);
         if (!points || points.length < 2) return null;
+        _totalPoints += points.length;
         
         // Simplify polygon for collision (max 60 points for better accuracy with concave shapes)
         const simplified = simplifyPolygon(points, 60);
+        _totalSimplePoints += simplified.length;
         
         // Use full points bbox so normalizedFull always starts at 0,0 and has correct dimensions.
         // Using the simplified bbox could drop extreme vertices, giving normalizedFull negative
@@ -1918,23 +2082,32 @@ function nestShapes(keepOrientation = true, spacing = 15) {
             color: shape.stroke || '#42A5F5'
         };
     }).filter(s => s !== null);
+    _nestDiag('shape_infos_built', {
+        ms: (performance.now() - _tInfoStart).toFixed(1),
+        validShapes: shapeInfos.length,
+        totalPoints: _totalPoints,
+        totalSimplePoints: _totalSimplePoints
+    });
     
     if (shapeInfos.length === 0) {
         showToast('No valid shapes', 'warning');
         return { success: false, error: 'No valid shapes' };
     }
     
-    // Show starting notification
-    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);  // Auto-dismiss after 5s
+    // Show starting notification + persistent overlay (in case it takes a while)
+    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);
+    showNestOverlay('Nesting…', `Preparing ${shapeInfos.length} shapes (${_totalPoints} points)`);
     
     // Try Packaide first (async call)
     nestShapesPackaide(shapeInfos, keepOrientation, spacing);
     
+    _nestDiag('nest_sync_return', { totalMs: (performance.now() - _t0).toFixed(1) });
     return { success: true, pending: true, message: 'Nesting with Packaide...' };
 }
 
 // Async nesting using Packaide backend
 async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
+    const _tStart = performance.now();
     try {
         // Prepare shapes for Packaide
         const shapesForNest = shapeInfos.map(info => ({
@@ -1942,67 +2115,122 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             points: info.fullPoints,
             closed: true
         }));
+        const _bodyStr = JSON.stringify({
+            shapes: shapesForNest,
+            sheetWidth: rulerRightMm,
+            sheetHeight: rulerTopMm,
+            offset: spacing,
+            rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
+        });
+        _nestDiag('fetch_start', {
+            shapeCount: shapesForNest.length,
+            bodyBytes: _bodyStr.length,
+            sheet: [rulerRightMm, rulerTopMm]
+        });
+        const _tFetch = performance.now();
         
         const response = await fetch('/nest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                shapes: shapesForNest,
-                sheetWidth: rulerRightMm,
-                sheetHeight: rulerTopMm,
-                offset: spacing,
-                rotations: keepOrientation ? 1 : 36  // 36 = every 10°, full rotation variability
-            })
+            body: _bodyStr
         });
+        _nestDiag('fetch_response', { ms: (performance.now() - _tFetch).toFixed(1), status: response.status, ok: response.ok });
         
         const result = await response.json();
+        _nestDiag('fetch_parsed', {
+            ms: (performance.now() - _tFetch).toFixed(1),
+            status: result && result.status,
+            placed: result && result.placed,
+            failed: result && result.failed,
+            placementCount: result && result.placements ? result.placements.length : 0
+        });
         console.log('Packaide result:', result);
         
         if (result.status === 'ok' && result.placements && result.placements.length > 0) {
-            // Apply Packaide placements
+            // Apply Packaide placements — batch all redraws then do a single canvas.renderAll()
             let maxX = 0, maxY = 0;
             
-            for (const placement of result.placements) {
-                const data = shapeData[placement.name];
-                if (!data) {
-                    console.warn('Missing shapeData for', placement.name);
-                    continue;
+            const _tRedraw = performance.now();
+            _batchRedrawMode = true;
+            canvas.renderOnAddRemove = false;
+            try {
+                for (const placement of result.placements) {
+                    const data = shapeData[placement.name];
+                    if (!data) {
+                        console.warn('Missing shapeData for', placement.name);
+                        continue;
+                    }
+                    
+                    // Update shape with new points from Packaide
+                    data.originalMmPoints = placement.points;
+                    redrawShapeFromData(placement.name);
+                    // Note: emitShapeUpdate intentionally skipped here — emitting one event
+                    // per shape floods the WebSocket on large layouts. Python re-fetches
+                    // all positions via getPositions() before toolpath generation.
+                    
+                    // Track bounds
+                    for (const pt of placement.points) {
+                        if (pt[0] > maxX) maxX = pt[0];
+                        if (pt[1] > maxY) maxY = pt[1];
+                    }
                 }
-                
-                // Update shape with new points from Packaide
-                data.originalMmPoints = placement.points;
-                redrawShapeFromData(placement.name);
-                // Note: emitShapeUpdate intentionally skipped here — emitting one event
-                // per shape floods the WebSocket on large layouts. Python re-fetches
-                // all positions via getPositions() before toolpath generation.
-                
-                // Track bounds
-                for (const pt of placement.points) {
-                    if (pt[0] > maxX) maxX = pt[0];
-                    if (pt[1] > maxY) maxY = pt[1];
-                }
+            } finally {
+                _batchRedrawMode = false;
+                canvas.renderOnAddRemove = true;
+                canvas.renderAll();  // single render for all placement updates
             }
+            _nestDiag('redraw_done', {
+                ms: (performance.now() - _tRedraw).toFixed(1),
+                placed: result.placed,
+                bounds: [maxX.toFixed(0), maxY.toFixed(0)],
+                totalMs: (performance.now() - _tStart).toFixed(1)
+            });
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
             showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
+            hideNestOverlay();
             return;
         }
         
         // Fall back to local algorithm if Packaide fails
         console.log('Packaide returned no placements, falling back to local algorithm');
         showToast('Using local algorithm...', 'info', 2000);
-        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Packaide unavailable, falling back…', percent: 0 });
+        _nestDiag('about_to_call_local', { from: 'packaide_no_placements' });
+        await nestShapesLocal(shapeInfos, keepOrientation, spacing);
         
     } catch (error) {
         console.error('Packaide error:', error);
+        _nestDiag('packaide_catch', {
+            ms: (performance.now() - _tStart).toFixed(1),
+            message: String(error && error.message || error),
+            stack: error && error.stack ? String(error.stack).slice(0, 800) : ''
+        });
         console.log('Falling back to local nesting algorithm');
         showToast('Server busy, using local algorithm...', 'warning', 2000);
-        nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Server busy, falling back…', percent: 0 });
+        try {
+            _nestDiag('about_to_call_local', { from: 'packaide_catch' });
+            await nestShapesLocal(shapeInfos, keepOrientation, spacing);
+        } catch (localErr) {
+            _nestDiag('local_nest_catch', {
+                message: String(localErr && localErr.message || localErr),
+                stack: localErr && localErr.stack ? String(localErr.stack).slice(0, 800) : ''
+            });
+            showToast('Nesting failed: ' + String(localErr), 'error', 4000);
+            hideNestOverlay();
+        }
     }
 }
 
-// Local nesting algorithm (fallback)
-function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
+// Local nesting algorithm (fallback) — async so we can yield to event loop
+// between strategies and prevent NiceGUI WebSocket from timing out.
+async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
+    const _tLocalStart = performance.now();
+    const _totalPts = shapeInfos.reduce((s, si) => s + ((si.fullPoints && si.fullPoints.length) || 0), 0);
+    _nestDiag('local_nest_start', { shapeCount: shapeInfos.length, totalPoints: _totalPts, keepOrientation, spacing });
+    _startNestHeartbeat('local_nest');
+    const _yield = () => new Promise(r => setTimeout(r, 0));
     // Try multiple sorting strategies and pick the best result
     const strategies = [
         { name: 'area-desc', sort: (a, b) => b.area - a.area },
@@ -2015,49 +2243,128 @@ function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
     
     let bestResult = null;
     let bestArea = Infinity;
+    let cancelled = false;
     
-    for (const strategy of strategies) {
+    for (let si = 0; si < strategies.length; si++) {
+        if (isNestCancelled()) { cancelled = true; break; }
+        const strategy = strategies[si];
+        updateNestOverlay({
+            title: 'Nesting (local algorithm)…',
+            detail: `Trying strategy ${si + 1}/${strategies.length}: ${strategy.name}`,
+            percent: (si / strategies.length) * 100
+        });
+        await _yield();  // yield to event loop so WebSocket heartbeats can flush
+        const _tStrat = performance.now();
         const sortedInfos = [...shapeInfos].sort(strategy.sort);
-        const result = tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        let result;
+        try {
+            result = await tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        } catch (e) {
+            if (e instanceof NestCancelled) { cancelled = true; break; }
+            throw e;
+        }
+        const _stratMs = (performance.now() - _tStrat).toFixed(1);
         
         if (result.success) {
             const area = result.width * result.height;
+            _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: true, area: Math.round(area), w: Math.round(result.width), h: Math.round(result.height) });
             console.log(`Strategy ${strategy.name}: ${result.width.toFixed(0)}x${result.height.toFixed(0)} = ${area.toFixed(0)}`);
             if (area < bestArea) {
                 bestArea = area;
                 bestResult = result;
             }
+        } else {
+            _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: false });
         }
     }
     
+    if (cancelled) {
+        undo();
+        _nestDiag('local_nest_cancelled', { totalMs: (performance.now() - _tLocalStart).toFixed(1) });
+        _stopNestHeartbeat();
+        hideNestOverlay();
+        console.log('=== NESTING CANCELLED ===');
+        showToast('Nesting cancelled', 'warning', 3000);
+        return;
+    }
+    
+    updateNestOverlay({ detail: 'Applying best layout…', percent: 95 });
+    
     if (!bestResult) {
         undo();
+        _nestDiag('local_nest_failed', { totalMs: (performance.now() - _tLocalStart).toFixed(1) });
+        _stopNestHeartbeat();
+        hideNestOverlay();
         console.log('=== NESTING FAILED ===');
         showToast('Could not nest shapes - not enough space', 'error', 4000);
         return;
     }
     
-    // Apply the best result
-    for (const p of bestResult.placements) {
-        const data = shapeData[p.info.name];
-        if (!data) {
-            console.error('Missing shapeData for', p.info.name);
-            continue;
+    // Apply the best result — batch all redraws then do a single canvas.renderAll()
+    const _tRedraw = performance.now();
+    _batchRedrawMode = true;
+    canvas.renderOnAddRemove = false;
+    try {
+        for (const p of bestResult.placements) {
+            const data = shapeData[p.info.name];
+            if (!data) {
+                console.error('Missing shapeData for', p.info.name);
+                continue;
+            }
+            data.originalMmPoints = p.full;
+            redrawShapeFromData(p.info.name);
+            // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
         }
-        data.originalMmPoints = p.full;
-        redrawShapeFromData(p.info.name);
-        // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
+    } finally {
+        _batchRedrawMode = false;
+        canvas.renderOnAddRemove = true;
+        canvas.renderAll();  // single render for all local nest updates
     }
+    _nestDiag('local_redraw_done', {
+        ms: (performance.now() - _tRedraw).toFixed(1),
+        totalMs: (performance.now() - _tLocalStart).toFixed(1),
+        placed: bestResult.placements.length,
+        w: Math.round(bestResult.width),
+        h: Math.round(bestResult.height)
+    });
+    _stopNestHeartbeat();
+    hideNestOverlay();
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
     showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
 }
 
-// Try nesting with a specific shape order
-function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
+// Try nesting with a specific shape order. Async so we can yield to the event
+// loop between shape placements; otherwise long runs block the WebSocket and
+// NiceGUI tears down the page (= visible "canvas reset").
+async function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
+    const _tTryStart = performance.now();
     const placedShapes = [];
+    const _logEvery = 3;    // emit progress diag every 3 shapes
+    // Time-based cooperative yield: keep the event loop responsive so WebSocket
+    // heartbeats and NiceGUI server pings can be acked. Per-shape work grows
+    // O(N^2) with placed shapes, so a fixed "every 2 shapes" yield isn't enough
+    // for large inputs (18+ shapes) — late shapes can block 1-2s each.
+    const _yieldBudgetMs = 75;
+    let _lastYieldT = performance.now();
+    const _maybeYield = async () => {
+        if (performance.now() - _lastYieldT > _yieldBudgetMs) {
+            await new Promise(r => setTimeout(r, 0));
+            _lastYieldT = performance.now();
+        }
+        if (isNestCancelled()) throw new NestCancelled();
+    };
     
     for (let i = 0; i < shapeInfos.length; i++) {
+        await _maybeYield();
+        if (i > 0 && i % _logEvery === 0) {
+            _nestDiag('try_nest_progress', {
+                i,
+                of: shapeInfos.length,
+                placed: placedShapes.length,
+                elapsed: (performance.now() - _tTryStart).toFixed(0)
+            });
+        }
         const info = shapeInfos[i];
         
         let bestPos = null, bestRotation = 0;
@@ -2076,7 +2383,12 @@ function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
             // Generate candidates from placed shape vertices
             const candidates = generateCandidates(placedShapes, w, h, spacing);
             
-            for (const pos of candidates) {
+            for (let ci = 0; ci < candidates.length; ci++) {
+                const pos = candidates[ci];
+                // Yield inside the candidate loop too — for late-stage shapes,
+                // a single shape can have hundreds of candidates × O(N) collision
+                // checks, easily exceeding the budget by itself.
+                if ((ci & 31) === 0) await _maybeYield();
                 if (pos.x + w > rulerRightMm || pos.y + h > rulerTopMm) continue;
                 
                 // Use full polygon for collision detection — simplified polygon can miss extreme
@@ -2362,6 +2674,182 @@ function mirrorCopy(axis) {
 }
 
 // Helper: Redraw a single shape from its data
+// When true, redrawShapeFromData skips canvas.renderAll() — caller does one batch render
+let _batchRedrawMode = false;
+
+// === NEST DIAGNOSTIC HELPERS =========================================
+// Goal: capture nest failures even when the WebSocket dies mid-operation.
+// Strategy:
+//   1. emitEvent('nest_diagnostic', ...) — fast path via Socket.IO
+//   2. localStorage ring buffer — survives page reloads / socket drops
+//   3. On page load, POST any buffered events to /client-log via fetch
+//      (HTTP, independent of WebSocket health)
+//   4. Monitor Socket.IO connection state and log transitions
+const _NEST_LS_KEY = 'nestDiagBuffer';
+const _NEST_LS_MAX = 500;
+
+function _nestBufferPush(msg) {
+    try {
+        const raw = localStorage.getItem(_NEST_LS_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        arr.push(msg);
+        if (arr.length > _NEST_LS_MAX) arr.splice(0, arr.length - _NEST_LS_MAX);
+        localStorage.setItem(_NEST_LS_KEY, JSON.stringify(arr));
+    } catch (e) {
+        // localStorage may be full or unavailable — degrade silently
+    }
+}
+
+function _nestDiag(checkpoint, info) {
+    const msg = {
+        checkpoint,
+        t: performance.now().toFixed(1),
+        wall: Date.now(),
+        wsState: window._wsLastState || 'unknown',
+        ...info
+    };
+    try { console.log('[NEST DIAG]', JSON.stringify(msg)); } catch (e) {}
+    _nestBufferPush(msg);
+    if (window.emitEvent) {
+        try { window.emitEvent('nest_diagnostic', msg); } catch (e) {
+            // emitEvent failed — message is still in localStorage and will be
+            // recovered on next page load via /client-log.
+            console.warn('[NEST DIAG] emitEvent failed:', e);
+        }
+    }
+}
+
+// Flush any buffered diagnostics from a previous (crashed) session via HTTP.
+// Runs once per page load, BEFORE we start touching the WebSocket again.
+function _flushNestBuffer(reason) {
+    try {
+        const raw = localStorage.getItem(_NEST_LS_KEY);
+        if (!raw) return;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr) || arr.length === 0) return;
+        console.warn('[NEST DIAG] flushing', arr.length, 'buffered events to /client-log');
+        // Use sendBeacon if available — fires even during page unload.
+        const body = JSON.stringify({ events: arr, reason });
+        let sent = false;
+        if (navigator.sendBeacon) {
+            try {
+                sent = navigator.sendBeacon('/client-log', new Blob([body], { type: 'application/json' }));
+            } catch (e) {}
+        }
+        if (!sent) {
+            fetch('/client-log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body
+            }).catch(e => console.warn('[NEST DIAG] /client-log POST failed:', e));
+        }
+        localStorage.removeItem(_NEST_LS_KEY);
+    } catch (e) {
+        console.warn('[NEST DIAG] flush failed:', e);
+    }
+}
+
+// Install global hooks once. Page-load flush + error capture + WS monitoring.
+if (!window._nestErrorHookInstalled) {
+    window._nestErrorHookInstalled = true;
+
+    // Flush any buffered events from a previous (possibly crashed) session.
+    _flushNestBuffer('page_load');
+
+    // Also flush on unload — last chance to ship anything still buffered.
+    window.addEventListener('beforeunload', () => _flushNestBuffer('beforeunload'));
+    window.addEventListener('pagehide',     () => _flushNestBuffer('pagehide'));
+
+    window.addEventListener('error', (e) => {
+        _nestDiag('window_error', {
+            message: String(e.message || ''),
+            filename: String(e.filename || ''),
+            lineno: e.lineno || 0,
+            colno: e.colno || 0,
+            stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 800) : ''
+        });
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason || {};
+        _nestDiag('unhandled_rejection', {
+            message: String(r.message || r),
+            stack: r.stack ? String(r.stack).slice(0, 800) : ''
+        });
+    });
+
+    // === Socket.IO connection state monitoring ===
+    // NiceGUI exposes the Socket.IO client at window.socket once connected.
+    // Poll until it appears, then attach lifecycle listeners.
+    window._wsLastState = 'init';
+    function _hookSocket() {
+        const sock = window.socket || (window.io && window.io.socket);
+        if (!sock || sock._nestHooked) return false;
+        sock._nestHooked = true;
+        window._wsLastState = sock.connected ? 'connected' : 'connecting';
+        _nestDiag('ws_hook_installed', { connected: !!sock.connected, id: sock.id || null });
+
+        sock.on('connect', () => {
+            window._wsLastState = 'connected';
+            _nestDiag('ws_connect', { id: sock.id || null });
+        });
+        sock.on('disconnect', (reason) => {
+            window._wsLastState = 'disconnected:' + String(reason);
+            // Cannot reach server via WS — record to localStorage only.
+            const msg = { checkpoint: 'ws_disconnect', t: performance.now().toFixed(1), wall: Date.now(), reason: String(reason) };
+            try { console.warn('[NEST DIAG] WS DISCONNECT', reason); } catch (e) {}
+            _nestBufferPush(msg);
+            // Try an immediate HTTP flush so we don't have to wait for reload.
+            _flushNestBuffer('ws_disconnect');
+        });
+        sock.on('connect_error', (err) => {
+            window._wsLastState = 'connect_error';
+            _nestBufferPush({ checkpoint: 'ws_connect_error', t: performance.now().toFixed(1), wall: Date.now(), message: String(err && err.message || err) });
+        });
+        sock.io && sock.io.on && sock.io.on('reconnect_attempt', (n) => {
+            window._wsLastState = 'reconnect_attempt:' + n;
+            _nestBufferPush({ checkpoint: 'ws_reconnect_attempt', t: performance.now().toFixed(1), wall: Date.now(), attempt: n });
+        });
+        sock.io && sock.io.on && sock.io.on('reconnect', (n) => {
+            window._wsLastState = 'reconnected';
+            _nestDiag('ws_reconnect', { attempts: n });
+        });
+        return true;
+    }
+    if (!_hookSocket()) {
+        const _hookInterval = setInterval(() => {
+            if (_hookSocket()) clearInterval(_hookInterval);
+        }, 200);
+        // Give up looking after 30s.
+        setTimeout(() => clearInterval(_hookInterval), 30000);
+    }
+}
+
+// Heartbeat: while a nest operation is running, emit a tick every 250ms.
+// If the WebSocket dies, the ticks queue in localStorage and we can later
+// see EXACTLY when the JS thread stopped responding.
+let _nestHeartbeatTimer = null;
+let _nestHeartbeatCount = 0;
+function _startNestHeartbeat(label) {
+    _stopNestHeartbeat();
+    _nestHeartbeatCount = 0;
+    const _hbStart = performance.now();
+    _nestHeartbeatTimer = setInterval(() => {
+        _nestHeartbeatCount++;
+        _nestDiag('heartbeat', {
+            label,
+            n: _nestHeartbeatCount,
+            elapsed: (performance.now() - _hbStart).toFixed(0),
+            wsState: window._wsLastState
+        });
+    }, 250);
+}
+function _stopNestHeartbeat() {
+    if (_nestHeartbeatTimer) {
+        clearInterval(_nestHeartbeatTimer);
+        _nestHeartbeatTimer = null;
+    }
+}
+
 function redrawShapeFromData(shapeName) {
     console.log('redrawShapeFromData:', shapeName, 'exists in shapes:', !!shapes[shapeName], 'exists in shapeData:', !!shapeData[shapeName]);
     
@@ -2426,7 +2914,7 @@ function redrawShapeFromData(shapeName) {
     ensureRulerHandlesFront();
     
     console.log('redrawShapeFromData done:', shapeName, 'now in shapes:', !!shapes[shapeName], 'total shapes:', Object.keys(shapes).length);
-    canvas.renderAll();
+    if (!_batchRedrawMode) canvas.renderAll();
 }
 
 // Helper: Emit shape update to Python
