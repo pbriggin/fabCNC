@@ -1859,6 +1859,10 @@ function gridArray(countX, countY) {
 // Nesting algorithm - pack all shapes tightly to minimize bounding area
 // keepOrientation: if false, will try rotating shapes for better fit
 // Show a notification using NiceGUI/Quasar's notification system
+// Track active toasts so we can cap the visible count (older ones get
+// dismissed early to keep the bottom of the UI from filling up).
+const _MAX_VISIBLE_TOASTS = 3;
+const _activeToasts = [];
 function showToast(message, type = 'info', duration = 3000) {
     const colors = {
         'info': 'info',
@@ -1869,13 +1873,27 @@ function showToast(message, type = 'info', duration = 3000) {
     
     // Use Quasar's notification system (same as NiceGUI's ui.notify)
     if (typeof Quasar !== 'undefined' && Quasar.Notify) {
-        Quasar.Notify.create({
+        const dismiss = Quasar.Notify.create({
             message: message,
             type: colors[type] || 'info',
             position: 'bottom',
             timeout: duration === 0 ? 0 : duration,
             actions: duration === 0 ? [{ icon: 'close', color: 'white' }] : []
         });
+        _activeToasts.push(dismiss);
+        // Auto-cleanup the tracking entry when the toast times out so the
+        // array doesn't grow unbounded.
+        if (duration > 0) {
+            setTimeout(() => {
+                const idx = _activeToasts.indexOf(dismiss);
+                if (idx !== -1) _activeToasts.splice(idx, 1);
+            }, duration + 100);
+        }
+        // Dismiss oldest if we exceed the cap.
+        while (_activeToasts.length > _MAX_VISIBLE_TOASTS) {
+            const oldest = _activeToasts.shift();
+            try { oldest(); } catch (_) {}
+        }
     } else {
         console.log(`[${type}] ${message}`);
     }
@@ -1884,6 +1902,11 @@ function showToast(message, type = 'info', duration = 3000) {
 // === NEST PROGRESS OVERLAY ===========================================
 // Persistent fullscreen overlay shown during long nest operations so the
 // user knows the app hasn't frozen. Updates as strategies complete.
+// Cancellation: clicking the Cancel button sets `_nestCancelled`; the
+// nest pipeline polls this in `_maybeYield` and aborts via a sentinel.
+let _nestCancelled = false;
+class NestCancelled extends Error { constructor() { super('nest cancelled'); this.name = 'NestCancelled'; } }
+function isNestCancelled() { return _nestCancelled; }
 function _ensureNestOverlay() {
     let el = document.getElementById('nestProgressOverlay');
     if (el) return el;
@@ -1910,27 +1933,42 @@ function _ensureNestOverlay() {
                 <div id="nestProgressBar" style="height:100%;width:0%;background:#4fc3f7;transition:width 0.2s ease;"></div>
             </div>
             <div id="nestProgressElapsed" style="margin-top:8px;font-size:11px;color:#888;">0.0s</div>
+            <button id="nestProgressCancel" style="margin-top:16px;background:#444;color:#fff;border:1px solid #666;border-radius:6px;padding:8px 20px;font-size:13px;cursor:pointer;font-family:inherit;">Cancel</button>
         </div>
     `;
     // Inject keyframes once.
     if (!document.getElementById('nestSpinKeyframes')) {
         const style = document.createElement('style');
         style.id = 'nestSpinKeyframes';
-        style.textContent = '@keyframes nestSpin{to{transform:rotate(360deg);}}';
+        style.textContent = '@keyframes nestSpin{to{transform:rotate(360deg);}}'
+            + '#nestProgressCancel:hover{background:#555;border-color:#888;}'
+            + '#nestProgressCancel:disabled{opacity:0.5;cursor:not-allowed;}';
         document.head.appendChild(style);
     }
     document.body.appendChild(el);
+    const cancelBtn = el.querySelector('#nestProgressCancel');
+    cancelBtn.addEventListener('click', () => {
+        _nestCancelled = true;
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = 'Cancelling…';
+        const detailEl = document.getElementById('nestProgressDetail');
+        if (detailEl) detailEl.textContent = 'Cancelling…';
+        _nestDiag('nest_cancel_clicked', {});
+    });
     return el;
 }
 
 let _nestOverlayStart = 0;
 let _nestOverlayTicker = null;
 function showNestOverlay(title, detail) {
+    _nestCancelled = false;
     const el = _ensureNestOverlay();
     el.style.display = 'flex';
     document.getElementById('nestProgressTitle').textContent = title || 'Nesting…';
     document.getElementById('nestProgressDetail').textContent = detail || '';
     document.getElementById('nestProgressBar').style.width = '0%';
+    const cancelBtn = document.getElementById('nestProgressCancel');
+    if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
     _nestOverlayStart = performance.now();
     if (_nestOverlayTicker) clearInterval(_nestOverlayTicker);
     _nestOverlayTicker = setInterval(() => {
@@ -2174,8 +2212,10 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
     
     let bestResult = null;
     let bestArea = Infinity;
+    let cancelled = false;
     
     for (let si = 0; si < strategies.length; si++) {
+        if (isNestCancelled()) { cancelled = true; break; }
         const strategy = strategies[si];
         updateNestOverlay({
             title: 'Nesting (local algorithm)…',
@@ -2185,7 +2225,13 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         await _yield();  // yield to event loop so WebSocket heartbeats can flush
         const _tStrat = performance.now();
         const sortedInfos = [...shapeInfos].sort(strategy.sort);
-        const result = await tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        let result;
+        try {
+            result = await tryNestWithOrder(sortedInfos, keepOrientation, spacing);
+        } catch (e) {
+            if (e instanceof NestCancelled) { cancelled = true; break; }
+            throw e;
+        }
         const _stratMs = (performance.now() - _tStrat).toFixed(1);
         
         if (result.success) {
@@ -2200,6 +2246,17 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
             _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: false });
         }
     }
+    
+    if (cancelled) {
+        undo();
+        _nestDiag('local_nest_cancelled', { totalMs: (performance.now() - _tLocalStart).toFixed(1) });
+        _stopNestHeartbeat();
+        hideNestOverlay();
+        console.log('=== NESTING CANCELLED ===');
+        showToast('Nesting cancelled', 'warning', 3000);
+        return;
+    }
+    
     updateNestOverlay({ detail: 'Applying best layout…', percent: 95 });
     
     if (!bestResult) {
@@ -2264,6 +2321,7 @@ async function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
             await new Promise(r => setTimeout(r, 0));
             _lastYieldT = performance.now();
         }
+        if (isNestCancelled()) throw new NestCancelled();
     };
     
     for (let i = 0; i < shapeInfos.length; i++) {
