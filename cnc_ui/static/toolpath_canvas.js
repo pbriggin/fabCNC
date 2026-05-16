@@ -1881,6 +1881,82 @@ function showToast(message, type = 'info', duration = 3000) {
     }
 }
 
+// === NEST PROGRESS OVERLAY ===========================================
+// Persistent fullscreen overlay shown during long nest operations so the
+// user knows the app hasn't frozen. Updates as strategies complete.
+function _ensureNestOverlay() {
+    let el = document.getElementById('nestProgressOverlay');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'nestProgressOverlay';
+    el.style.cssText = [
+        'position:fixed', 'inset:0',
+        'background:rgba(0,0,0,0.55)',
+        'display:none',
+        'align-items:center', 'justify-content:center',
+        'z-index:99999',
+        'font-family:system-ui,sans-serif',
+        'color:#fff',
+        'backdrop-filter:blur(2px)'
+    ].join(';') + ';';
+    el.innerHTML = `
+        <div style="background:#222;border:1px solid #444;border-radius:12px;padding:24px 32px;min-width:320px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,0.5);text-align:center;">
+            <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:12px;">
+                <div class="nest-spinner" style="width:24px;height:24px;border:3px solid #444;border-top-color:#4fc3f7;border-radius:50%;animation:nestSpin 0.9s linear infinite;"></div>
+                <div id="nestProgressTitle" style="font-size:16px;font-weight:600;">Nesting…</div>
+            </div>
+            <div id="nestProgressDetail" style="font-size:13px;color:#bbb;line-height:1.5;">Preparing…</div>
+            <div style="margin-top:12px;height:6px;background:#333;border-radius:3px;overflow:hidden;">
+                <div id="nestProgressBar" style="height:100%;width:0%;background:#4fc3f7;transition:width 0.2s ease;"></div>
+            </div>
+            <div id="nestProgressElapsed" style="margin-top:8px;font-size:11px;color:#888;">0.0s</div>
+        </div>
+    `;
+    // Inject keyframes once.
+    if (!document.getElementById('nestSpinKeyframes')) {
+        const style = document.createElement('style');
+        style.id = 'nestSpinKeyframes';
+        style.textContent = '@keyframes nestSpin{to{transform:rotate(360deg);}}';
+        document.head.appendChild(style);
+    }
+    document.body.appendChild(el);
+    return el;
+}
+
+let _nestOverlayStart = 0;
+let _nestOverlayTicker = null;
+function showNestOverlay(title, detail) {
+    const el = _ensureNestOverlay();
+    el.style.display = 'flex';
+    document.getElementById('nestProgressTitle').textContent = title || 'Nesting…';
+    document.getElementById('nestProgressDetail').textContent = detail || '';
+    document.getElementById('nestProgressBar').style.width = '0%';
+    _nestOverlayStart = performance.now();
+    if (_nestOverlayTicker) clearInterval(_nestOverlayTicker);
+    _nestOverlayTicker = setInterval(() => {
+        const elEl = document.getElementById('nestProgressElapsed');
+        if (elEl) elEl.textContent = ((performance.now() - _nestOverlayStart) / 1000).toFixed(1) + 's';
+    }, 100);
+}
+function updateNestOverlay({ title, detail, percent } = {}) {
+    const el = document.getElementById('nestProgressOverlay');
+    if (!el || el.style.display === 'none') return;
+    if (title !== undefined) document.getElementById('nestProgressTitle').textContent = title;
+    if (detail !== undefined) document.getElementById('nestProgressDetail').textContent = detail;
+    if (percent !== undefined) {
+        const p = Math.max(0, Math.min(100, percent));
+        document.getElementById('nestProgressBar').style.width = p + '%';
+    }
+}
+function hideNestOverlay() {
+    const el = document.getElementById('nestProgressOverlay');
+    if (el) el.style.display = 'none';
+    if (_nestOverlayTicker) {
+        clearInterval(_nestOverlayTicker);
+        _nestOverlayTicker = null;
+    }
+}
+
 function nestShapes(keepOrientation = true, spacing = 15) {
     console.log('=== NESTING START ===');
     const _t0 = performance.now();
@@ -1949,8 +2025,9 @@ function nestShapes(keepOrientation = true, spacing = 15) {
         return { success: false, error: 'No valid shapes' };
     }
     
-    // Show starting notification
-    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);  // Auto-dismiss after 5s
+    // Show starting notification + persistent overlay (in case it takes a while)
+    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);
+    showNestOverlay('Nesting…', `Preparing ${shapeInfos.length} shapes (${_totalPoints} points)`);
     
     // Try Packaide first (async call)
     nestShapesPackaide(shapeInfos, keepOrientation, spacing);
@@ -2042,12 +2119,14 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
             showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
+            hideNestOverlay();
             return;
         }
         
         // Fall back to local algorithm if Packaide fails
         console.log('Packaide returned no placements, falling back to local algorithm');
         showToast('Using local algorithm...', 'info', 2000);
+        updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Packaide unavailable, falling back…', percent: 0 });
         _nestDiag('about_to_call_local', { from: 'packaide_no_placements' });
         await nestShapesLocal(shapeInfos, keepOrientation, spacing);
         
@@ -2060,6 +2139,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
         });
         console.log('Falling back to local nesting algorithm');
         showToast('Server busy, using local algorithm...', 'warning', 2000);
+        updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Server busy, falling back…', percent: 0 });
         try {
             _nestDiag('about_to_call_local', { from: 'packaide_catch' });
             await nestShapesLocal(shapeInfos, keepOrientation, spacing);
@@ -2069,6 +2149,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 stack: localErr && localErr.stack ? String(localErr.stack).slice(0, 800) : ''
             });
             showToast('Nesting failed: ' + String(localErr), 'error', 4000);
+            hideNestOverlay();
         }
     }
 }
@@ -2094,7 +2175,13 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
     let bestResult = null;
     let bestArea = Infinity;
     
-    for (const strategy of strategies) {
+    for (let si = 0; si < strategies.length; si++) {
+        const strategy = strategies[si];
+        updateNestOverlay({
+            title: 'Nesting (local algorithm)…',
+            detail: `Trying strategy ${si + 1}/${strategies.length}: ${strategy.name}`,
+            percent: (si / strategies.length) * 100
+        });
         await _yield();  // yield to event loop so WebSocket heartbeats can flush
         const _tStrat = performance.now();
         const sortedInfos = [...shapeInfos].sort(strategy.sort);
@@ -2113,11 +2200,13 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
             _nestDiag('local_strategy', { strategy: strategy.name, ms: _stratMs, success: false });
         }
     }
+    updateNestOverlay({ detail: 'Applying best layout…', percent: 95 });
     
     if (!bestResult) {
         undo();
         _nestDiag('local_nest_failed', { totalMs: (performance.now() - _tLocalStart).toFixed(1) });
         _stopNestHeartbeat();
+        hideNestOverlay();
         console.log('=== NESTING FAILED ===');
         showToast('Could not nest shapes - not enough space', 'error', 4000);
         return;
@@ -2151,6 +2240,7 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         h: Math.round(bestResult.height)
     });
     _stopNestHeartbeat();
+    hideNestOverlay();
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
     showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
