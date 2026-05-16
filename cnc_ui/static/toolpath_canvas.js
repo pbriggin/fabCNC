@@ -2252,13 +2252,22 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
 async function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
     const _tTryStart = performance.now();
     const placedShapes = [];
-    const _yieldEvery = 2;  // yield after every 2 shapes
     const _logEvery = 3;    // emit progress diag every 3 shapes
+    // Time-based cooperative yield: keep the event loop responsive so WebSocket
+    // heartbeats and NiceGUI server pings can be acked. Per-shape work grows
+    // O(N^2) with placed shapes, so a fixed "every 2 shapes" yield isn't enough
+    // for large inputs (18+ shapes) — late shapes can block 1-2s each.
+    const _yieldBudgetMs = 75;
+    let _lastYieldT = performance.now();
+    const _maybeYield = async () => {
+        if (performance.now() - _lastYieldT > _yieldBudgetMs) {
+            await new Promise(r => setTimeout(r, 0));
+            _lastYieldT = performance.now();
+        }
+    };
     
     for (let i = 0; i < shapeInfos.length; i++) {
-        if (i > 0 && i % _yieldEvery === 0) {
-            await new Promise(r => setTimeout(r, 0));
-        }
+        await _maybeYield();
         if (i > 0 && i % _logEvery === 0) {
             _nestDiag('try_nest_progress', {
                 i,
@@ -2285,7 +2294,12 @@ async function tryNestWithOrder(shapeInfos, keepOrientation, spacing) {
             // Generate candidates from placed shape vertices
             const candidates = generateCandidates(placedShapes, w, h, spacing);
             
-            for (const pos of candidates) {
+            for (let ci = 0; ci < candidates.length; ci++) {
+                const pos = candidates[ci];
+                // Yield inside the candidate loop too — for late-stage shapes,
+                // a single shape can have hundreds of candidates × O(N) collision
+                // checks, easily exceeding the budget by itself.
+                if ((ci & 31) === 0) await _maybeYield();
                 if (pos.x + w > rulerRightMm || pos.y + h > rulerTopMm) continue;
                 
                 // Use full polygon for collision detection — simplified polygon can miss extreme
