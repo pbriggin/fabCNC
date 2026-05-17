@@ -1058,8 +1058,10 @@ def home_all():
     cnc_controller.home_all()
 
 
-def tape_fabric():
+async def tape_fabric():
     """Home the machine then move toolhead to center of work area for fabric taping."""
+    if not await safety_confirm():
+        return
     rapid = toolpath_generator.rapid_rate
     center_x = 860
     center_y = 830
@@ -1074,10 +1076,12 @@ def tape_fabric():
     cnc_controller.run_utility_sequence(gcode)
 
 
-def change_cutting_wheel():
-    """Home the machine then move to wheel-change position (Z -27.5, A +90)."""
+async def change_cutting_wheel():
+    """Home the machine then move to wheel-change position (Z -25, A +90) and disable steppers."""
+    if not await safety_confirm():
+        return
     plunge = toolpath_generator.plunge_rate
-    wheel_z = -27.5
+    wheel_z = -25.0
     wheel_a = 90
     gcode = [
         'G90',
@@ -1085,6 +1089,7 @@ def change_cutting_wheel():
         f'G0 Z{wheel_z} F{plunge:.0f}',
         f'G0 A{wheel_a}',
         'M114',
+        'M18',
     ]
     log_event('control', 'change_cutting_wheel', wheel_z=wheel_z, wheel_a=wheel_a)
     ui.notify('Homing and moving to wheel-change position...', type='info')
