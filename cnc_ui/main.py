@@ -870,6 +870,14 @@ def create_jog_controls():
                 # XY Zero button - spans full width (5 * 44px + 4 gaps * 4px = 236px)
                 ui.button('XY Zero', on_click=lambda: cnc_controller.send_command("G92 X0 Y0")).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
                     .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+
+                # Tape Fabric button — homes then moves to center of work area
+                ui.button('Tape Fabric', icon='straighten', on_click=tape_fabric).props('flat dense').style('background: #2a2a2a; color: #ce93d8; font-size: 13px; width: 236px; height: 36px; margin-top: 4px;') \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
+
+                # Change Cutting Wheel button — homes then lowers Z to wheel-change position
+                ui.button('Change Cutting Wheel', icon='build', on_click=change_cutting_wheel).props('flat dense').style('background: #2a2a2a; color: #FFB300; font-size: 13px; width: 236px; height: 36px; margin-top: 4px;') \
+                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
     
 
 
@@ -1048,6 +1056,39 @@ def home_all():
     """Handle home all button click."""
     log_event('home', 'home_all')
     cnc_controller.home_all()
+
+
+def tape_fabric():
+    """Home the machine then move toolhead to center of work area for fabric taping."""
+    rapid = toolpath_generator.rapid_rate
+    center_x = 860
+    center_y = 830
+    gcode = [
+        'G90',
+        'G28',
+        f'G0 X{center_x} Y{center_y} F{rapid:.0f}',
+        'M114',
+    ]
+    log_event('control', 'tape_fabric', center_x=center_x, center_y=center_y)
+    ui.notify('Homing and moving to center for fabric taping...', type='info')
+    cnc_controller.run_utility_sequence(gcode)
+
+
+def change_cutting_wheel():
+    """Home the machine then move to wheel-change position (Z -27.5, A +90)."""
+    plunge = toolpath_generator.plunge_rate
+    wheel_z = -27.5
+    wheel_a = 90
+    gcode = [
+        'G90',
+        'G28',
+        f'G0 Z{wheel_z} F{plunge:.0f}',
+        f'G0 A{wheel_a}',
+        'M114',
+    ]
+    log_event('control', 'change_cutting_wheel', wheel_z=wheel_z, wheel_a=wheel_a)
+    ui.notify('Homing and moving to wheel-change position...', type='info')
+    cnc_controller.run_utility_sequence(gcode)
 
 
 def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None):
