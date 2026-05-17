@@ -365,6 +365,21 @@ class CNCController:
     
     # ==================== Job Execution ====================
     
+    def run_utility_sequence(self, gcode_lines: list[str]) -> None:
+        """
+        Run a utility G-code sequence (e.g. move to center) without requiring a loaded job.
+        
+        Args:
+            gcode_lines: List of G-code commands to execute
+        """
+        if not machine_state.is_idle() or not self.connected:
+            return
+
+        self.stop_requested = False
+        self.pause_requested = False
+        self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
+        self.job_thread.start()
+
     def start_job(self, gcode_lines: list[str]) -> None:
         """
         Start executing a G-code job via serial streaming.
