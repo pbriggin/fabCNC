@@ -1081,7 +1081,7 @@ async def change_cutting_wheel():
     if not await safety_confirm():
         return
     plunge = toolpath_generator.plunge_rate
-    wheel_z = -25.0
+    wheel_z = -20.0
     wheel_a = 90
     gcode = [
         'G90',
