@@ -1082,7 +1082,7 @@ async def change_cutting_wheel():
         return
     plunge = toolpath_generator.plunge_rate
     wheel_z = -20.0
-    wheel_a = 90
+    wheel_a = -90
     gcode = [
         'G90',
         'G28',
