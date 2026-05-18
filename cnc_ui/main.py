@@ -1076,24 +1076,97 @@ async def tape_fabric():
     cnc_controller.run_utility_sequence(gcode)
 
 
+async def _wheel_step_confirm(step: str, instruction: str, confirm_label: str = 'Next Step', icon: str = 'build') -> bool:
+    """Show a cutting wheel wizard step dialog. Returns True if user pressed the confirm button."""
+    confirmed = False
+    with ui.dialog() as dialog, ui.card().classes('w-96'):
+        with ui.row().classes('items-center gap-2'):
+            ui.icon(icon, size='28px').style('color: #FFB300;')
+            ui.label(step).classes('text-h6 font-bold')
+        ui.separator()
+        ui.label(instruction).classes('text-body1').style('margin: 12px 0; white-space: pre-wrap;')
+        with ui.row().classes('w-full justify-end gap-2').style('margin-top: 8px;'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
+            def _confirm():
+                nonlocal confirmed
+                confirmed = True
+                dialog.close()
+
+            ui.button(confirm_label, on_click=_confirm, icon='check') \
+                .style('background-color: #FFB300; color: #111;')
+    await dialog
+    return confirmed
+
+
 async def change_cutting_wheel():
-    """Home the machine then move to wheel-change position (Z -25, A +90) and disable steppers."""
+    """Multi-step guided cutting wheel replacement."""
     if not await safety_confirm():
         return
+
     plunge = toolpath_generator.plunge_rate
-    wheel_z = -20.0
+    wheel_z_low = -20.0
+    wheel_z_high = -15.0
     wheel_a = -90
-    gcode = [
-        'G90',
-        'G28',
-        f'G0 Z{wheel_z} F{plunge:.0f}',
+
+    # ── Step 1: Home, lower to -20, rotate A to -90, disable steppers ──
+    ui.notify('Step 1: Homing and moving to screw-access position...', type='info')
+    cnc_controller.run_utility_sequence([
+        'G90', 'G28',
+        f'G1 Z{wheel_z_low} F{plunge:.0f}',
         f'G0 A{wheel_a}',
-        'M114',
-        'M18',
-    ]
-    log_event('control', 'change_cutting_wheel', wheel_z=wheel_z, wheel_a=wheel_a)
-    ui.notify('Homing and moving to wheel-change position...', type='info')
-    cnc_controller.run_utility_sequence(gcode)
+        'M400', 'M18',
+    ])
+    await asyncio.sleep(0.5)
+    while not machine_state.is_idle():
+        await asyncio.sleep(0.5)
+
+    if not await _wheel_step_confirm('Step 1 of 3', 'Remove cutting wheel bolt', icon='hardware'):
+        return
+
+    # ── Step 2: Raise to -15, disable steppers ──
+    ui.notify('Step 2: Raising toolhead to wheel-access height...', type='info')
+    cnc_controller.run_utility_sequence([
+        'G90',
+        f'G1 Z{wheel_z_high} F{plunge:.0f}',
+        'M400', 'M18',
+    ])
+    await asyncio.sleep(0.5)
+    while not machine_state.is_idle():
+        await asyncio.sleep(0.5)
+
+    if not await _wheel_step_confirm(
+        'Step 2 of 3',
+        'Remove old cutting wheel and insert new cutting wheel.\n\nEnsure all hands are clear before continuing.',
+        confirm_label='Hands Clear — Continue',
+        icon='autorenew',
+    ):
+        return
+
+    # ── Step 3: Lower back to -20, disable steppers ──
+    ui.notify('Step 3: Lowering to bolt-insertion position...', type='info')
+    cnc_controller.run_utility_sequence([
+        'G90',
+        f'G1 Z{wheel_z_low} F{plunge:.0f}',
+        'M400', 'M18',
+    ])
+    await asyncio.sleep(0.5)
+    while not machine_state.is_idle():
+        await asyncio.sleep(0.5)
+
+    if not await _wheel_step_confirm(
+        'Step 3 of 3',
+        'Insert cutting wheel bolt',
+        confirm_label='Done — Return to Home',
+        icon='build',
+    ):
+        return
+
+    # ── Step 4: Return to home ──
+    ui.notify('Returning to home position...', type='info')
+    cnc_controller.run_utility_sequence(['G90', 'G28'])
+    log_event('control', 'change_cutting_wheel_complete', wheel_z=wheel_z_low, wheel_a=wheel_a)
+    ui.notify('Cutting wheel replacement complete!', type='positive')
 
 
 def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None):
