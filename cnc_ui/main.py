@@ -1106,7 +1106,7 @@ async def change_cutting_wheel():
 
     plunge = toolpath_generator.plunge_rate
     wheel_z_low = -20.0
-    wheel_z_high = -15.0
+    wheel_z_high = -10.0
     wheel_a = -90
 
     # ── Step 1: Home, lower to -20, rotate A to -90, disable steppers ──
