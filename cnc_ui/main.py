@@ -1062,7 +1062,7 @@ async def tape_fabric():
     """Home the machine then move toolhead to center of work area for fabric taping."""
     if not await safety_confirm():
         return
-    rapid = toolpath_generator.rapid_rate
+    rapid = SPEED_MAP['Medium'][1]  # 10000 mm/min — medium rapid rate
     center_x = 860
     center_y = 830
     gcode = [
