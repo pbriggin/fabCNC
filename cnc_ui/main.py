@@ -1728,11 +1728,12 @@ async def update_ui(pos_labels, status_label):
     pos_labels['Z'].set_text(f'{z:.2f} mm')
     pos_labels['A'].set_text(f'{a:.2f} °')
     
-    # Update toolhead position on canvas (best-effort, ignore if JS not ready)
-    try:
-        await ui.run_javascript(f'if(window.toolpathCanvas) window.toolpathCanvas.updateToolhead({x}, {y})', timeout=0.5)
-    except Exception:
-        pass
+    # Update toolhead position on canvas only while machine is running (avoid blocking JS thread when idle)
+    if machine_state.busy:
+        try:
+            await ui.run_javascript(f'if(window.toolpathCanvas) window.toolpathCanvas.updateToolhead({x}, {y})', timeout=0.5)
+        except Exception:
+            pass
     
     # Update status
     current_status = machine_state.status_text
@@ -2268,6 +2269,9 @@ def main_page():
                                 ui.button(icon='horizontal_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeHorizontally()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Horizontally — equal X spacing (need 3+ shapes)')
                                 ui.button(icon='vertical_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeVertically()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Vertically — equal Y spacing (need 3+ shapes)')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+                                spread_spacing = ui.number(value=15, format='%.0f', min=1, max=200).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Min gap between shape outlines (mm)')
+                                ui.button('Spread', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.ensureSpacing({int(spread_spacing.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Push shapes apart so every outline gap ≥ spacing value')
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.element('div').style('flex: 1;')
                                 ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
@@ -2322,8 +2326,22 @@ def main_page():
                                         ''', timeout=3.0)
                                         break  # success
                                     except Exception:
-                                        import asyncio
                                         await asyncio.sleep(0.5)
+
+                                # Restore shapes and toolpath if they already exist server-side
+                                # (handles page reload mid-session due to WebSocket reconnect)
+                                if current_toolpath_shapes:
+                                    await asyncio.sleep(0.4)  # let canvas finish initialising
+                                    add_shapes_to_canvas(current_toolpath_shapes)
+                                    if machine_state.toolpath_generated:
+                                        await asyncio.sleep(0.2)
+                                        try:
+                                            await ui.run_javascript(
+                                                'window.toolpathCanvas.fetchAndShowToolpath()',
+                                                timeout=15.0
+                                            )
+                                        except Exception:
+                                            pass
                             
                             # Schedule initialization
                             ui.timer(0.5, init_canvas_after_load, once=True)

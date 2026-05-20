@@ -1527,6 +1527,135 @@ function distributeVertically() {
     return true;
 }
 
+// Ensure a minimum gap (mm) between the outlines of all shapes by iteratively
+// pushing overlapping/too-close pairs apart along their center-to-center vector.
+function ensureSpacing(targetSpacingMm) {
+    const names = Object.keys(shapeData).filter(n => shapeData[n] && shapeData[n].originalMmPoints);
+    if (names.length < 2) {
+        showToast('Need at least 2 shapes to enforce spacing', 'warning', 3000);
+        return;
+    }
+
+    saveUndoState();
+
+    // Record starting bbox min per shape to compute total delta for notch offsets
+    const startMin = {};
+    names.forEach(name => {
+        const pts = shapeData[name].originalMmPoints;
+        startMin[name] = [
+            Math.min(...pts.map(p => p[0])),
+            Math.min(...pts.map(p => p[1]))
+        ];
+    });
+
+    const MAX_ITERS = 300;
+    let anyMoved = true;
+
+    for (let iter = 0; iter < MAX_ITERS && anyMoved; iter++) {
+        anyMoved = false;
+
+        for (let i = 0; i < names.length; i++) {
+            for (let j = i + 1; j < names.length; j++) {
+                const nameA = names[i], nameB = names[j];
+                const ptsA = shapeData[nameA].originalMmPoints;
+                const ptsB = shapeData[nameB].originalMmPoints;
+
+                // Fast AABB pre-check: if bounding boxes are clearly far enough apart, skip
+                const axVals = ptsA.map(p => p[0]), ayVals = ptsA.map(p => p[1]);
+                const bxVals = ptsB.map(p => p[0]), byVals = ptsB.map(p => p[1]);
+                const aMinX = Math.min(...axVals), aMaxX = Math.max(...axVals);
+                const aMinY = Math.min(...ayVals), aMaxY = Math.max(...ayVals);
+                const bMinX = Math.min(...bxVals), bMaxX = Math.max(...bxVals);
+                const bMinY = Math.min(...byVals), bMaxY = Math.max(...byVals);
+                const bboxGap = Math.max(
+                    aMinX - bMaxX, bMinX - aMaxX,
+                    aMinY - bMaxY, bMinY - aMaxY,
+                    0
+                );
+                if (bboxGap >= targetSpacingMm) continue;
+
+                // Compute exact minimum outline-to-outline distance using full point sets
+                let minDistSq = Infinity;
+                for (const p of ptsA) {
+                    for (let k = 0; k < ptsB.length; k++) {
+                        const d = pointToSegmentDistSq(p, ptsB[k], ptsB[(k + 1) % ptsB.length]);
+                        if (d < minDistSq) minDistSq = d;
+                    }
+                }
+                for (const p of ptsB) {
+                    for (let k = 0; k < ptsA.length; k++) {
+                        const d = pointToSegmentDistSq(p, ptsA[k], ptsA[(k + 1) % ptsA.length]);
+                        if (d < minDistSq) minDistSq = d;
+                    }
+                }
+
+                const minDist = Math.sqrt(minDistSq);
+                if (minDist >= targetSpacingMm) continue;
+
+                // Push A and B apart along their center-to-center axis
+                const cAx = ptsA.reduce((s, p) => s + p[0], 0) / ptsA.length;
+                const cAy = ptsA.reduce((s, p) => s + p[1], 0) / ptsA.length;
+                const cBx = ptsB.reduce((s, p) => s + p[0], 0) / ptsB.length;
+                const cBy = ptsB.reduce((s, p) => s + p[1], 0) / ptsB.length;
+
+                let dx = cBx - cAx, dy = cBy - cAy;
+                const len = Math.sqrt(dx * dx + dy * dy);
+                if (len < 0.001) { dx = 1; dy = 0; } else { dx /= len; dy /= len; }
+
+                // Full deficit push + small overshoot; clamp to work area immediately
+                // so subsequent pair checks in this same sweep use the real positions.
+                const push = (targetSpacingMm - minDist) / 2 + 0.1;
+
+                shapeData[nameA].originalMmPoints = constrainShapeToWorkArea(ptsA.map(p => [p[0] - dx * push, p[1] - dy * push]));
+                shapeData[nameB].originalMmPoints = constrainShapeToWorkArea(ptsB.map(p => [p[0] + dx * push, p[1] + dy * push]));
+                anyMoved = true;
+            }
+        }
+    }
+
+    // Update notch positions by total delta from start, then redraw
+    names.forEach(name => {
+        const pts = shapeData[name].originalMmPoints;
+        const newMinX = Math.min(...pts.map(p => p[0]));
+        const newMinY = Math.min(...pts.map(p => p[1]));
+        const ddx = newMinX - startMin[name][0];
+        const ddy = newMinY - startMin[name][1];
+
+        if (shapeNotches[name] && (ddx !== 0 || ddy !== 0)) {
+            shapeNotches[name].forEach(nk => { nk.x += ddx; nk.y += ddy; });
+        }
+
+        redrawShapeFromData(name);
+        emitShapeUpdate(name);
+    });
+
+    redrawAllNotchMarks();
+    canvas.renderAll();
+
+    // Verify result — warn if any pair still couldn't reach the target spacing
+    let tooClosePairs = 0;
+    for (let i = 0; i < names.length; i++) {
+        for (let j = i + 1; j < names.length; j++) {
+            const ptsA = shapeData[names[i]].originalMmPoints;
+            const ptsB = shapeData[names[j]].originalMmPoints;
+            let minDistSq = Infinity;
+            for (const p of ptsA) {
+                for (let k = 0; k < ptsB.length; k++) {
+                    const d = pointToSegmentDistSq(p, ptsB[k], ptsB[(k + 1) % ptsB.length]);
+                    if (d < minDistSq) minDistSq = d;
+                }
+            }
+            if (Math.sqrt(minDistSq) < targetSpacingMm - 0.5) tooClosePairs++;
+        }
+    }
+
+    if (tooClosePairs > 0) {
+        showToast(`Spread done — ${tooClosePairs} pair(s) couldn't reach ${targetSpacingMm}mm (not enough room)`, 'warning', 5000);
+    } else {
+        showToast(`Shapes spaced ≥${targetSpacingMm}mm apart`, 'success', 3000);
+    }
+}
+
 // Rotate shape 90 degrees clockwise
 function rotate90() {
     const selectedShapes = getSelectedShapes();
@@ -3663,6 +3792,7 @@ window.toolpathCanvas = {
     alignCentersHorizontal: alignCentersHorizontal,
     distributeHorizontally: distributeHorizontally,
     distributeVertically: distributeVertically,
+    ensureSpacing: ensureSpacing,
     rotate90: rotate90,
     rotateByDegrees: rotateByDegrees,
     scaleShape: scaleShape,
@@ -4061,7 +4191,7 @@ function updateToolhead(x, y) {
     
     // Bring toolhead to front
     canvas.bringToFront(toolheadIndicator);
-    canvas.renderAll();
+    canvas.requestRenderAll();
 }
 
 // ============ LOGGING SHIM ============
