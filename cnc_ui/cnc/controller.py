@@ -399,17 +399,17 @@ class CNCController:
                             logger.warning(f"Controller error: {line}")
                         
                 time.sleep(0.005)  # 5ms polling rate
-        except OSError as e:
-            if e.errno == 5:  # EIO — USB/serial device disconnected (e.g. SKR board power loss)
-                logger.error(f"Serial device disconnected (EIO) — likely controller power loss: {e}")
+            except OSError as e:
+                if e.errno == 5:  # EIO — USB/serial device disconnected (e.g. SKR board power loss)
+                    logger.error(f"Serial device disconnected (EIO) — likely controller power loss: {e}")
+                    self._handle_disconnect()
+                    break
+                logger.error(f"Error in read loop: {e}")
+                time.sleep(0.1)
+            except serial.SerialException as e:
+                logger.error(f"Serial exception in read loop — connection lost: {e}")
                 self._handle_disconnect()
                 break
-            logger.error(f"Error in read loop: {e}")
-            time.sleep(0.1)
-        except serial.SerialException as e:
-            logger.error(f"Serial exception in read loop — connection lost: {e}")
-            self._handle_disconnect()
-            break
     
     def _parse_position(self, line: str):
         """Parse Marlin position response: X:0.00 Y:0.00 Z:0.00 A:0.00"""
