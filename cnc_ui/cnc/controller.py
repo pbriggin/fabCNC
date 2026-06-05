@@ -410,8 +410,6 @@ class CNCController:
             logger.error(f"Serial exception in read loop — connection lost: {e}")
             self._handle_disconnect()
             break
-                logger.error(f"Error in read loop: {e}")
-                time.sleep(0.1)
     
     def _parse_position(self, line: str):
         """Parse Marlin position response: X:0.00 Y:0.00 Z:0.00 A:0.00"""
