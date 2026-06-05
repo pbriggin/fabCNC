@@ -2672,10 +2672,27 @@ def main_page():
                             log_cfg = load_logging_config()
                             ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
 
-        # Per-page state for disconnect notification and resume dialog
-        _disconnect_notif: list = [None]   # list so inner fn can rebind
+        # Per-page state for disconnect banner and resume dialog
         _prev_status_local: list = [None]
         _resume_dialog_shown: list = [False]
+
+        # Persistent disconnect banner pinned to the bottom of the viewport.
+        # Hidden by default; shown while status == 'Disconnected'.
+        disconnect_banner = ui.card().style(
+            'position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); '
+            'z-index: 9999; background: #4a2d2d; border: 1px solid #7a3d3d; '
+            'color: #ffb4b4; padding: 14px 22px; border-radius: 8px; '
+            'box-shadow: 0 6px 18px rgba(0,0,0,0.5); min-width: 360px;'
+        )
+        with disconnect_banner:
+            with ui.row().classes('items-center gap-3 no-wrap'):
+                ui.icon('error_outline', size='28px').style('color: #ff6b6b;')
+                with ui.column().classes('gap-0'):
+                    ui.label('Controller disconnected') \
+                        .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
+                    ui.label('Attempting to reconnect…') \
+                        .classes('text-caption').style('color: #ffb4b4;')
+        disconnect_banner.set_visibility(False)
 
         def _show_resume_dialog():
             _resume_dialog_shown[0] = True
@@ -2711,13 +2728,9 @@ def main_page():
                 _prev_status_local[0] = current_status
                 if current_status == 'Disconnected':
                     _resume_dialog_shown[0] = False
-                    _disconnect_notif[0] = ui.notification(
-                        'Controller disconnected.', type='negative', timeout=0
-                    )
+                    disconnect_banner.set_visibility(True)
                 elif prev in ('Disconnected', 'Reconnecting...'):
-                    if _disconnect_notif[0]:
-                        _disconnect_notif[0].dismiss()
-                        _disconnect_notif[0] = None
+                    disconnect_banner.set_visibility(False)
                     ui.notify('Controller reconnected.', type='positive')
                     if cnc_controller.has_resume_state() and not _resume_dialog_shown[0]:
                         _show_resume_dialog()
