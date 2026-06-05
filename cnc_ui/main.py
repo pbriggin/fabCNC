@@ -2675,6 +2675,7 @@ def main_page():
         # Per-page state for disconnect banner and resume dialog
         _prev_status_local: list = [None]
         _resume_dialog_shown: list = [False]
+        _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
 
         # Persistent disconnect banner pinned to the bottom of the viewport.
         # Hidden by default; shown while status == 'Disconnected'.
@@ -2724,16 +2725,32 @@ def main_page():
 
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
+
+            # Track whether we've ever seen a disconnect since this page loaded.
+            if current_status in ('Disconnected', 'Reconnecting...'):
+                _was_disconnected[0] = True
+                disconnect_banner.set_visibility(True)
+                _resume_dialog_shown[0] = False
+
             if prev != current_status:
                 _prev_status_local[0] = current_status
-                if current_status == 'Disconnected':
-                    _resume_dialog_shown[0] = False
-                    disconnect_banner.set_visibility(True)
-                elif prev in ('Disconnected', 'Reconnecting...'):
-                    disconnect_banner.set_visibility(False)
-                    ui.notify('Controller reconnected.', type='positive')
-                    if cnc_controller.has_resume_state() and not _resume_dialog_shown[0]:
-                        _show_resume_dialog()
+
+            # Show resume dialog only once, and only when:
+            #   - we previously saw a disconnect on this page
+            #   - the controller is actually reconnected and idle now
+            #   - a resume state file exists
+            #   - we haven't already shown the dialog
+            if (
+                _was_disconnected[0]
+                and not _resume_dialog_shown[0]
+                and cnc_controller.connected
+                and current_status == 'Idle'
+            ):
+                disconnect_banner.set_visibility(False)
+                ui.notify('Controller reconnected.', type='positive')
+                _was_disconnected[0] = False
+                if cnc_controller.has_resume_state():
+                    _show_resume_dialog()
 
         ui.timer(0.1, _update_ui_timer)
 
