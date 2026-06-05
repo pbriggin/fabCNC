@@ -4,13 +4,18 @@ CNC controller interface - provides methods for controlling the CNC machine.
 This implementation communicates with Marlin firmware via serial.
 """
 
+import json
 import time
 import threading
+from pathlib import Path
 import serial
 import serial.tools.list_ports
 from typing import Optional
 from .state import machine_state
 import logging
+
+# Persisted between runs — written on disconnect, deleted on successful resume
+_RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
 
 try:
     # Structured logging helpers — present whenever main.py has been imported.
@@ -55,6 +60,8 @@ class CNCController:
         self.buffer_size = 8  # Keep this many commands ahead to prevent pauses
         
         # Try to connect on initialization
+        self.homed = False              # True only after a successful home_all()
+        self._current_job_gcode: list = []  # Copy of last started job's gcode
         self._auto_connect()
     
     def _auto_connect(self) -> bool:
@@ -116,6 +123,199 @@ class CNCController:
             logger.error(f"Error during auto-connect: {e}")
             return False
     
+    def _handle_disconnect(self) -> None:
+        """Handle an unexpected serial disconnection (e.g. controller power loss or USB drop)."""
+        if not self.connected:
+            return  # Already handled — avoid duplicate logging
+        logger.error("Serial connection lost — controller disconnected (power loss or USB fault)")
+        self.connected = False
+        self.homed = False
+        self.stop_requested = True  # Abort any running job
+        self.ok_event.set()   # Unblock any flow-control waits in _execute_job
+        machine_state.set_status("Disconnected", busy=False)
+        log_controller_event("serial_disconnect")
+        self._save_resume_state()
+        if _log_uploader:
+            _log_uploader.log_system_snapshot(trigger="serial_disconnect")
+            threading.Thread(
+                target=_log_uploader.upload_now,
+                args=(False, "disconnect"),
+                daemon=True,
+                name="log-upload-on-disconnect",
+            ).start()
+        self._start_reconnect_loop()
+
+    def _start_reconnect_loop(self) -> None:
+        """Background thread: waits for the serial device to re-enumerate then reconnects."""
+        def _worker():
+            # Close the stale port first
+            if self.serial_port:
+                try:
+                    self.serial_port.close()
+                except Exception:
+                    pass
+                self.serial_port = None
+
+            attempt = 0
+            while not self.connected:
+                attempt += 1
+                machine_state.set_status("Reconnecting...", busy=False)
+                logger.info(f"Reconnection attempt {attempt}...")
+                if self._auto_connect():
+                    logger.info(f"Reconnected on attempt {attempt}")
+                    self.stop_requested = False
+                    machine_state.set_status("Idle", busy=False)
+                    log_controller_event("serial_reconnect", attempt=attempt)
+                    return
+                time.sleep(3.0)
+
+        threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
+
+    # ==================== Resume After Disconnect ====================
+
+    def has_resume_state(self) -> bool:
+        """Check whether a resume-state file was saved after a disconnect."""
+        return _RESUME_STATE_FILE.exists()
+
+    def _get_safe_height(self, commands: list) -> float | None:
+        """Find the tool travel (safe) height from the first G0 Z in the preamble."""
+        for cmd in commands[:30]:
+            upper = cmd.strip().upper()
+            if upper.startswith('G0 Z') or upper.startswith('G0Z'):
+                try:
+                    z_str = upper.split('Z', 1)[1].split('F')[0].strip()
+                    return float(z_str)
+                except (ValueError, IndexError):
+                    pass
+        return None
+
+    def _find_safe_resume_index(self, commands: list, last_acked: int) -> int:
+        """
+        Scan backward from last_acked to find the last G0 Z<safe_height> command.
+        That is a 'tool up, between shapes' position — safe to rapid to and resume from.
+        """
+        safe_z = self._get_safe_height(commands)
+        search_to = min(last_acked, len(commands) - 1)
+        for i in range(search_to, -1, -1):
+            upper = commands[i].strip().upper()
+            if upper.startswith('G0 Z') or upper.startswith('G0Z'):
+                if safe_z is not None:
+                    try:
+                        z_str = upper.split('Z', 1)[1].split('F')[0].strip()
+                        z_val = float(z_str)
+                        if abs(z_val - safe_z) < 0.5:
+                            return i
+                    except (ValueError, IndexError):
+                        pass
+                else:
+                    return i  # No known safe height — take the first G0 Z found
+        logger.warning("No safe G0 Z resume point found; defaulting to command 0")
+        return 0
+
+    def _extract_preamble(self, commands: list) -> list:
+        """
+        Return setup commands from the job header (before the first G0/G1 motion),
+        excluding G28 homing lines (machine is already homed at resume time).
+        """
+        preamble = []
+        for cmd in commands:
+            upper = cmd.strip().upper()
+            if upper.startswith('G0') or upper.startswith('G1'):
+                break
+            if not upper.startswith('G28'):
+                preamble.append(cmd)
+        return preamble
+
+    def _save_resume_state(self) -> None:
+        """Persist enough information to resume the job after a reconnect + re-home."""
+        if not self._current_job_gcode:
+            return  # No job was running
+        with self.ok_lock:
+            last_acked = self.ok_count
+        if last_acked == 0:
+            return  # Job hadn't meaningfully started
+        safe_idx = self._find_safe_resume_index(self._current_job_gcode, last_acked)
+        pct = last_acked / len(self._current_job_gcode) * 100
+        state = {
+            'filename': machine_state.loaded_filename,
+            'safe_resume_index': safe_idx,
+            'last_acked_index': last_acked,
+            'total_commands': len(self._current_job_gcode),
+            'gcode': self._current_job_gcode,
+        }
+        try:
+            _RESUME_STATE_FILE.write_text(json.dumps(state))
+            logger.info(
+                f"Resume state saved: safe_resume_index={safe_idx}, "
+                f"last_acked={last_acked}/{len(self._current_job_gcode)} "
+                f"({pct:.1f}% complete)"
+            )
+            log_controller_event(
+                "resume_state_saved",
+                filename=machine_state.loaded_filename,
+                safe_resume_index=safe_idx,
+                last_acked_index=last_acked,
+                total_commands=len(self._current_job_gcode),
+                pct_complete=round(pct, 1),
+            )
+        except Exception as e:
+            logger.error(f"Failed to save resume state: {e}")
+
+    def resume_from_disconnect(self) -> bool:
+        """
+        Resume a job from the saved disconnect state.
+        Machine must be homed (home_all) before calling this.
+        """
+        if not self.homed:
+            logger.warning("resume_from_disconnect: machine not homed")
+            return False
+        if not _RESUME_STATE_FILE.exists():
+            logger.warning("resume_from_disconnect: no saved state file")
+            return False
+        try:
+            state = json.loads(_RESUME_STATE_FILE.read_text())
+        except Exception as e:
+            logger.error(f"Failed to load resume state: {e}")
+            return False
+
+        gcode = state.get('gcode', [])
+        safe_idx = state.get('safe_resume_index', 0)
+        if not gcode or safe_idx >= len(gcode):
+            logger.error("Resume state is invalid or index out of range")
+            return False
+
+        preamble = self._extract_preamble(gcode)
+        resume_commands = preamble + gcode[safe_idx:]
+        logger.info(
+            f"Resuming from index {safe_idx}/{len(gcode)} — "
+            f"skipping {safe_idx} commands, {len(resume_commands)} remaining"
+        )
+        log_controller_event(
+            "job_resume_disconnect",
+            filename=state.get('filename'),
+            safe_resume_index=safe_idx,
+            last_acked_index=state.get('last_acked_index'),
+            total=len(gcode),
+        )
+
+        # Clear saved state so it isn't offered again after a clean finish
+        try:
+            _RESUME_STATE_FILE.unlink()
+        except Exception:
+            pass
+
+        self.stop_requested = False
+        self.pause_requested = False
+        self._current_job_gcode = resume_commands
+        self.job_thread = threading.Thread(
+            target=self._execute_job,
+            args=(resume_commands,),
+            daemon=True,
+            name="job-resume",
+        )
+        self.job_thread.start()
+        return True
+
     def _send_command(self, command: str) -> bool:
         """Send a G-code command to Marlin."""
         if not self.serial_port or not self.serial_port.is_open:
@@ -199,7 +399,17 @@ class CNCController:
                             logger.warning(f"Controller error: {line}")
                         
                 time.sleep(0.005)  # 5ms polling rate
-            except Exception as e:
+        except OSError as e:
+            if e.errno == 5:  # EIO — USB/serial device disconnected (e.g. SKR board power loss)
+                logger.error(f"Serial device disconnected (EIO) — likely controller power loss: {e}")
+                self._handle_disconnect()
+                break
+            logger.error(f"Error in read loop: {e}")
+            time.sleep(0.1)
+        except serial.SerialException as e:
+            logger.error(f"Serial exception in read loop — connection lost: {e}")
+            self._handle_disconnect()
+            break
                 logger.error(f"Error in read loop: {e}")
                 time.sleep(0.1)
     
@@ -360,9 +570,10 @@ class CNCController:
         
         # Disable steppers after homing
         self._send_command("M18")
-        
+
         machine_state.set_status("Idle", busy=False)
-    
+        self.homed = True
+
     # ==================== Job Execution ====================
     
     def run_utility_sequence(self, gcode_lines: list[str]) -> None:
@@ -398,6 +609,7 @@ class CNCController:
         
         self.stop_requested = False
         self.pause_requested = False
+        self._current_job_gcode = list(gcode_lines)
         log_controller_event(
             "job_start",
             command_count=len(gcode_lines),
@@ -620,13 +832,17 @@ class CNCController:
                 if _log_uploader:
                     threading.Thread(
                         target=_log_uploader.upload_now,
-                        args=(False,),
+                        args=(False, "job_complete"),
                         daemon=True,
                         name="log-upload-on-complete",
                     ).start()
             else:
                 machine_state.reset_job()
-                machine_state.set_status("Stopped", busy=False)
+                if self.connected:
+                    machine_state.set_status("Stopped", busy=False)
+                else:
+                    # Disconnect handler already set status to "Disconnected" — restore it
+                    machine_state.set_status("Disconnected", busy=False)
                 log_controller_event(
                     "job_aborted",
                     sent=sent_count,
@@ -636,7 +852,7 @@ class CNCController:
                 if _log_uploader:
                     threading.Thread(
                         target=_log_uploader.upload_now,
-                        args=(False,),
+                        args=(False, "job_abort"),
                         daemon=True,
                         name="log-upload-on-abort",
                     ).start()
