@@ -177,6 +177,13 @@ class CNCController:
         """Check whether a resume-state file was saved after a disconnect."""
         return _RESUME_STATE_FILE.exists()
 
+    def clear_resume_state(self) -> None:
+        """Delete the resume-state file without resuming (user chose to discard)."""
+        try:
+            _RESUME_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _get_safe_height(self, commands: list) -> float | None:
         """Find the tool travel (safe) height from the first G0 Z in the preamble."""
         for cmd in commands[:30]:
@@ -229,10 +236,12 @@ class CNCController:
     def _save_resume_state(self) -> None:
         """Persist enough information to resume the job after a reconnect + re-home."""
         if not self._current_job_gcode:
+            logger.warning("_save_resume_state: skipped — no job gcode in memory (no job was running)")
             return  # No job was running
         with self.ok_lock:
             last_acked = self.ok_count
         if last_acked == 0:
+            logger.warning("_save_resume_state: skipped — ok_count is 0 (job had not started sending)")
             return  # Job hadn't meaningfully started
         safe_idx = self._find_safe_resume_index(self._current_job_gcode, last_acked)
         pct = last_acked / len(self._current_job_gcode) * 100
@@ -702,6 +711,10 @@ class CNCController:
                 line = line.split(';')[0].strip()
             if line and not line.startswith('#'):
                 commands.append(line)
+
+        # Update _current_job_gcode to the filtered list so that ok_count
+        # (which tracks acked filtered commands) is a valid index into it.
+        self._current_job_gcode = commands
         
         total_commands = len(commands)
         # Flow control: keep some commands in flight but don't overflow Marlin's buffer

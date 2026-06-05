@@ -1052,13 +1052,7 @@ def create_job_controls():
         job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px; margin-top: 8px;')
         job_progress.bind_value_from(machine_state, 'job_progress')
 
-        _resume_disconnect_btn = ui.button(
-            'Resume Disconnected Job', icon='settings_backup_restore',
-            on_click=resume_disconnect_job,
-        ).props('dense flat').classes('w-full') \
-         .style('font-size: 13px; background-color: #2a2a2a; color: #FFA726; margin-top: 4px;')
-        _resume_disconnect_btn.set_visibility(False)
-        return _resume_disconnect_btn
+        return None  # resume button removed — resume is now a popup on reconnect
 
 
 # Event handlers
@@ -1862,16 +1856,13 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
             status_icon.classes(add='text-green-4', remove='text-red-5 text-yellow-4')
             status_label.classes(add='text-green-4', remove='text-red-5 text-yellow-4')
 
-    # Detect status changes and show notifications
+    # Detect status changes and show notifications (Complete/Error only — 
+    # disconnect/reconnect handled per-page in _update_ui_timer)
     if _previous_status['text'] != current_status:
         if current_status == 'Complete':
             ui.notify('Job completed successfully!', type='positive')
         elif current_status == 'Error':
             ui.notify('Job error!', type='negative')
-        elif current_status == 'Disconnected':
-            ui.notify('Controller disconnected.', type='negative', timeout=0)
-        elif current_status == 'Idle' and _previous_status['text'] in ('Disconnected', 'Reconnecting...'):
-            ui.notify('Controller reconnected.', type='positive')
         _previous_status['text'] = current_status
 
 
@@ -2282,7 +2273,7 @@ def main_page():
                         with ui.column().classes('gap-2').style('flex: 0 0 200px; max-height: 100%; overflow-y: auto;'):
                             create_file_controls()
                             ui.separator()
-                            _resume_disconnect_btn = create_job_controls()
+                            create_job_controls()
                         
                         # Center column: Toolbar + Interactive Toolpath Canvas (Fabric.js)
                         global toolpath_canvas
@@ -2680,15 +2671,51 @@ def main_page():
                             log_cfg = load_logging_config()
                             ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
 
+        # Per-page state for disconnect notification and resume dialog
+        _disconnect_notif: list = [None]   # list so inner fn can rebind
+        _prev_status_local: list = [None]
+        _resume_dialog_shown: list = [False]
+
+        def _show_resume_dialog():
+            _resume_dialog_shown[0] = True
+            with ui.dialog().props('persistent') as dlg, \
+                 ui.card().style('background:#1e1e1e; min-width:340px; padding:20px;'):
+                ui.label('Resume interrupted job?') \
+                    .classes('text-h6').style('color:#fff; margin-bottom:6px;')
+                ui.label(
+                    'The controller reconnected. Continue from the last safe position?'
+                ).classes('text-body2').style('color:#aaa;')
+                with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
+                    ui.button('Discard', on_click=lambda: (
+                        cnc_controller.clear_resume_state(), dlg.close()
+                    )).props('flat').style('color:#aaa;')
+                    ui.button(
+                        'Resume Job', icon='settings_backup_restore',
+                        on_click=lambda: (resume_disconnect_job(), dlg.close()),
+                    ).style('background:#FFA726; color:#000;')
+            dlg.open()
+
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label, status_pill, status_icon)
-            has_resume = cnc_controller.has_resume_state()
-            _resume_disconnect_btn.set_visibility(has_resume)
-            if has_resume:
-                _resume_disconnect_btn.set_enabled(
-                    machine_state.is_idle() and cnc_controller.homed
-                )
+
+            current_status = machine_state.status_text
+            prev = _prev_status_local[0]
+            if prev != current_status:
+                _prev_status_local[0] = current_status
+                if current_status == 'Disconnected':
+                    _resume_dialog_shown[0] = False
+                    _disconnect_notif[0] = ui.notification(
+                        'Controller disconnected.', type='negative', timeout=0
+                    )
+                elif prev in ('Disconnected', 'Reconnecting...'):
+                    if _disconnect_notif[0]:
+                        _disconnect_notif[0].dismiss()
+                        _disconnect_notif[0] = None
+                    ui.notify('Controller reconnected.', type='positive')
+                    if cnc_controller.has_resume_state() and not _resume_dialog_shown[0]:
+                        _show_resume_dialog()
+
         ui.timer(0.1, _update_ui_timer)
 
 
