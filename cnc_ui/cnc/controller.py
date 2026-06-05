@@ -294,10 +294,21 @@ class CNCController:
             return False
 
         preamble = self._extract_preamble(gcode)
-        resume_commands = preamble + gcode[safe_idx:]
+        safe_z = self._get_safe_height(gcode)
+        # Explicit tool-up before anything else: after homing Z is at machine
+        # zero, but we want to guarantee we're at the job's safe travel height
+        # before any X/Y move can happen.
+        safety_lift = []
+        if safe_z is not None:
+            safety_lift = [
+                f"; --- resume safety lift to Z={safe_z} ---",
+                f"G0 Z{safe_z} F1200",
+            ]
+        resume_commands = preamble + safety_lift + gcode[safe_idx:]
         logger.info(
             f"Resuming from index {safe_idx}/{len(gcode)} — "
-            f"skipping {safe_idx} commands, {len(resume_commands)} remaining"
+            f"skipping {safe_idx} commands, {len(resume_commands)} remaining "
+            f"(safe_z={safe_z})"
         )
         log_controller_event(
             "job_resume_disconnect",
