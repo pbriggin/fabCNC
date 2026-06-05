@@ -2689,9 +2689,14 @@ def main_page():
                     ui.button('Discard', on_click=lambda: (
                         cnc_controller.clear_resume_state(), dlg.close()
                     )).props('flat').style('color:#aaa;')
+
+                    async def _do_resume():
+                        dlg.close()
+                        await resume_disconnect_job()
+
                     ui.button(
                         'Resume Job', icon='settings_backup_restore',
-                        on_click=lambda: (resume_disconnect_job(), dlg.close()),
+                        on_click=_do_resume,
                     ).style('background:#FFA726; color:#000;')
             dlg.open()
 
