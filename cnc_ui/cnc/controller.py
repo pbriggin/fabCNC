@@ -310,6 +310,40 @@ class CNCController:
             f"skipping {safe_idx} commands, {len(resume_commands)} remaining "
             f"(safe_z={safe_z})"
         )
+
+        # --- Debug: save the exact gcode we're about to stream, plus context ---
+        try:
+            from datetime import datetime as _dt
+            debug_dir = Path(__file__).resolve().parent.parent / 'uploads' / 'gcode_output'
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+            ctx_start = max(0, safe_idx - 10)
+            ctx_lines = [
+                "; ============ RESUME DEBUG DUMP ============",
+                f"; filename:           {state.get('filename')}",
+                f"; total_commands:     {len(gcode)}",
+                f"; last_acked_index:   {state.get('last_acked_index')}",
+                f"; safe_resume_index:  {safe_idx}",
+                f"; safe_z:             {safe_z}",
+                f"; preamble_lines:     {len(preamble)}",
+                f"; safety_lift_lines:  {len(safety_lift)}",
+                f"; resume_total_lines: {len(resume_commands)}",
+                "",
+                f"; ---- Context: original gcode[{ctx_start}:{safe_idx + 5}] ----",
+            ]
+            for i in range(ctx_start, min(safe_idx + 5, len(gcode))):
+                marker = "  >>"  if i == safe_idx else "    "
+                ctx_lines.append(f"; {i:6d} {marker} {gcode[i]}")
+            ctx_lines += [
+                "",
+                "; ============ ACTUAL STREAM TO MARLIN ============",
+                "",
+            ]
+            debug_path = debug_dir / f"resume_{ts}.gcode"
+            debug_path.write_text("\n".join(ctx_lines + resume_commands) + "\n")
+            logger.info(f"Resume debug dump saved: {debug_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write resume debug dump: {e}")
         log_controller_event(
             "job_resume_disconnect",
             filename=state.get('filename'),
