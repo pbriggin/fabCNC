@@ -151,6 +151,24 @@ def debug_bundle():
     )
 
 
+@app.get('/canvas/download/{filename}')
+def canvas_download(filename: str):
+    """Download a saved canvas JSON file to the browser."""
+    # Prevent path traversal — only allow plain filenames with .json extension
+    safe_name = Path(filename).name
+    if not safe_name.endswith('.json') or safe_name != filename or '..' in filename:
+        return JSONResponse({'error': 'Invalid filename'}, status_code=400)
+    filepath = file_manager.upload_dir / safe_name
+    if not filepath.exists():
+        return JSONResponse({'error': 'File not found'}, status_code=404)
+    content = filepath.read_bytes()
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type='application/json',
+        headers={'Content-Disposition': f'attachment; filename="{safe_name}"'}
+    )
+
+
 @app.post('/logs/upload-now')
 def logs_upload_now(full: bool = False):
     """Trigger an immediate remote log upload using the configured webhook."""
@@ -1306,86 +1324,137 @@ async def handle_file_upload(event):
 
 
 async def save_canvas_state():
-    """Save current canvas state to a JSON file with user-provided name."""
-    global current_toolpath_shapes
-    
-    # Create dialog for naming the save
-    with ui.dialog() as dialog, ui.card().classes('w-80'):
-        ui.label('Save Canvas').classes('text-h5 font-bold')
-        
-        name_input = ui.input('Filename', value='').props('autofocus outlined').classes('w-full')
-        warning_label = ui.label('').classes('text-warning')
-        
-        # Track whether the user has already been warned about an existing file
-        overwrite_confirmed = {'value': False}
-        
+    """Save current canvas state — shows all existing canvases with overwrite, download, and delete options."""
+    import glob
+
+    pattern = os.path.join(file_manager.upload_dir, '*.json')
+    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+    overwrite_confirmed = {'value': False}
+    save_btn_ref = {}
+
+    with ui.dialog() as dialog, ui.card().style('width: 540px; max-width: 95vw; background: #1e1e1e;'):
+        ui.label('Save Canvas').classes('text-h5 font-bold').style('color: #fff;')
+
+        # ── Existing saves list ──────────────────────────────────────────
+        if files:
+            ui.label('Existing saves — click a name to fill the field below').style(
+                'color: #aaa; font-size: 12px; margin-top: 4px;'
+            )
+            with ui.column().classes('w-full gap-0').style(
+                'max-height: 260px; overflow-y: auto; border: 1px solid #333; border-radius: 4px;'
+            ):
+                for filepath in files[:50]:
+                    filename = os.path.basename(filepath)
+                    stem = filename[:-5] if filename.endswith('.json') else filename
+                    try:
+                        mtime = datetime.fromtimestamp(os.path.getmtime(filepath)).strftime('%m/%d %H:%M')
+                    except Exception:
+                        mtime = ''
+
+                    def _fill(s=stem):
+                        name_input.set_value(s)
+                        warning_label.set_text('')
+                        overwrite_confirmed['value'] = False
+                        if save_btn_ref.get('btn'):
+                            save_btn_ref['btn'].props('color=primary')
+                            save_btn_ref['btn'].set_text('Save')
+
+                    def _download(fp=filepath):
+                        safe = Path(fp).name
+                        ui.run_javascript(
+                            f"(function(){{const a=document.createElement('a');"
+                            f"a.href='/canvas/download/{safe}';"
+                            f"a.download='{safe}';"
+                            f"document.body.appendChild(a);a.click();document.body.removeChild(a);}})();"
+                        )
+
+                    with ui.row().classes('w-full items-center gap-1').style(
+                        'padding: 2px 6px; border-bottom: 1px solid #2a2a2a;'
+                    ) as row:
+                        ui.button(stem, on_click=_fill) \
+                            .classes('flex-1').props('flat align=left dense') \
+                            .style('color: #4a9eff; font-size: 13px; text-transform: none; justify-content: flex-start;')
+                        ui.label(mtime).style('color: #666; font-size: 11px; min-width: 72px; text-align: right;')
+                        ui.button(icon='download', on_click=_download) \
+                            .props('flat dense').style('color: #aaa;').tooltip('Download to computer')
+
+                        def _delete(fp=filepath, r=row):
+                            try:
+                                os.remove(fp)
+                                r.delete()
+                                log_event('canvas', 'canvas_deleted', filename=os.path.basename(fp))
+                                ui.notify(f'Deleted: {os.path.basename(fp)}', type='info')
+                            except Exception as ex:
+                                ui.notify(f'Error deleting: {ex}', type='negative')
+
+                        ui.button(icon='delete', on_click=_delete) \
+                            .props('flat dense color=negative').tooltip('Delete')
+
+        ui.separator().style('margin: 10px 0 4px;')
+
+        # ── Save-as input ────────────────────────────────────────────────
+        name_input = ui.input('Save as…', value='').props('autofocus outlined').classes('w-full')
+        warning_label = ui.label('').style('color: #FFA726; font-size: 12px; min-height: 18px;')
+
         async def do_save():
             try:
                 name = name_input.value.strip()
                 if not name:
                     ui.notify('Please enter a filename', type='warning')
                     return
-                
-                # Sanitize name - remove special characters
+
                 safe_name = ''.join(c if c.isalnum() or c in '-_ ' else '' for c in name).strip()
                 safe_name = safe_name.replace(' ', '_')
                 if not safe_name:
                     ui.notify('Invalid filename', type='warning')
                     return
-                
-                # Enforce filename length limit (ext4 NAME_MAX = 255 bytes)
-                # Reserve 5 bytes for ".json" extension
+
                 if not safe_name.endswith('.json'):
                     safe_name = safe_name[:250] + '.json'
                 else:
                     safe_name = safe_name[:255]
-                
+
                 filepath = os.path.join(file_manager.upload_dir, safe_name)
-                
-                # Check if file exists — warn on first click, allow on second
+
                 if os.path.exists(filepath) and not overwrite_confirmed['value']:
                     warning_label.set_text(f'"{safe_name}" already exists. Click Save again to overwrite.')
                     overwrite_confirmed['value'] = True
-                    save_btn.props('color=warning')
-                    save_btn.set_text('Overwrite')
+                    save_btn_ref['btn'].props('color=warning')
+                    save_btn_ref['btn'].set_text('Overwrite')
                     return
-                
-                # Reset overwrite state for next use
+
                 overwrite_confirmed['value'] = False
-                
-                # Get canvas data from JavaScript
-                # Use a generous timeout — the canvas JSON can be large on complex layouts
+
                 canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()', timeout=15.0)
-                
                 if not canvas_json:
                     ui.notify('No canvas data to save', type='warning')
                     dialog.close()
                     return
-                
-                # Inject cut settings into the saved JSON
+
                 state = json.loads(canvas_json)
                 state['cut_settings'] = cut_settings.copy()
                 canvas_json = json.dumps(state, indent=2)
-                
-                # Write to file
+
                 with open(filepath, 'w') as f:
                     f.write(canvas_json)
-                
+
                 ui.notify(f'Saved: {safe_name}', type='positive')
                 logger.info(f'Canvas state saved to {filepath}')
                 log_event('canvas', 'canvas_saved', filename=safe_name,
                           shape_count=len(state.get('shapes', {})),
                           cut_settings=cut_settings.copy())
                 dialog.close()
-                
+
             except Exception as e:
                 ui.notify(f'Error saving canvas: {str(e)}', type='negative')
                 logger.error(f'Error saving canvas: {e}')
-        
-        with ui.row().classes('w-full gap-2 mt-4'):
-            ui.button('Cancel', on_click=dialog.close).props('flat')
-            save_btn = ui.button('Save', on_click=do_save, color='primary')
-    
+
+        with ui.row().classes('w-full gap-2 mt-2'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+            btn = ui.button('Save', on_click=do_save, color='primary')
+            save_btn_ref['btn'] = btn
+
     dialog.open()
 
 
@@ -1401,71 +1470,87 @@ async def load_canvas_state():
         ui.notify('No saved canvases found', type='warning')
         return
     
-    # Create selection dialog
-    with ui.dialog() as dialog, ui.card().classes('w-96'):
-        ui.label('Load Saved Canvas').classes('text-h5 font-bold')
-        
-        file_list_container = ui.column().classes('gap-1 w-full').style('max-height: 400px; overflow-y: auto;')
-        
-        async def load_file(filepath):
-            global current_toolpath_shapes
-            try:
-                with open(filepath, 'r') as f:
-                    canvas_json = f.read()
-                
-                # Load into JavaScript canvas
-                await ui.run_javascript(f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})', timeout=15.0)
-                
-                # Parse and update Python state
-                state = json.loads(canvas_json)
-                current_toolpath_shapes = {}
-                for name, shape_data in state.get('shapes', {}).items():
-                    current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
-                
-                # Restore cut settings if saved
-                saved_cut = state.get('cut_settings', {})
-                if saved_cut.get('pressure') in PRESSURE_MAP:
-                    apply_cut_pressure(saved_cut['pressure'])
-                    if _pressure_select_ref['el']:
-                        _pressure_select_ref['el'].set_value(saved_cut['pressure'])
-                if saved_cut.get('speed') in SPEED_MAP:
-                    apply_cut_speed(saved_cut['speed'])
-                    if _speed_select_ref['el']:
-                        _speed_select_ref['el'].set_value(saved_cut['speed'])
-                
-                machine_state.set_job_loaded(True, os.path.basename(filepath))
-                machine_state.set_toolpath_generated(False)  # Clear toolpath since shapes changed
-                ui.notify(f'Canvas loaded: {os.path.basename(filepath)}', type='positive')
-                log_event('canvas', 'canvas_loaded', filename=os.path.basename(filepath),
-                          shape_count=len(current_toolpath_shapes),
-                          cut_settings=saved_cut)
-                dialog.close()
-                
-            except Exception as e:
-                ui.notify(f'Error loading canvas: {str(e)}', type='negative')
-                logger.error(f'Error loading canvas: {e}')
-        
-        def delete_file(filepath, row):
-            """Delete a saved canvas file."""
-            try:
-                os.remove(filepath)
-                row.delete()
-                log_event('canvas', 'canvas_deleted', filename=os.path.basename(filepath))
-                ui.notify(f'Deleted: {os.path.basename(filepath)}', type='info')
-            except Exception as e:
-                ui.notify(f'Error deleting: {str(e)}', type='negative')
-        
-        # List files with load and delete buttons
-        with file_list_container:
-            for filepath in files[:30]:  # Limit to 30 files
+    with ui.dialog() as dialog, ui.card().style('width: 540px; max-width: 95vw; background: #1e1e1e;'):
+        ui.label('Load Canvas').classes('text-h5 font-bold').style('color: #fff;')
+
+        ui.label('Click a canvas to load it').style('color: #aaa; font-size: 12px; margin-top: 4px;')
+        with ui.column().classes('w-full gap-0').style(
+            'max-height: 400px; overflow-y: auto; border: 1px solid #333; border-radius: 4px;'
+        ):
+            for filepath in files[:50]:
                 filename = os.path.basename(filepath)
-                display_name = filename.replace('.json', '')
-                with ui.row().classes('w-full items-center gap-1') as row:
-                    ui.button(display_name, on_click=lambda f=filepath: load_file(f)).classes('flex-1').props('flat align=left')
-                    ui.button(icon='delete', on_click=lambda f=filepath, r=row: delete_file(f, r)).props('flat color=negative dense')
-        
-        ui.button('Cancel', on_click=dialog.close).props('flat').classes('mt-2')
-    
+                stem = filename[:-5] if filename.endswith('.json') else filename
+                try:
+                    mtime = datetime.fromtimestamp(os.path.getmtime(filepath)).strftime('%m/%d %H:%M')
+                except Exception:
+                    mtime = ''
+
+                def _download(fp=filepath):
+                    safe = Path(fp).name
+                    ui.run_javascript(
+                        f"(function(){{const a=document.createElement('a');"
+                        f"a.href='/canvas/download/{safe}';"
+                        f"a.download='{safe}';"
+                        f"document.body.appendChild(a);a.click();document.body.removeChild(a);}})();"
+                    )
+
+                async def _load(fp=filepath):
+                    global current_toolpath_shapes
+                    try:
+                        with open(fp, 'r') as f:
+                            canvas_json = f.read()
+                        await ui.run_javascript(
+                            f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})', timeout=15.0
+                        )
+                        state = json.loads(canvas_json)
+                        current_toolpath_shapes = {}
+                        for name, shape_data in state.get('shapes', {}).items():
+                            current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
+                        saved_cut = state.get('cut_settings', {})
+                        if saved_cut.get('pressure') in PRESSURE_MAP:
+                            apply_cut_pressure(saved_cut['pressure'])
+                            if _pressure_select_ref['el']:
+                                _pressure_select_ref['el'].set_value(saved_cut['pressure'])
+                        if saved_cut.get('speed') in SPEED_MAP:
+                            apply_cut_speed(saved_cut['speed'])
+                            if _speed_select_ref['el']:
+                                _speed_select_ref['el'].set_value(saved_cut['speed'])
+                        machine_state.set_job_loaded(True, os.path.basename(fp))
+                        machine_state.set_toolpath_generated(False)
+                        ui.notify(f'Canvas loaded: {os.path.basename(fp)}', type='positive')
+                        log_event('canvas', 'canvas_loaded', filename=os.path.basename(fp),
+                                  shape_count=len(current_toolpath_shapes),
+                                  cut_settings=saved_cut)
+                        dialog.close()
+                    except Exception as e:
+                        ui.notify(f'Error loading canvas: {str(e)}', type='negative')
+                        logger.error(f'Error loading canvas: {e}')
+
+                with ui.row().classes('w-full items-center gap-1').style(
+                    'padding: 2px 6px; border-bottom: 1px solid #2a2a2a;'
+                ) as row:
+                    ui.button(stem, on_click=_load) \
+                        .classes('flex-1').props('flat align=left dense') \
+                        .style('color: #4a9eff; font-size: 13px; text-transform: none; justify-content: flex-start;')
+                    ui.label(mtime).style('color: #666; font-size: 11px; min-width: 72px; text-align: right;')
+                    ui.button(icon='download', on_click=_download) \
+                        .props('flat dense').style('color: #aaa;').tooltip('Download to computer')
+
+                    def _delete(fp=filepath, r=row):
+                        try:
+                            os.remove(fp)
+                            r.delete()
+                            log_event('canvas', 'canvas_deleted', filename=os.path.basename(fp))
+                            ui.notify(f'Deleted: {os.path.basename(fp)}', type='info')
+                        except Exception as ex:
+                            ui.notify(f'Error deleting: {ex}', type='negative')
+
+                    ui.button(icon='delete', on_click=_delete) \
+                        .props('flat dense color=negative').tooltip('Delete')
+
+        with ui.row().classes('w-full mt-2'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
     dialog.open()
 
 
