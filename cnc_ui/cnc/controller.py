@@ -233,6 +233,35 @@ class CNCController:
                 preamble.append(cmd)
         return preamble
 
+    def _find_last_xy_before(self, commands: list, idx: int) -> tuple[float | None, float | None]:
+        """
+        Scan backward from idx for the last command that specifies both X and Y.
+        Returns (x, y) — the machine's position at the moment we want to resume.
+        Needed because gcode at safe_idx assumes the previous cut's end position,
+        but after a home + resume the machine is at (0, 0).
+        """
+        x_val: float | None = None
+        y_val: float | None = None
+        for i in range(min(idx, len(commands) - 1), -1, -1):
+            upper = commands[i].strip().upper()
+            if not (upper.startswith('G0') or upper.startswith('G1')):
+                continue
+            # Parse tokens like "X12.345", "Y-67.89"
+            for tok in upper.split():
+                if x_val is None and tok.startswith('X'):
+                    try:
+                        x_val = float(tok[1:])
+                    except ValueError:
+                        pass
+                elif y_val is None and tok.startswith('Y'):
+                    try:
+                        y_val = float(tok[1:])
+                    except ValueError:
+                        pass
+            if x_val is not None and y_val is not None:
+                return x_val, y_val
+        return x_val, y_val
+
     def _save_resume_state(self) -> None:
         """Persist enough information to resume the job after a reconnect + re-home."""
         if not self._current_job_gcode:
@@ -295,20 +324,38 @@ class CNCController:
 
         preamble = self._extract_preamble(gcode)
         safe_z = self._get_safe_height(gcode)
-        # Explicit tool-up before anything else: after homing Z is at machine
-        # zero, but we want to guarantee we're at the job's safe travel height
-        # before any X/Y move can happen.
+        resume_x, resume_y = self._find_last_xy_before(gcode, safe_idx)
+        # After homing, the machine is at (0, 0). The gcode at safe_idx assumes
+        # the previous cut's end position. We must:
+        #   1) lift to safe Z (above any material)
+        #   2) rapid to the last known X/Y (still at safe Z)
+        # before letting the resumed gcode plunge to cut depth.
         safety_lift = []
         if safe_z is not None:
-            safety_lift = [
-                f"; --- resume safety lift to Z={safe_z} ---",
-                f"G0 Z{safe_z} F1200",
-            ]
-        resume_commands = preamble + safety_lift + gcode[safe_idx:]
+            safety_lift.append(f"; --- resume safety lift to Z={safe_z} ---")
+            safety_lift.append(f"G0 Z{safe_z} F1200")
+        if resume_x is not None and resume_y is not None:
+            safety_lift.append(
+                f"; --- resume travel to last X/Y ({resume_x}, {resume_y}) at safe Z ---"
+            )
+            safety_lift.append(f"G0 X{resume_x} Y{resume_y} F12000")
+        # Our injected lift replaces the G0 Z<safe> that lives at safe_idx,
+        # so skip it to avoid a duplicate (harmless but noisy in logs).
+        resume_start = safe_idx
+        if safe_z is not None and resume_start < len(gcode):
+            head = gcode[resume_start].strip().upper()
+            if head.startswith('G0 Z') or head.startswith('G0Z'):
+                try:
+                    z_str = head.split('Z', 1)[1].split('F')[0].strip()
+                    if abs(float(z_str) - safe_z) < 0.5:
+                        resume_start += 1
+                except (ValueError, IndexError):
+                    pass
+        resume_commands = preamble + safety_lift + gcode[resume_start:]
         logger.info(
             f"Resuming from index {safe_idx}/{len(gcode)} — "
             f"skipping {safe_idx} commands, {len(resume_commands)} remaining "
-            f"(safe_z={safe_z})"
+            f"(safe_z={safe_z}, resume_xy=({resume_x}, {resume_y}))"
         )
 
         # --- Debug: save the exact gcode we're about to stream, plus context ---
@@ -325,6 +372,7 @@ class CNCController:
                 f"; last_acked_index:   {state.get('last_acked_index')}",
                 f"; safe_resume_index:  {safe_idx}",
                 f"; safe_z:             {safe_z}",
+                f"; resume_xy:          ({resume_x}, {resume_y})",
                 f"; preamble_lines:     {len(preamble)}",
                 f"; safety_lift_lines:  {len(safety_lift)}",
                 f"; resume_total_lines: {len(resume_commands)}",
