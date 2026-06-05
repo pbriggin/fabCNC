@@ -338,7 +338,7 @@ class CNCController:
             safety_lift.append(
                 f"; --- resume travel to last X/Y ({resume_x}, {resume_y}) at safe Z ---"
             )
-            safety_lift.append(f"G0 X{resume_x} Y{resume_y} F12000")
+            safety_lift.append(f"G0 X{resume_x} Y{resume_y} F10000")
         # Our injected lift replaces the G0 Z<safe> that lives at safe_idx,
         # so skip it to avoid a duplicate (harmless but noisy in logs).
         resume_start = safe_idx
