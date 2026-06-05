@@ -1040,6 +1040,7 @@ def create_job_controls():
         ).props('dense flat').classes('w-full') \
          .style('font-size: 13px; background-color: #2a2a2a; color: #FFA726; margin-top: 4px;')
         _resume_disconnect_btn.set_visibility(False)
+        return _resume_disconnect_btn
 
 
 # Event handlers
@@ -2196,7 +2197,7 @@ def main_page():
                         with ui.column().classes('gap-2').style('flex: 0 0 200px; max-height: 100%; overflow-y: auto;'):
                             create_file_controls()
                             ui.separator()
-                            create_job_controls()
+                            _resume_disconnect_btn = create_job_controls()
                         
                         # Center column: Toolbar + Interactive Toolpath Canvas (Fabric.js)
                         global toolpath_canvas
