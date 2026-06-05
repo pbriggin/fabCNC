@@ -1805,13 +1805,14 @@ def stop_job():
 
 
 async def resume_disconnect_job():
-    """Resume a job that was interrupted by a controller disconnect."""
-    if not cnc_controller.homed:
-        ui.notify('Home the machine before resuming.', type='warning')
-        return
-    if not await safety_confirm():
-        return
+    """Home the machine then resume a job interrupted by a controller disconnect."""
     log_event('job', 'resume_disconnect_clicked')
+    ui.notify('Homing before resume…', type='info')
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, cnc_controller.home_all)
+    if not cnc_controller.homed:
+        ui.notify('Homing failed — cannot resume.', type='negative')
+        return
     if not cnc_controller.resume_from_disconnect():
         ui.notify('Resume failed — no saved state found.', type='negative')
         return
@@ -2683,7 +2684,7 @@ def main_page():
                 ui.label('Resume interrupted job?') \
                     .classes('text-h6').style('color:#fff; margin-bottom:6px;')
                 ui.label(
-                    'The controller reconnected. Continue from the last safe position?'
+                    'The controller reconnected. The machine will re-home then continue from the last safe position.'
                 ).classes('text-body2').style('color:#aaa;')
                 with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
                     ui.button('Discard', on_click=lambda: (
