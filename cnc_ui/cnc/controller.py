@@ -5,6 +5,7 @@ This implementation communicates with Marlin firmware via serial.
 """
 
 import json
+import re
 import time
 import threading
 from pathlib import Path
@@ -16,6 +17,21 @@ import logging
 
 # Persisted between runs — written on disconnect, deleted on successful resume
 _RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
+
+# Marlin line-number protocol parsing. Used while a job is streaming so we can
+# recover from corrupted bytes on the serial link (under-voltage hiccups, USB
+# noise, etc.) via Marlin's built-in Resend mechanism.
+_OK_N_RE = re.compile(r"^ok\s+N(\d+)", re.IGNORECASE)
+_RESEND_RE = re.compile(r"Resend\s*:\s*(\d+)", re.IGNORECASE)
+_LAST_LINE_RE = re.compile(r"Last\s*Line\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _marlin_checksum(payload: str) -> int:
+    """XOR-of-bytes checksum used by Marlin for line-numbered commands."""
+    cs = 0
+    for b in payload.encode('utf-8'):
+        cs ^= b
+    return cs & 0xff
 
 try:
     # Structured logging helpers — present whenever main.py has been imported.
@@ -58,6 +74,24 @@ class CNCController:
         self.streaming_mode = False  # True when streaming a job
         # Buffer settings for streaming (Marlin typically has 4-16 command buffer)
         self.buffer_size = 8  # Keep this many commands ahead to prevent pauses
+
+        # Line-number protocol state (active only while streaming_mode is True).
+        # Each streamed line is wrapped as "N<n> <cmd>*<xor-cs>". Marlin will
+        # respond with `Resend: <n>` if the bytes arrived corrupted, allowing
+        # us to retransmit instead of silently skipping a move.
+        self.line_buffer_lock = threading.Lock()
+        self.next_line_number = 1            # N to assign to next new command
+        self.line_buffer: dict[int, str] = {}  # N -> raw command (no N, no cs)
+        self._max_line_buffer = 64           # keep ~recent history for resends
+        self.committed_line = 0              # highest N Marlin has confirmed done
+        self.resend_requested: Optional[int] = None  # lowest N Marlin wants resent
+        # Marlin replies to a bad-checksum line with up to three back-to-back
+        # lines (Error / Resend / ok), then exactly one trailing `ok`. This
+        # latch absorbs that single trailing `ok` so we don't credit it as
+        # forward progress. It's a one-shot per burst — additional Error/
+        # Resend lines within the same burst leave it set.
+        self.error_burst_pending = False
+        self.resend_total = 0                # cumulative resends in current job
         
         # Try to connect on initialization
         self.homed = False              # True only after a successful home_all()
@@ -267,10 +301,12 @@ class CNCController:
         if not self._current_job_gcode:
             logger.warning("_save_resume_state: skipped — no job gcode in memory (no job was running)")
             return  # No job was running
-        with self.ok_lock:
-            last_acked = self.ok_count
+        # committed_line is the highest N Marlin confirmed (1-indexed; N1 == commands[0]),
+        # so it is also the count of filtered commands successfully completed.
+        with self.line_buffer_lock:
+            last_acked = self.committed_line
         if last_acked == 0:
-            logger.warning("_save_resume_state: skipped — ok_count is 0 (job had not started sending)")
+            logger.warning("_save_resume_state: skipped — committed_line is 0 (job had not started sending)")
             return  # Job hadn't meaningfully started
         safe_idx = self._find_safe_resume_index(self._current_job_gcode, last_acked)
         pct = last_acked / len(self._current_job_gcode) * 100
@@ -442,6 +478,109 @@ class CNCController:
     def send_command(self, command: str) -> bool:
         """Public method to send a G-code command to Marlin."""
         return self._send_command(command)
+
+    # ==================== Line-numbered streaming (Marlin Resend protocol) ====================
+
+    @staticmethod
+    def _wrap_with_line_number(line_number: int, cmd: str) -> str:
+        """Build a checksummed line: 'N<n> <cmd>*<cs>' per Marlin's protocol."""
+        payload = f"N{line_number} {cmd}"
+        return f"{payload}*{_marlin_checksum(payload)}"
+
+    def _write_serial_payload(self, payload: str) -> bool:
+        """Write a fully-formed line (including any N/checksum) to the serial port."""
+        if not self.serial_port or not self.serial_port.is_open:
+            logger.error("Serial port not connected")
+            return False
+        try:
+            self.serial_port.write((payload + "\n").encode('utf-8'))
+            self.serial_port.flush()
+            return True
+        except Exception as e:
+            logger.error(f"Error writing serial payload '{payload}': {e}")
+            return False
+
+    def _emit_new_streamed(self, cmd: str) -> Optional[int]:
+        """Assign the next line number to `cmd`, buffer it for possible resend,
+        and write the wrapped form to the serial port."""
+        with self.line_buffer_lock:
+            n = self.next_line_number
+            self.next_line_number += 1
+            self.line_buffer[n] = cmd
+            if len(self.line_buffer) > self._max_line_buffer:
+                # Only drop entries Marlin has already confirmed — anything at
+                # or above committed_line might still be requested for resend.
+                droppable = sorted(k for k in self.line_buffer if k <= self.committed_line)
+                while len(self.line_buffer) > self._max_line_buffer and droppable:
+                    del self.line_buffer[droppable.pop(0)]
+        payload = self._wrap_with_line_number(n, cmd)
+        ok = self._write_serial_payload(payload)
+        logger.debug(f">>> SENT [N{n}]: {cmd}")
+        log_serial_tx(cmd, streaming=True, line_number=n)
+        if not ok:
+            log_serial_tx(cmd, streaming=True, line_number=n, error="write_failed")
+            return None
+        return n
+
+    def _resend_line(self, n: int) -> bool:
+        """Re-emit a previously-buffered line under its original line number."""
+        with self.line_buffer_lock:
+            cmd = self.line_buffer.get(n)
+        if cmd is None:
+            logger.error(
+                f"Resend requested for N{n} but command is no longer in buffer "
+                f"(committed_line={self.committed_line}, next_line={self.next_line_number}). "
+                f"Pausing job."
+            )
+            log_controller_event("resend_buffer_miss", line_number=n,
+                                 committed_line=self.committed_line)
+            self.pause_requested = True
+            return False
+        payload = self._wrap_with_line_number(n, cmd)
+        ok = self._write_serial_payload(payload)
+        self.resend_total += 1
+        logger.warning(f">>> RESEND [N{n}]: {cmd}")
+        log_serial_tx(cmd, streaming=True, line_number=n, resend=True)
+        return ok
+
+    def _drain_resends(self) -> int:
+        """Re-emit every line from the lowest requested N up to the latest
+        assigned line number. Loops until no new resend request appears
+        mid-drain. Returns the number of lines re-emitted."""
+        emitted = 0
+        guard = 0
+        while True:
+            with self.line_buffer_lock:
+                start = self.resend_requested
+                self.resend_requested = None
+                end = self.next_line_number  # exclusive
+            if start is None:
+                return emitted
+            if start >= end:
+                logger.warning(
+                    f"Resend N{start} requested but only N<{end} have been sent; ignoring."
+                )
+                return emitted
+            for n in range(start, end):
+                if self.stop_requested:
+                    return emitted
+                if not self._resend_line(n):
+                    return emitted
+                emitted += 1
+                # Mid-resend, throttle so we don't outrun Marlin's serial buffer.
+                while not self.stop_requested:
+                    with self.ok_lock:
+                        in_flight = (self.next_line_number - 1 + self.resend_total) - self.ok_count
+                    if in_flight < 6:
+                        break
+                    self.ok_event.clear()
+                    self.ok_event.wait(timeout=0.05)
+            guard += 1
+            if guard > 8:
+                logger.error("Resend drain ran 8 times without converging — pausing job")
+                log_controller_event("resend_drain_livelock")
+                self.pause_requested = True
+                return emitted
     
     def _read_response(self, timeout: float = 1.0) -> str:
         """Read response from Marlin until 'ok' is received."""
@@ -484,18 +623,22 @@ class CNCController:
                     if line:
                         logger.debug(f"<<< READ: {line}")
                         log_serial_rx(line, mode="async")
-                        
+
+                        # --- Line-number protocol bookkeeping (streaming only) ---
+                        if self.streaming_mode:
+                            self._handle_streaming_response(line)
+
                         # Track 'ok' responses for streaming flow control
                         if line.startswith("ok"):
                             with self.ok_lock:
                                 self.ok_count += 1
                             self.ok_event.set()  # Signal that ok was received
-                        
+
                         # Parse position updates (M114 response)
                         if line.startswith("X:"):
                             logger.info(f"PARSING POSITION: {line}")
                             self._parse_position(line)
-                        
+
                         # Log errors
                         if 'error' in line.lower() or 'err:' in line.lower():
                             logger.warning(f"Controller error: {line}")
@@ -513,6 +656,70 @@ class CNCController:
                 self._handle_disconnect()
                 break
     
+    def _handle_streaming_response(self, line: str) -> None:
+        """Update line-number / resend bookkeeping from a single Marlin response.
+
+        Called from the read loop while a job is streaming. Maintains
+        `committed_line` (highest N Marlin has confirmed), `resend_requested`
+        (lowest N Marlin still needs), and `error_burst_pending` (set while
+        an error/resend burst is awaiting its single trailing `ok`)."""
+        try:
+            # Marlin emits one `ok` per processed line *and* one `ok` after
+            # each error/resend burst. We absorb that single trailing `ok`
+            # via the `error_burst_pending` latch so it doesn't advance
+            # forward progress.
+            resend_m = _RESEND_RE.search(line)
+            last_line_m = _LAST_LINE_RE.search(line)
+            lower = line.lower()
+            is_error = lower.startswith("error") or "err:" in lower
+
+            if resend_m:
+                n = int(resend_m.group(1))
+                with self.line_buffer_lock:
+                    if self.resend_requested is None or n < self.resend_requested:
+                        self.resend_requested = n
+                    if n - 1 > self.committed_line:
+                        self.committed_line = n - 1
+                    self.error_burst_pending = True
+                logger.warning(f"Marlin requested resend from N{n}: {line}")
+                log_controller_event("resend_requested", line_number=n,
+                                     committed_line=self.committed_line,
+                                     next_line=self.next_line_number)
+                return
+
+            if is_error and last_line_m:
+                # Error reports its last good line. The matching Resend:
+                # (if any) arrives on the next line and shares the same
+                # trailing `ok` — so the latch is idempotent here.
+                n = int(last_line_m.group(1))
+                with self.line_buffer_lock:
+                    if n > self.committed_line:
+                        self.committed_line = n
+                    self.error_burst_pending = True
+                logger.warning(f"Marlin error during stream: {line}")
+                return
+
+            if line.startswith("ok") or line.startswith("OK"):
+                m = _OK_N_RE.match(line)
+                with self.line_buffer_lock:
+                    if m:
+                        n = int(m.group(1))
+                        if n > self.committed_line:
+                            self.committed_line = n
+                        # An explicit `ok N<n>` also ends any pending burst.
+                        self.error_burst_pending = False
+                    elif self.error_burst_pending:
+                        # This `ok` is the trailing ack of the error/resend burst.
+                        self.error_burst_pending = False
+                    else:
+                        # Bare `ok` — by FIFO it acks the next uncommitted line.
+                        if self.committed_line < self.next_line_number - 1:
+                            self.committed_line += 1
+        except Exception as e:
+            # Bookkeeping must never break the read loop.
+            logger.error(f"Error in _handle_streaming_response for {line!r}: {e}",
+                         exc_info=True)
+
     def _parse_position(self, line: str):
         """Parse Marlin position response: X:0.00 Y:0.00 Z:0.00 A:0.00"""
         try:
@@ -794,7 +1001,27 @@ class CNCController:
         # Reset ok counter
         with self.ok_lock:
             self.ok_count = 0
-        
+
+        # Reset line-number protocol state. After M110 N0, Marlin expects N1 next.
+        with self.line_buffer_lock:
+            self.next_line_number = 1
+            self.line_buffer.clear()
+            self.committed_line = 0
+            self.resend_requested = None
+            self.error_burst_pending = False
+            self.resend_total = 0
+        # M110 itself must be wrapped: 'N0 M110 N0*<cs>'. This both sets
+        # Marlin's expected line counter to 0 and is its own line 0.
+        reset_payload = self._wrap_with_line_number(0, "M110 N0")
+        if not self._write_serial_payload(reset_payload):
+            logger.error("Failed to send M110 N0 reset; aborting job")
+            self.streaming_mode = False
+            machine_state.set_status("Error", busy=False)
+            return
+        log_serial_tx("M110 N0", streaming=True, line_number=0)
+        # Give Marlin a moment to process the reset and emit its `ok`.
+        time.sleep(0.05)
+
         # Filter out empty lines and comments first
         commands = []
         for line in gcode_lines:
@@ -805,17 +1032,18 @@ class CNCController:
             if line and not line.startswith('#'):
                 commands.append(line)
 
-        # Update _current_job_gcode to the filtered list so that ok_count
-        # (which tracks acked filtered commands) is a valid index into it.
+        # Update _current_job_gcode to the filtered list so committed_line
+        # (which tracks acked filtered commands; N1 == commands[0]) is a
+        # valid index into it.
         self._current_job_gcode = commands
         
         total_commands = len(commands)
         # Flow control: keep some commands in flight but don't overflow Marlin's buffer
         max_in_flight = 8  # Conservative - Marlin has ~16 slot buffer
         throttle_threshold = 4  # Start waiting when this many in flight
-        logger.info(f"Starting job with {total_commands} commands")
+        logger.info(f"Starting job with {total_commands} commands (line-numbered streaming)")
         
-        sent_count = 0  # Commands sent
+        sent_count = 1  # We've already sent M110 N0 — counts toward the ok we expect
         last_progress_log = 0
         
         # Debug timing
@@ -837,15 +1065,27 @@ class CNCController:
                 
                 if self.stop_requested:
                     break
-                
-                # Send the command immediately
-                self._send_command(cmd)
+
+                # Resends take priority — drain anything Marlin asked us to
+                # retransmit before we put more new lines into its buffer.
+                drained = self._drain_resends()
+                if drained:
+                    sent_count += drained
+
+                # Send the command immediately (line-numbered, checksummed).
+                if self._emit_new_streamed(cmd) is None:
+                    logger.error("Streaming write failed; aborting job")
+                    break
                 sent_count += 1
                 
                 # Special handling only for blocking commands
                 if cmd.upper().startswith('G28'):  # Homing
                     # Wait for ALL pending commands to complete
                     while not self.stop_requested:
+                        # Drain any resends triggered by lines already in flight.
+                        drained = self._drain_resends()
+                        if drained:
+                            sent_count += drained
                         with self.ok_lock:
                             in_flight = sent_count - self.ok_count
                         if in_flight <= 0:
@@ -857,6 +1097,9 @@ class CNCController:
                 elif cmd.upper().startswith('G4'):  # Dwell
                     start = time.time()
                     while not self.stop_requested and (time.time() - start) < 30.0:
+                        drained = self._drain_resends()
+                        if drained:
+                            sent_count += drained
                         with self.ok_lock:
                             in_flight = sent_count - self.ok_count
                         if in_flight <= 0:
@@ -873,6 +1116,9 @@ class CNCController:
                         while not self.stop_requested and in_flight >= throttle_threshold:
                             self.ok_event.clear()
                             self.ok_event.wait(timeout=0.05)
+                            drained = self._drain_resends()
+                            if drained:
+                                sent_count += drained
                             with self.ok_lock:
                                 in_flight = sent_count - self.ok_count
                             
@@ -888,10 +1134,10 @@ class CNCController:
                         if this_wait > max_wait_time:
                             max_wait_time = this_wait
                 
-                # Update progress
-                with self.ok_lock:
-                    acked = self.ok_count
-                progress = min(1.0, acked / total_commands) if total_commands > 0 else 1.0
+                # Update progress — committed_line is the last N Marlin
+                # confirmed (1-indexed; N1 == commands[0]).
+                committed = self.committed_line
+                progress = min(1.0, committed / total_commands) if total_commands > 0 else 1.0
                 machine_state.update_job_progress(progress)
                 
                 # Log progress every 10%
@@ -901,14 +1147,21 @@ class CNCController:
                     with self.ok_lock:
                         in_flight = sent_count - self.ok_count
                     elapsed = time.time() - job_start_time
-                    avg_wait = (total_wait_time / wait_count * 1000) if wait_count > 0 else 0
-                    logger.info(f"Job progress: {progress*100:.0f}% (sent={sent_count}, acked={acked}, in_flight={in_flight}, elapsed={elapsed:.1f}s)")
+                    logger.info(
+                        f"Job progress: {progress*100:.0f}% "
+                        f"(committed=N{committed}/{total_commands}, "
+                        f"sent={sent_count}, in_flight={in_flight}, "
+                        f"resends={self.resend_total}, elapsed={elapsed:.1f}s)"
+                    )
             
             # Wait for all remaining commands to be acknowledged
             if not self.stop_requested:
                 logger.info("Waiting for remaining commands to complete...")
                 wait_start = time.time()
                 while True:
+                    drained = self._drain_resends()
+                    if drained:
+                        sent_count += drained
                     with self.ok_lock:
                         in_flight = sent_count - self.ok_count
                     if in_flight <= 0:
@@ -922,13 +1175,15 @@ class CNCController:
             
             # Job complete
             if not self.stop_requested:
-                logger.info("Job complete!")
+                logger.info(f"Job complete! ({self.resend_total} resends)")
                 machine_state.set_status("Complete", busy=False)
                 machine_state.update_job_progress(1.0)
                 log_controller_event(
                     "job_complete",
                     sent=sent_count,
                     acked=self.ok_count,
+                    committed=self.committed_line,
+                    resends=self.resend_total,
                     elapsed_s=round(time.time() - job_start_time, 2),
                     total_wait_s=round(total_wait_time, 2),
                     max_wait_s=round(max_wait_time, 2),
@@ -951,6 +1206,8 @@ class CNCController:
                     "job_aborted",
                     sent=sent_count,
                     acked=self.ok_count,
+                    committed=self.committed_line,
+                    resends=self.resend_total,
                     elapsed_s=round(time.time() - job_start_time, 2),
                 )
                 if _log_uploader:
