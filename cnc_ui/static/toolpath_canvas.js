@@ -19,6 +19,9 @@ let notchMode = false;
 let shapeNotches = {};       // shapeName -> Map<edgeIdx, {edgeIdx, x, y}> of active notches
 let notchNodeObjects = [];   // Clickable node circles on canvas (all shapes)
 let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
+// localStorage key for the notch snapshot — survives page reloads AND
+// dropped WebSockets. Mirrored on every shapeNotches mutation.
+const _NOTCH_LS_KEY = 'fabcncNotchesSnapshot';
 
 // Unit display mode
 let currentUnit = 'mm';  // 'mm' or 'in'
@@ -704,6 +707,7 @@ function clearShapes() {
     notchNodeObjects = [];
     Object.values(notchMarkObjects).forEach(arr => arr.forEach(obj => canvas.remove(obj)));
     notchMarkObjects = {};
+    try { localStorage.removeItem(_NOTCH_LS_KEY); } catch (e) {}
     // Also remove any other objects that aren't grid/work area/rulers
     const objectsToRemove = canvas.getObjects().filter(obj => 
         obj !== workAreaRect &&
@@ -1860,6 +1864,7 @@ function deleteShape() {
         delete notchMarkObjects[name];
         deletedNames.push(name);
     });
+    persistNotchesToLocalStorage();
     
     // Exit notch mode if no shapes remain
     if (Object.keys(shapes).length === 0) {
@@ -3702,7 +3707,67 @@ function toggleNotch(shapeName, nodeKey) {
 
     drawNotchMarksForShape(shapeName);
     showNotchNodes();  // Refresh highlighted state of node circles
+    persistNotchesToLocalStorage();
     emitNotchesChanged(shapeName);
+}
+
+// localStorage key for the notch snapshot — survives page reloads AND
+// dropped WebSockets. We mirror the full shapeNotches map here on every
+// change so a reconnect can rehydrate even if the 'notches_changed' event
+// never reached the server (e.g. socket was down at the moment of toggle).
+function persistNotchesToLocalStorage() {
+    try {
+        const snapshot = {};
+        Object.keys(shapeNotches).forEach(name => {
+            const notches = shapeNotches[name];
+            if (notches && notches.size > 0) {
+                snapshot[name] = [...notches.values()].map(nk => ({
+                    edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y
+                }));
+            }
+        });
+        if (Object.keys(snapshot).length === 0) {
+            localStorage.removeItem(_NOTCH_LS_KEY);
+        } else {
+            localStorage.setItem(_NOTCH_LS_KEY, JSON.stringify(snapshot));
+        }
+    } catch (e) {
+        // localStorage may be full / unavailable — degrade silently
+    }
+}
+
+// Hydrate shapeNotches from the localStorage snapshot. Only restores notches
+// for shapes that actually exist on the current canvas (stale entries from
+// deleted shapes are filtered out and the snapshot is rewritten clean).
+function restoreNotchesFromLocalStorage() {
+    try {
+        const raw = localStorage.getItem(_NOTCH_LS_KEY);
+        if (!raw) return;
+        const snapshot = JSON.parse(raw);
+        if (!snapshot || typeof snapshot !== 'object') return;
+        let restored = 0;
+        Object.keys(snapshot).forEach(name => {
+            if (!shapeData[name]) return;  // shape no longer exists
+            const arr = snapshot[name];
+            if (!Array.isArray(arr) || arr.length === 0) return;
+            shapeNotches[name] = new Map(
+                arr.map(k => [k.edgeIdx, { edgeIdx: k.edgeIdx, x: k.x, y: k.y }])
+            );
+            drawNotchMarksForShape(name);
+            restored += arr.length;
+        });
+        if (restored > 0) {
+            console.log('Restored', restored, 'notch(es) from localStorage');
+            if (notchMode) showNotchNodes();
+            canvas.renderAll();
+            // Rewrite snapshot to drop entries for shapes that no longer exist,
+            // and re-emit to the server so its in-memory mirror catches up.
+            persistNotchesToLocalStorage();
+            Object.keys(shapeNotches).forEach(emitNotchesChanged);
+        }
+    } catch (e) {
+        console.warn('restoreNotchesFromLocalStorage failed:', e);
+    }
 }
 
 // Send the FULL current notch list for a shape to the server so it can be
@@ -3735,6 +3800,7 @@ function restoreNotches(notchesDict) {
     });
     if (notchMode) showNotchNodes();
     canvas.renderAll();
+    persistNotchesToLocalStorage();
 }
 
 // Draw the V marks for all active notches on a shape
@@ -3908,6 +3974,7 @@ window.toolpathCanvas = {
     setNotchMode: setNotchMode,
     getNotches: getNotches,
     restoreNotches: restoreNotches,
+    restoreNotchesFromLocalStorage: restoreNotchesFromLocalStorage,
     // Rulers
     getRulerBounds: getRulerBounds,
     // Units
@@ -4295,7 +4362,7 @@ function updateToolhead(x, y) {
         'init', 'resize', 'getPositions', 'getCanvasData', 'getNotches',
         'getRulerBounds', 'isToolpathLocked', 'updateToolhead',
         'saveUndoState', 'addShape', 'clearShapes', 'showToolpath',
-        'clearToolpath', 'restoreNotches'
+        'clearToolpath', 'restoreNotches', 'restoreNotchesFromLocalStorage'
     ]);
     // Actions that produce huge return values — log a brief summary instead.
     const SUMMARIZE = new Set(['saveCanvasState', 'loadCanvasState']);

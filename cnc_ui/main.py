@@ -2491,6 +2491,17 @@ def main_page():
                                             )
                                         except Exception as exc:
                                             logger.warning(f'Could not restore notches after reconnect: {exc}')
+                                    # Also restore from the browser's localStorage snapshot.
+                                    # This catches notches the user toggled while the socket
+                                    # was DOWN (events were lost), since the JS writes to
+                                    # localStorage on every change regardless of socket state.
+                                    try:
+                                        await ui.run_javascript(
+                                            'window.toolpathCanvas.restoreNotchesFromLocalStorage()',
+                                            timeout=5.0,
+                                        )
+                                    except Exception as exc:
+                                        logger.warning(f'Could not restore notches from localStorage: {exc}')
                                     if machine_state.toolpath_generated:
                                         await asyncio.sleep(0.2)
                                         try:
