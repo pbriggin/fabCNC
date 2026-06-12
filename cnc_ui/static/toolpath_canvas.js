@@ -3039,6 +3039,12 @@ function redrawShapeFromData(shapeName) {
     data.initialLeft = newShape.left;
     data.initialTop = newShape.top;
     
+    // Refresh stored notch (x,y) anchors from the new points before drawing.
+    // edgeIdx is invariant under transforms that preserve point order (move,
+    // rotate, scale, mirror, nest); recomputing the midpoint anchors here
+    // keeps notch marks attached to the correct segment after ANY transform.
+    refreshNotchPositions(shapeName);
+
     // Redraw notch marks for this shape (they move with the shape)
     drawNotchMarksForShape(shapeName);
     // If in notch mode, refresh the node circles
@@ -3587,6 +3593,26 @@ function computeCardinalNodes(shapeName) {
     }
 
     return nodes;
+}
+
+// Recompute the (x,y) anchor of every active notch on a shape from the current
+// originalMmPoints, keyed by edgeIdx. Used by redrawShapeFromData so notches
+// follow any transform (move/rotate/scale/mirror/nest) automatically.
+function refreshNotchPositions(shapeName) {
+    const notches = shapeNotches[shapeName];
+    if (!notches || notches.size === 0) return;
+    const fresh = computeCardinalNodes(shapeName);
+    if (fresh.length === 0) return;
+    const byEdge = new Map(fresh.map(n => [n.edgeIdx, n]));
+    notches.forEach((nk, edgeIdx) => {
+        const fn = byEdge.get(edgeIdx);
+        if (fn) {
+            nk.x = fn.x;
+            nk.y = fn.y;
+        }
+        // If edgeIdx is no longer produced (segments changed), leave the stale
+        // anchor in place rather than dropping the notch silently.
+    });
 }
 
 // Render clickable node circles for all shapes (shown only in notch mode)
