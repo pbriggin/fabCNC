@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 from dxf_processing.dxf_processor import DXFProcessor
 from toolpath_planning.toolpath_generator import ToolpathGenerator
 from toolpath_planning.gcode_visualizer import GCodeVisualizer
+from toolpath_planning.overlap_detector import find_overlapping_pairs
 import logging
 import socket
 import subprocess
@@ -1626,7 +1627,26 @@ async def toggle_toolpath(button):
             print(f"ERROR fetching positions: {e}")
             import traceback
             traceback.print_exc()
-        
+
+        # Warn (dismissible) if any shapes overlap so the user doesn't cut into
+        # already-cut material or stack the blade on top of another piece.
+        try:
+            overlapping_pairs = find_overlapping_pairs(current_toolpath_shapes)
+        except Exception as e:
+            print(f"Overlap detection failed: {e}")
+            overlapping_pairs = []
+        if overlapping_pairs:
+            log_event('toolpath', 'overlap_warning_shown',
+                      pair_count=len(overlapping_pairs),
+                      pairs=overlapping_pairs[:20])
+            if not await overlap_warning_confirm(overlapping_pairs):
+                log_event('toolpath', 'overlap_warning_cancelled',
+                          pair_count=len(overlapping_pairs))
+                ui.notify('Toolpath generation cancelled', type='info')
+                return
+            log_event('toolpath', 'overlap_warning_dismissed',
+                      pair_count=len(overlapping_pairs))
+
         # Update toolpath generator with current Z cut height and homing preference
         toolpath_generator.cutting_height = z_cut_height['value']
         toolpath_generator.home_all = home_before_toolpath['enabled']
@@ -1716,6 +1736,47 @@ async def safety_confirm() -> bool:
 
     await dialog
     return confirmed
+
+
+async def overlap_warning_confirm(pairs):
+    """Warn about overlapping shapes. Returns True to proceed, False to cancel.
+
+    `pairs` is a list of (name_a, name_b) tuples reported by the overlap
+    detector. The dialog lists up to 10 pairs and lets the user dismiss the
+    warning (continue) or cancel toolpath generation."""
+    proceed = False
+    shown = pairs[:10]
+    extra = len(pairs) - len(shown)
+    with ui.dialog() as dialog, ui.card().classes('w-[28rem]'):
+        with ui.row().classes('items-center gap-2'):
+            ui.icon('warning', size='28px').style('color: #FFA726;')
+            ui.label('Overlapping Shapes Detected').classes('text-h6 font-bold')
+        ui.separator()
+        ui.label(
+            f'{len(pairs)} pair{"s" if len(pairs) != 1 else ""} of shapes appear '
+            'to overlap. Cutting overlapping shapes may damage the material or '
+            'the blade.'
+        ).classes('text-body2').style('margin: 8px 0; color: #ddd;')
+        with ui.column().classes('w-full').style(
+                'max-height: 180px; overflow-y: auto; '
+                'background: #1a1a1a; padding: 8px; border-radius: 4px;'):
+            for a, b in shown:
+                ui.label(f'• {a}  ↔  {b}').style('font-size: 12px; color: #FFCC80;')
+            if extra > 0:
+                ui.label(f'… and {extra} more').style('font-size: 12px; color: #888;')
+        with ui.row().classes('w-full justify-end gap-2').style('margin-top: 8px;'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
+            def _dismiss():
+                nonlocal proceed
+                proceed = True
+                dialog.close()
+
+            ui.button('Generate Anyway', on_click=_dismiss, icon='check') \
+                .style('background-color: #FFA726; color: #1a1a1a;')
+
+    await dialog
+    return proceed
 
 
 async def outline_job():
