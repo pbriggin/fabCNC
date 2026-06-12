@@ -1190,7 +1190,7 @@ async def change_cutting_wheel():
     ui.notify('Cutting wheel replacement complete!', type='positive')
 
 
-def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None):
+def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None, entity_types: dict = None):
     """Add shapes to canvas without clearing existing ones."""
     global toolpath_canvas
     
@@ -1206,12 +1206,14 @@ def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict 
                 y_vals = [p[1] for p in points]
                 logger.info(f"  Sending {shape_name} to canvas: {len(points)} pts, X({min(x_vals):.1f}-{max(x_vals):.1f}), Y({min(y_vals):.1f}-{max(y_vals):.1f})")
                 
-                # Convert points and segment breaks to JSON-safe format
+                # Convert points, segment breaks and entity types to JSON-safe format
                 points_json = json.dumps(points)
                 seg_breaks = breaks.get(shape_name, [0]) if breaks else [0]
                 breaks_json = json.dumps(seg_breaks)
-                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}); }} catch(e) {{ alert(e.message); }}''')
-                logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments")
+                seg_types = entity_types.get(shape_name, []) if entity_types else []
+                types_json = json.dumps(seg_types)
+                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}, {types_json}); }} catch(e) {{ alert(e.message); }}''')
+                logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments, types={seg_types}")
 
 
 def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
@@ -1265,7 +1267,7 @@ async def handle_file_upload(event):
         ui.notify('Processing DXF file...', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
-        shapes, shape_breaks = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
+        shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
         current_toolpath_shapes.update(shapes)
         
         # Debug: Print shape details
@@ -1301,7 +1303,7 @@ async def handle_file_upload(event):
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
         # Offset color index by current shape count so each file gets distinct colors
-        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks)
+        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks, entity_types=shape_types)
         
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)

@@ -45,6 +45,7 @@ class DXFProcessor:
             msp = doc.modelspace()
             
             shapes = {}
+            shape_entity_types = {}  # shape_name -> DXF entity type string
             shape_counter = 0
 
             logger.info("Processing entities with basic approach:")
@@ -70,6 +71,7 @@ class DXFProcessor:
                         if reduced_points and len(reduced_points) >= 2:
                             shape_name = f"shape_{shape_counter}"
                             shapes[shape_name] = reduced_points
+                            shape_entity_types[shape_name] = 'SPLINE'
                             shape_counter += 1
                             
                     except Exception as e:
@@ -79,7 +81,9 @@ class DXFProcessor:
                 elif entity.dxftype() == 'LINE':
                     points = self._process_line(entity)
                     if points:
-                        shapes[f"shape_{shape_counter}"] = points
+                        shape_name = f"shape_{shape_counter}"
+                        shapes[shape_name] = points
+                        shape_entity_types[shape_name] = 'LINE'
                         shape_counter += 1
                         
                 elif entity.dxftype() == 'CIRCLE':
@@ -87,7 +91,9 @@ class DXFProcessor:
                     if points:
                         # Reduce points for circles too
                         reduced_points = self._reduce_points_by_distance(points, min_distance)
-                        shapes[f"shape_{shape_counter}"] = reduced_points
+                        shape_name = f"shape_{shape_counter}"
+                        shapes[shape_name] = reduced_points
+                        shape_entity_types[shape_name] = 'CIRCLE'
                         shape_counter += 1
                         
                 elif entity.dxftype() == 'ARC':
@@ -95,7 +101,9 @@ class DXFProcessor:
                     if points:
                         # Reduce points for arcs too
                         reduced_points = self._reduce_points_by_distance(points, min_distance)
-                        shapes[f"shape_{shape_counter}"] = reduced_points
+                        shape_name = f"shape_{shape_counter}"
+                        shapes[shape_name] = reduced_points
+                        shape_entity_types[shape_name] = 'ARC'
                         shape_counter += 1
                         
                 elif entity.dxftype() == 'LWPOLYLINE':
@@ -106,7 +114,9 @@ class DXFProcessor:
                         true_corners = self._find_polyline_corners(original_verts)
                         # Reduce points while preserving true corner coordinates
                         reduced_points = self._reduce_points_preserving_corners(points, true_corners, min_distance)
-                        shapes[f"shape_{shape_counter}"] = reduced_points
+                        shape_name = f"shape_{shape_counter}"
+                        shapes[shape_name] = reduced_points
+                        shape_entity_types[shape_name] = 'LWPOLYLINE'
                         shape_counter += 1
                         
                 elif entity.dxftype() == 'POLYLINE':
@@ -117,14 +127,16 @@ class DXFProcessor:
                         true_corners = self._find_polyline_corners(original_verts)
                         # Reduce points while preserving true corner coordinates
                         reduced_points = self._reduce_points_preserving_corners(points, true_corners, min_distance)
-                        shapes[f"shape_{shape_counter}"] = reduced_points
+                        shape_name = f"shape_{shape_counter}"
+                        shapes[shape_name] = reduced_points
+                        shape_entity_types[shape_name] = 'POLYLINE'
                         shape_counter += 1
                         
                 else:
                     logger.info(f"Unsupported entity type: {entity.dxftype()}")
             
             if not shapes:
-                return {}
+                return {}, {}, {}
             
             # Check DXF units and convert if necessary
             # Most DXFs use inches by default, but we need millimeters
@@ -150,28 +162,29 @@ class DXFProcessor:
             
             # Apply the same post-processing as the full processor
             # 1. Merge shapes that share points
-            # merged_shapes: {name: {'points': [...], 'breaks': [...]}}
+            # merged_shapes: {name: {'points': [...], 'breaks': [...], 'segment_types': [...]}}
             dxf_base = os.path.splitext(os.path.basename(dxf_path))[0]
-            merged_shapes = self._merge_connected_shapes(shapes_mm, base_name=dxf_base)
+            merged_shapes = self._merge_connected_shapes(shapes_mm, base_name=dxf_base, entity_types=shape_entity_types)
 
             # 2. Position shapes with bottom-left justification (no offset)
             positioned_shapes = self._position_shapes_bottom_left(merged_shapes, x_buffer_mm=0.0, y_buffer_mm=0.0)
 
             logger.info(f"Processed {len(shapes)} entities with basic approach, merged into {len(merged_shapes)} shapes")
-            # Return flat dicts: {name: points} and {name: breaks}
+            # Return flat dicts: {name: points}, {name: breaks}, {name: segment_types}
             result_points = {k: v['points'] for k, v in positioned_shapes.items()}
             result_breaks = {k: v['breaks'] for k, v in positioned_shapes.items()}
-            return result_points, result_breaks
+            result_types  = {k: v['segment_types'] for k, v in positioned_shapes.items()}
+            return result_points, result_breaks, result_types
                 
         except Exception as e:
             logger.error(f"Error processing DXF file with basic approach: {e}")
-            return {}, {}
+            return {}, {}, {}
 
     def process_dxf(self, dxf_path: str) -> Dict[str, List[Tuple[float, float]]]:
         """
         Process a DXF file using the basic approach with 0.01" point spacing.
         """
-        shapes, _ = self.process_dxf_basic(dxf_path, min_distance=0.01)
+        shapes, _, _ = self.process_dxf_basic(dxf_path, min_distance=0.01)
         return shapes
     
     def _process_line(self, entity) -> List[Tuple[float, float]]:
@@ -406,7 +419,7 @@ class DXFProcessor:
             except:
                 return []
     
-    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]], base_name: str = 'shape') -> Dict[str, any]:
+    def _merge_connected_shapes(self, shapes: Dict[str, List[Tuple[float, float]]], base_name: str = 'shape', entity_types: Dict[str, str] = None) -> Dict[str, any]:
         """
         Merge shapes that share endpoints into longer chains.
 
@@ -414,11 +427,15 @@ class DXFProcessor:
             Dict mapping merged shape name to a dict with:
               'points': List[Tuple[float,float]]
               'breaks': List[int]  — indices in points[] where each original segment starts
+              'segment_types': List[str]  — DXF entity type for each segment (parallel to breaks)
         """
+        if entity_types is None:
+            entity_types = {}
+
         if len(shapes) <= 1:
             # Single shape: one segment starting at 0
-            _, pts = next(iter(shapes.items()))
-            return {base_name: {'points': pts, 'breaks': [0]}}
+            name0, pts = next(iter(shapes.items()))
+            return {base_name: {'points': pts, 'breaks': [0], 'segment_types': [entity_types.get(name0, 'UNKNOWN')]}}
 
         shape_list = list(shapes.items())
         merged_shapes = {}
@@ -431,7 +448,7 @@ class DXFProcessor:
             current_points = points1.copy()
             # Each original entity gets a break index; start with entity i at index 0
             current_breaks = [0]   # break[k] = start index of k-th original segment
-            current_lengths = [len(points1)]   # parallel: how many points each entity contributed
+            current_types = [entity_types.get(name1, 'UNKNOWN')]
             used_indices.add(i)
 
             changed = True
@@ -449,21 +466,23 @@ class DXFProcessor:
                             p1_end  = current_points[-1]
                             p2_start = points2[0]
                             p2_end   = points2[-1]
-                            p1_start = current_points[0]
 
                             tol = 0.1
                             def close(a, b):
                                 return math.sqrt((a[0]-b[0])**2+(a[1]-b[1])**2) < tol
 
+                            etype2 = entity_types.get(name2, 'UNKNOWN')
                             if close(p1_end, p2_start) or close(p1_end, p2_end):
                                 # new entity appended at the end — its first point is at len(current_points)-1
                                 new_break = len(current_points) - 1
                                 current_breaks.append(new_break)
+                                current_types.append(etype2)
                             else:
                                 # new entity prepended — shift all existing breaks by (len(points2)-1)
                                 shift = len(points2) - 1
                                 current_breaks = [b + shift for b in current_breaks]
                                 current_breaks.insert(0, 0)
+                                current_types.insert(0, etype2)
 
                             current_points = merged_result
                             used_indices.add(j)
@@ -475,10 +494,19 @@ class DXFProcessor:
             count = len(merged_shapes)
             merged_name = base_name if count == 0 else f"{base_name}_{count}"
             current_points = self._remove_duplicate_points(current_points, min_distance=0.05)
-            # Clamp breaks to valid range after dedup (dedup may shorten the list slightly)
+            # Clamp breaks to valid range after dedup; keep segment_types in sync
             n = len(current_points)
-            current_breaks = sorted(set(min(b, n - 1) for b in current_breaks))
-            merged_shapes[merged_name] = {'points': current_points, 'breaks': current_breaks}
+            combined = sorted(zip(current_breaks, current_types), key=lambda x: x[0])
+            seen = set()
+            deduped = []
+            for b, t in combined:
+                b = min(b, n - 1)
+                if b not in seen:
+                    seen.add(b)
+                    deduped.append((b, t))
+            current_breaks = [x[0] for x in deduped]
+            current_types  = [x[1] for x in deduped]
+            merged_shapes[merged_name] = {'points': current_points, 'breaks': current_breaks, 'segment_types': current_types}
 
         return merged_shapes
 
@@ -789,11 +817,15 @@ class DXFProcessor:
         
         logger.info(f"Translating by: X={translate_x:.3f}, Y={translate_y:.3f}")
         
-        # Apply translation to all shapes (breaks are indices, no translation needed)
+        # Apply translation to all shapes (breaks and segment_types are indices/labels, no translation needed)
         positioned_shapes = {}
         for shape_name, entry in shapes.items():
             translated_points = [(p[0] + translate_x, p[1] + translate_y) for p in entry['points']]
-            positioned_shapes[shape_name] = {'points': translated_points, 'breaks': entry['breaks']}
+            positioned_shapes[shape_name] = {
+                'points': translated_points,
+                'breaks': entry['breaks'],
+                'segment_types': entry.get('segment_types', []),
+            }
         
         # Log the new bounds
         new_all_points = []
