@@ -3497,12 +3497,14 @@ function computeCardinalNodes(shapeName) {
 
     const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
         ? data.segmentBreaks : [0];
-    // segmentTypes[i] is the DXF entity type ('SPLINE', 'LINE', 'ARC', etc.) for segment i
+    // segmentTypes[i] is the DXF entity type ('SPLINE', 'LINE', 'ARC', etc.) for segment i.
+    // Legacy canvas saves predate this field; when absent, fall back to
+    // angle-only gating (treat every segment as eligible for junction nodes).
     const types = (data.segmentTypes && data.segmentTypes.length > 0)
-        ? data.segmentTypes : [];
+        ? data.segmentTypes : null;
 
-    // Determine whether a segment index represents a curved (spline-like) entity
     function isCurved(si) {
+        if (types === null) return true;  // legacy data: no per-segment type info
         const t = types[si] || '';
         return t === 'SPLINE' || t === 'ARC';
     }
