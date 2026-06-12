@@ -888,7 +888,9 @@ class CNCController:
 
         self.stop_requested = False
         self.pause_requested = False
-        self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
+        self.job_thread = threading.Thread(
+            target=self._execute_job, args=(gcode_lines,), kwargs={"is_job": False}, daemon=True
+        )
         self.job_thread.start()
 
     def start_job(self, gcode_lines: list[str]) -> None:
@@ -1012,7 +1014,7 @@ class CNCController:
             finally:
                 self.read_loop_paused = False
 
-    def _execute_job(self, gcode_lines: list[str]) -> None:
+    def _execute_job(self, gcode_lines: list[str], is_job: bool = True) -> None:
         """
         Internal method to execute G-code job.
         Runs in a background thread.
@@ -1023,6 +1025,10 @@ class CNCController:
         
         Args:
             gcode_lines: List of G-code commands to execute
+            is_job: True for a real toolpath job (logs job_complete and
+                triggers a log upload). False for utility/jog sequences (e.g.
+                move-to-center, change-cutting-wheel), which run through the
+                same streaming path but should not be logged or uploaded.
         """
         if not self.connected:
             logger.error("Cannot execute job: not connected to controller")
@@ -1219,23 +1225,24 @@ class CNCController:
                 logger.info(f"Job complete! ({self.resend_total} resends)")
                 machine_state.set_status("Complete", busy=False)
                 machine_state.update_job_progress(1.0)
-                log_controller_event(
-                    "job_complete",
-                    sent=sent_count,
-                    acked=self.ok_count,
-                    committed=self.committed_line,
-                    resends=self.resend_total,
-                    elapsed_s=round(time.time() - job_start_time, 2),
-                    total_wait_s=round(total_wait_time, 2),
-                    max_wait_s=round(max_wait_time, 2),
-                )
-                if _log_uploader:
-                    threading.Thread(
-                        target=_log_uploader.upload_now,
-                        args=(False, "job_complete"),
-                        daemon=True,
-                        name="log-upload-on-complete",
-                    ).start()
+                if is_job:
+                    log_controller_event(
+                        "job_complete",
+                        sent=sent_count,
+                        acked=self.ok_count,
+                        committed=self.committed_line,
+                        resends=self.resend_total,
+                        elapsed_s=round(time.time() - job_start_time, 2),
+                        total_wait_s=round(total_wait_time, 2),
+                        max_wait_s=round(max_wait_time, 2),
+                    )
+                    if _log_uploader:
+                        threading.Thread(
+                            target=_log_uploader.upload_now,
+                            args=(False, "job_complete"),
+                            daemon=True,
+                            name="log-upload-on-complete",
+                        ).start()
             else:
                 machine_state.reset_job()
                 if self.connected:
@@ -1243,21 +1250,22 @@ class CNCController:
                 else:
                     # Disconnect handler already set status to "Disconnected" — restore it
                     machine_state.set_status("Disconnected", busy=False)
-                log_controller_event(
-                    "job_aborted",
-                    sent=sent_count,
-                    acked=self.ok_count,
-                    committed=self.committed_line,
-                    resends=self.resend_total,
-                    elapsed_s=round(time.time() - job_start_time, 2),
-                )
-                if _log_uploader:
-                    threading.Thread(
-                        target=_log_uploader.upload_now,
-                        args=(False, "job_abort"),
-                        daemon=True,
-                        name="log-upload-on-abort",
-                    ).start()
+                if is_job:
+                    log_controller_event(
+                        "job_aborted",
+                        sent=sent_count,
+                        acked=self.ok_count,
+                        committed=self.committed_line,
+                        resends=self.resend_total,
+                        elapsed_s=round(time.time() - job_start_time, 2),
+                    )
+                    if _log_uploader:
+                        threading.Thread(
+                            target=_log_uploader.upload_now,
+                            args=(False, "job_abort"),
+                            daemon=True,
+                            name="log-upload-on-abort",
+                        ).start()
                 
         except Exception as e:
             logger.error(f"Job execution error: {e}", exc_info=True)
