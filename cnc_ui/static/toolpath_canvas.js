@@ -3702,6 +3702,39 @@ function toggleNotch(shapeName, nodeKey) {
 
     drawNotchMarksForShape(shapeName);
     showNotchNodes();  // Refresh highlighted state of node circles
+    emitNotchesChanged(shapeName);
+}
+
+// Send the FULL current notch list for a shape to the server so it can be
+// restored after a browser refresh / Socket.IO reconnect (shapeNotches lives
+// only in browser memory; without this, every reload loses all notches).
+function emitNotchesChanged(shapeName) {
+    if (!window.emitEvent) return;
+    const notches = shapeNotches[shapeName];
+    const payload = notches && notches.size > 0
+        ? [...notches.values()].map(nk => ({ edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y }))
+        : [];
+    try {
+        window.emitEvent('notches_changed', { shapeName: shapeName, notches: payload });
+    } catch (e) {
+        console.warn('emitNotchesChanged failed:', e);
+    }
+}
+
+// Rehydrate shapeNotches from a server-side snapshot. Used by
+// init_canvas_after_load on the Python side after a browser refresh.
+function restoreNotches(notchesDict) {
+    if (!notchesDict || typeof notchesDict !== 'object') return;
+    Object.keys(notchesDict).forEach(name => {
+        const arr = notchesDict[name];
+        if (!Array.isArray(arr) || arr.length === 0) return;
+        shapeNotches[name] = new Map(
+            arr.map(k => [k.edgeIdx, { edgeIdx: k.edgeIdx, x: k.x, y: k.y }])
+        );
+        drawNotchMarksForShape(name);
+    });
+    if (notchMode) showNotchNodes();
+    canvas.renderAll();
 }
 
 // Draw the V marks for all active notches on a shape
@@ -3874,6 +3907,7 @@ window.toolpathCanvas = {
     // Notch tool
     setNotchMode: setNotchMode,
     getNotches: getNotches,
+    restoreNotches: restoreNotches,
     // Rulers
     getRulerBounds: getRulerBounds,
     // Units
@@ -4261,7 +4295,7 @@ function updateToolhead(x, y) {
         'init', 'resize', 'getPositions', 'getCanvasData', 'getNotches',
         'getRulerBounds', 'isToolpathLocked', 'updateToolhead',
         'saveUndoState', 'addShape', 'clearShapes', 'showToolpath',
-        'clearToolpath'
+        'clearToolpath', 'restoreNotches'
     ]);
     // Actions that produce huge return values — log a brief summary instead.
     const SUMMARIZE = new Set(['saveCanvasState', 'loadCanvasState']);

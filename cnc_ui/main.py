@@ -259,8 +259,13 @@ toolpath_generator = ToolpathGenerator(
     curve_slowdown_radius=75.0   # Start slowing below this radius (mm)
 )
 
-# Global storage for current toolpath visualization data
-current_toolpath_shapes = {}
+# Global storage for current toolpath visualization data.
+# These survive a browser refresh / Socket.IO reconnect — the JS canvas
+# is rebuilt from these dicts in init_canvas_after_load().
+current_toolpath_shapes = {}   # name -> [(x, y), ...]
+current_toolpath_breaks = {}   # name -> [segment break indices]  (per-entity DXF spans)
+current_toolpath_types = {}    # name -> [DXF entity type per segment] ('SPLINE'/'LINE'/'ARC'/...)
+current_toolpath_notches = {}  # name -> [{edgeIdx, x, y}, ...]   (active notch nodeKeys)
 toolpath_canvas = None  # Reference to the canvas element
 
 # API endpoint for jog control from JavaScript
@@ -1269,6 +1274,13 @@ async def handle_file_upload(event):
         # 0.1" = 2.54mm spacing - good balance of detail and point count
         shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
         current_toolpath_shapes.update(shapes)
+        # Persist segment metadata so notch nodes can be regenerated after a
+        # browser refresh (otherwise breaks=[0], types=[], and computeCardinalNodes
+        # collapses the whole shape into a single midpoint node).
+        if shape_breaks:
+            current_toolpath_breaks.update(shape_breaks)
+        if shape_types:
+            current_toolpath_types.update(shape_types)
         
         # Debug: Print shape details
         print(f"\n--- DXF Processing Results ---")
@@ -1491,7 +1503,7 @@ async def load_canvas_state():
                     )
 
                 async def _load(fp=filepath):
-                    global current_toolpath_shapes
+                    global current_toolpath_shapes, current_toolpath_breaks, current_toolpath_types, current_toolpath_notches
                     try:
                         with open(fp, 'r') as f:
                             canvas_json = f.read()
@@ -1500,8 +1512,16 @@ async def load_canvas_state():
                         )
                         state = json.loads(canvas_json)
                         current_toolpath_shapes = {}
+                        current_toolpath_breaks = {}
+                        current_toolpath_types = {}
+                        current_toolpath_notches = {}
                         for name, shape_data in state.get('shapes', {}).items():
                             current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
+                            current_toolpath_breaks[name] = list(shape_data.get('segmentBreaks', [0]) or [0])
+                            current_toolpath_types[name] = list(shape_data.get('segmentTypes', []) or [])
+                        for name, notches in (state.get('notches') or {}).items():
+                            if notches:
+                                current_toolpath_notches[name] = [dict(n) for n in notches]
                         saved_cut = state.get('cut_settings', {})
                         if saved_cut.get('pressure') in PRESSURE_MAP:
                             apply_cut_pressure(saved_cut['pressure'])
@@ -1552,10 +1572,13 @@ async def load_canvas_state():
 
 def clear_canvas():
     """Clear all shapes from canvas."""
-    global current_toolpath_shapes
+    global current_toolpath_shapes, current_toolpath_breaks, current_toolpath_types, current_toolpath_notches
     log_event('canvas', 'canvas_cleared', shape_count=len(current_toolpath_shapes),
               shape_names=list(current_toolpath_shapes.keys()))
     current_toolpath_shapes = {}
+    current_toolpath_breaks = {}
+    current_toolpath_types = {}
+    current_toolpath_notches = {}
     ui.run_javascript('window.toolpathCanvas.clearShapes()')
     machine_state.set_job_loaded(False)
     machine_state.set_toolpath_generated(False)
@@ -2453,7 +2476,21 @@ def main_page():
                                 # (handles page reload mid-session due to WebSocket reconnect)
                                 if current_toolpath_shapes:
                                     await asyncio.sleep(0.4)  # let canvas finish initialising
-                                    add_shapes_to_canvas(current_toolpath_shapes)
+                                    add_shapes_to_canvas(
+                                        current_toolpath_shapes,
+                                        breaks=current_toolpath_breaks,
+                                        entity_types=current_toolpath_types,
+                                    )
+                                    # Re-apply any notches the user toggled before the reconnect.
+                                    if current_toolpath_notches:
+                                        await asyncio.sleep(0.1)
+                                        try:
+                                            await ui.run_javascript(
+                                                f'window.toolpathCanvas.restoreNotches({json.dumps(current_toolpath_notches)})',
+                                                timeout=5.0,
+                                            )
+                                        except Exception as exc:
+                                            logger.warning(f'Could not restore notches after reconnect: {exc}')
                                     if machine_state.toolpath_generated:
                                         await asyncio.sleep(0.2)
                                         try:
@@ -2522,6 +2559,9 @@ def main_page():
                                 
                                 if shape_name and shape_name in current_toolpath_shapes:
                                     del current_toolpath_shapes[shape_name]
+                                    current_toolpath_breaks.pop(shape_name, None)
+                                    current_toolpath_types.pop(shape_name, None)
+                                    current_toolpath_notches.pop(shape_name, None)
                                     logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
                                     log_event('canvas', 'shape_deleted', shape=shape_name)
                                     # Clear toolpath if it was generated since shapes changed
@@ -2552,6 +2592,25 @@ def main_page():
                                           active=bool(data.get('active', False)) if isinstance(data, dict) else False)
 
                             ui.on('notch_mode_changed', on_notch_mode_changed)
+
+                            # Persist notch toggles server-side so they survive a
+                            # browser refresh / Socket.IO reconnect. The JS emits
+                            # the FULL current notch list for the shape on every
+                            # toggle (simpler than diffing).
+                            def on_notches_changed(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if not isinstance(data, dict):
+                                    return
+                                shape_name = data.get('shapeName')
+                                notches = data.get('notches') or []
+                                if not shape_name:
+                                    return
+                                if notches:
+                                    current_toolpath_notches[shape_name] = [dict(n) for n in notches]
+                                else:
+                                    current_toolpath_notches.pop(shape_name, None)
+
+                            ui.on('notches_changed', on_notches_changed)
                         
                         # Right column: Jog Controls only (fixed width)
                         with ui.column().classes('gap-2 items-center').style('flex: 0 0 320px; padding: 0 0 10px 0; box-sizing: border-box;'):
