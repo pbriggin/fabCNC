@@ -464,10 +464,6 @@ class CNCController:
             cmd = command.strip() + "\n"
             self.serial_port.write(cmd.encode('utf-8'))
             self.serial_port.flush()  # Ensure data is sent immediately
-            if not self.streaming_mode:
-                logger.info(f">>> SENT: {command}")
-            else:
-                logger.debug(f">>> SENT: {command}")
             log_serial_tx(command, streaming=self.streaming_mode)
             return True
         except Exception as e:
@@ -515,7 +511,6 @@ class CNCController:
                     del self.line_buffer[droppable.pop(0)]
         payload = self._wrap_with_line_number(n, cmd)
         ok = self._write_serial_payload(payload)
-        logger.debug(f">>> SENT: {payload}")
         log_serial_tx(cmd, streaming=True, line_number=n, wire=payload)
         if not ok:
             log_serial_tx(cmd, streaming=True, line_number=n, wire=payload, error="write_failed")
@@ -539,7 +534,7 @@ class CNCController:
         payload = self._wrap_with_line_number(n, cmd)
         ok = self._write_serial_payload(payload)
         self.resend_total += 1
-        logger.warning(f">>> RESEND: {payload}")
+        logger.warning(f"Resending N{n} (total resends this job: {self.resend_total})")
         log_serial_tx(cmd, streaming=True, line_number=n, wire=payload, resend=True)
         return ok
 
@@ -594,7 +589,6 @@ class CNCController:
             try:
                 if self.serial_port.in_waiting:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                    logger.info(f"<<< RECV: {line}")
                     if line:
                         log_serial_rx(line, mode="sync")
                     response_lines.append(line)
@@ -621,7 +615,6 @@ class CNCController:
                 if self.serial_port.in_waiting:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        logger.debug(f"<<< READ: {line}")
                         log_serial_rx(line, mode="async")
 
                         # --- Line-number protocol bookkeeping (streaming only) ---

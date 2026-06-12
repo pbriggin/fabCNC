@@ -242,14 +242,11 @@ def setup_logging() -> dict[str, Any]:
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 def log_event(category: str, action: str, **details: Any) -> None:
-    """Record a user / GUI / file event as a JSON line and a readable INFO line."""
+    """Record a user / GUI / file event as a JSON line."""
     if not _initialised:
         setup_logging()
     payload = {"category": category, "action": action, **details}
     event_logger.info(action, extra={"event": payload})
-    logging.getLogger("fabcnc.events").debug(
-        f"{category}.{action} {details}" if details else f"{category}.{action}"
-    )
 
 
 def log_serial_tx(command: str, **details: Any) -> None:
