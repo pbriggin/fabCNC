@@ -3309,7 +3309,7 @@ document.addEventListener('keydown', handleKeyDown);
 // Save canvas state to JSON
 function saveCanvasState() {
     const state = {
-        version: 2,
+        version: 3,
         timestamp: new Date().toISOString(),
         shapes: {},
         notches: {}
@@ -3321,6 +3321,8 @@ function saveCanvasState() {
         if (data && data.originalMmPoints && shape) {
             state.shapes[name] = {
                 points: data.originalMmPoints,
+                segmentBreaks: data.segmentBreaks || [0],
+                segmentTypes: data.segmentTypes || [],
                 color: shape.stroke || '#42A5F5'
             };
         }
