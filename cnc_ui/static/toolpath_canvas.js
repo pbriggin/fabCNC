@@ -721,7 +721,7 @@ function clearShapes() {
     console.log('Canvas cleared');
 }
 
-function addShape(name, points, colorIndexOrColor, segmentBreaks) {
+function addShape(name, points, colorIndexOrColor, segmentBreaks, segmentTypes) {
     if (!canvas || !points || points.length < 2) return;
     
     // If shape with this name already exists, generate a unique name
@@ -759,6 +759,7 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks) {
     shapeData[name] = {
         originalMmPoints: points.map(p => [p[0], p[1]]),
         segmentBreaks: (segmentBreaks && segmentBreaks.length > 0) ? segmentBreaks.slice() : [0],
+        segmentTypes: (segmentTypes && segmentTypes.length > 0) ? segmentTypes.slice() : [],
         initialLeft: null,
         initialTop: null
     };
@@ -3352,7 +3353,7 @@ function loadCanvasState(jsonString) {
         Object.keys(state.shapes).forEach(name => {
             const shapeState = state.shapes[name];
             if (shapeState.points && shapeState.points.length > 0) {
-                addShape(name, shapeState.points, shapeState.color || colorIndex, shapeState.segmentBreaks || [0]);
+                addShape(name, shapeState.points, shapeState.color || colorIndex, shapeState.segmentBreaks || [0], shapeState.segmentTypes || []);
                 colorIndex++;
             }
         });
@@ -3385,6 +3386,7 @@ function getCanvasData() {
             data[name] = {
                 points: shapeData[name].originalMmPoints,
                 segmentBreaks: shapeData[name].segmentBreaks || [0],
+                segmentTypes: shapeData[name].segmentTypes || [],
                 color: shape.stroke || '#42A5F5'
             };
         }
@@ -3490,15 +3492,24 @@ function computeCardinalNodes(shapeName) {
     const pts = data.originalMmPoints;
     const n = pts.length;
 
-    const CORNER_THRESHOLD_DEG = 45;
+    const CORNER_THRESHOLD_DEG = 20;  // matches toolpath_generator.py corner_angle_threshold
     const CORNER_COS = Math.cos(CORNER_THRESHOLD_DEG * Math.PI / 180);
 
     const breaks = (data.segmentBreaks && data.segmentBreaks.length > 0)
         ? data.segmentBreaks : [0];
+    // segmentTypes[i] is the DXF entity type ('SPLINE', 'LINE', 'ARC', etc.) for segment i
+    const types = (data.segmentTypes && data.segmentTypes.length > 0)
+        ? data.segmentTypes : [];
+
+    // Determine whether a segment index represents a curved (spline-like) entity
+    function isCurved(si) {
+        const t = types[si] || '';
+        return t === 'SPLINE' || t === 'ARC';
+    }
 
     const nodes = [];
 
-    // --- Midpoint node for every segment ---
+    // --- One midpoint node per segment (every DXF entity gets exactly one node) ---
     for (let si = 0; si < breaks.length; si++) {
         const start = breaks[si];
         const end   = (si + 1 < breaks.length) ? breaks[si + 1] : n - 1;
@@ -3510,21 +3521,25 @@ function computeCardinalNodes(shapeName) {
         }
         if (totalLen < 0.01) continue;
         const half = totalLen / 2;
-        let walked = 0, mx = pts[start][0], my = pts[start][1], edgeIdx = start;
+        let walked = 0, mx = pts[start][0], my = pts[start][1];
         for (let i = start; i < end; i++) {
             const dx = pts[i+1][0]-pts[i][0], dy = pts[i+1][1]-pts[i][1];
             const sl = Math.sqrt(dx*dx+dy*dy);
             if (walked + sl >= half) {
                 const t = (half - walked) / sl;
-                mx = pts[i][0]+t*dx; my = pts[i][1]+t*dy; edgeIdx = i; break;
+                mx = pts[i][0]+t*dx; my = pts[i][1]+t*dy; break;
             }
             walked += sl;
         }
-        nodes.push({ edgeIdx, x: mx, y: my });
+        nodes.push({ edgeIdx: start + (end - start) / 2, x: mx, y: my });
     }
 
-    // --- Junction node at each segment boundary, only if NOT a corner ---
+    // --- Junction node at segment boundaries ONLY between two curved entities ---
+    // Prevents junction nodes at straight-line connector boundaries (notch cuts, etc.)
     for (let si = 1; si < breaks.length; si++) {
+        // Both the segment ending here (si-1) and the segment starting here (si) must be curved
+        if (!isCurved(si - 1) || !isCurved(si)) continue;
+
         const jIdx = breaks[si];
         if (jIdx <= 0 || jIdx >= n - 1) continue;
 
@@ -3540,18 +3555,21 @@ function computeCardinalNodes(shapeName) {
         }
     }
 
-    // --- Wrap-around junction for closed shapes ---
+    // --- Wrap-around junction for closed shapes (only if both end segments are curved) ---
     if (breaks.length > 1) {
-        const dx0 = pts[n-1][0]-pts[0][0], dy0 = pts[n-1][1]-pts[0][1];
-        if (Math.sqrt(dx0*dx0+dy0*dy0) < 1.0) {
-            const inDx = pts[n-1][0]-pts[n-2][0], inDy = pts[n-1][1]-pts[n-2][1];
-            const inLen = Math.sqrt(inDx*inDx+inDy*inDy);
-            const outDx = pts[1][0]-pts[0][0], outDy = pts[1][1]-pts[0][1];
-            const outLen = Math.sqrt(outDx*outDx+outDy*outDy);
-            if (inLen > 1e-9 && outLen > 1e-9) {
-                const dot = (inDx/inLen)*(outDx/outLen)+(inDy/inLen)*(outDy/outLen);
-                if (dot >= CORNER_COS) {
-                    nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+        const lastSi = breaks.length - 1;
+        if (isCurved(lastSi) && isCurved(0)) {
+            const dx0 = pts[n-1][0]-pts[0][0], dy0 = pts[n-1][1]-pts[0][1];
+            if (Math.sqrt(dx0*dx0+dy0*dy0) < 1.0) {
+                const inDx = pts[n-1][0]-pts[n-2][0], inDy = pts[n-1][1]-pts[n-2][1];
+                const inLen = Math.sqrt(inDx*inDx+inDy*inDy);
+                const outDx = pts[1][0]-pts[0][0], outDy = pts[1][1]-pts[0][1];
+                const outLen = Math.sqrt(outDx*outDx+outDy*outDy);
+                if (inLen > 1e-9 && outLen > 1e-9) {
+                    const dot = (inDx/inLen)*(outDx/outLen)+(inDy/inLen)*(outDy/outLen);
+                    if (dot >= CORNER_COS) {
+                        nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+                    }
                 }
             }
         }
