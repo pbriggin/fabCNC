@@ -3088,7 +3088,14 @@ function saveUndoState() {
         if (shapeData[name] && shapeData[name].originalMmPoints) {
             state.shapes[name] = {
                 points: shapeData[name].originalMmPoints.map(p => [p[0], p[1]]),
-                stroke: shapes[name] ? shapes[name].stroke : '#42A5F5'
+                stroke: shapes[name] ? shapes[name].stroke : '#42A5F5',
+                // Preserve per-segment metadata; without these, undo() rebuilds
+                // shapes via addShape() with defaults breaks=[0]/types=[], which
+                // collapses computeCardinalNodes into a single midpoint node and
+                // breaks the notch tool. Triggers any time a transform is undone
+                // (failed nest auto-undo, manual Cmd+Z, etc.).
+                segmentBreaks: (shapeData[name].segmentBreaks || [0]).slice(),
+                segmentTypes: (shapeData[name].segmentTypes || []).slice()
             };
         }
     });
@@ -3125,7 +3132,8 @@ function undo() {
     
     // Restore shapes from state
     Object.keys(state).forEach(name => {
-        addShape(name, state[name].points, state[name].stroke);
+        const s = state[name];
+        addShape(name, s.points, s.stroke, s.segmentBreaks, s.segmentTypes);
     });
     
     // Restore notch edge keys and redraw marks
