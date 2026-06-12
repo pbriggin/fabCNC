@@ -972,6 +972,46 @@ class CNCController:
                 # Resume the background read loop
                 self.read_loop_paused = False
     
+    def _quiesce_before_stream(self, timeout: float = 15.0) -> None:
+        """Wait for any in-flight commands to finish before a streaming job begins.
+
+        A manually-issued command (e.g. Home All) may still be executing — and
+        its `ok` responses still pending — when a job is started. Because the
+        background read loop credits every `ok` toward streaming flow control,
+        those stale acks would otherwise be counted against the first streamed
+        lines. That makes blocking commands like G28 appear to finish instantly,
+        letting cutting moves race ahead of homing. Here we drain the link, with
+        the read loop paused, until it has been quiet long enough to be sure all
+        prior commands have completed and their `ok`s consumed.
+        """
+        if not self.serial_port or not self.serial_port.is_open:
+            return
+
+        quiet_period = 0.3  # seconds of silence that signal the link is idle
+        with self.read_lock:
+            # Pause the background reader so we have exclusive access to the
+            # serial buffer while draining.
+            self.read_loop_paused = True
+            time.sleep(0.05)  # let the read loop notice and yield
+            try:
+                # M400 forces Marlin to finish all buffered moves before its `ok`,
+                # so once the link goes quiet we know nothing is still in flight.
+                self._send_command("M400")
+                deadline = time.time() + timeout
+                last_activity = time.time()
+                while time.time() < deadline:
+                    if self.serial_port.in_waiting:
+                        line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                        if line:
+                            log_serial_rx(line, mode="sync")
+                        last_activity = time.time()
+                    elif time.time() - last_activity >= quiet_period:
+                        break
+                    else:
+                        time.sleep(0.01)
+            finally:
+                self.read_loop_paused = False
+
     def _execute_job(self, gcode_lines: list[str]) -> None:
         """
         Internal method to execute G-code job.
@@ -989,6 +1029,14 @@ class CNCController:
             return
         
         machine_state.set_status("Running", busy=True, paused=False)
+
+        # Make sure any previously-issued command (e.g. a manual Home All) has
+        # fully completed and its `ok`s have been consumed before we start
+        # counting acks for streamed lines. Otherwise those stale acks inflate
+        # ok_count, so blocking commands like G28 appear to finish instantly and
+        # cutting moves can race ahead of homing.
+        self._quiesce_before_stream()
+
         self.streaming_mode = True
         
         # Reset ok counter
