@@ -515,10 +515,10 @@ class CNCController:
                     del self.line_buffer[droppable.pop(0)]
         payload = self._wrap_with_line_number(n, cmd)
         ok = self._write_serial_payload(payload)
-        logger.debug(f">>> SENT [N{n}]: {cmd}")
-        log_serial_tx(cmd, streaming=True, line_number=n)
+        logger.debug(f">>> SENT: {payload}")
+        log_serial_tx(cmd, streaming=True, line_number=n, wire=payload)
         if not ok:
-            log_serial_tx(cmd, streaming=True, line_number=n, error="write_failed")
+            log_serial_tx(cmd, streaming=True, line_number=n, wire=payload, error="write_failed")
             return None
         return n
 
@@ -539,8 +539,8 @@ class CNCController:
         payload = self._wrap_with_line_number(n, cmd)
         ok = self._write_serial_payload(payload)
         self.resend_total += 1
-        logger.warning(f">>> RESEND [N{n}]: {cmd}")
-        log_serial_tx(cmd, streaming=True, line_number=n, resend=True)
+        logger.warning(f">>> RESEND: {payload}")
+        log_serial_tx(cmd, streaming=True, line_number=n, wire=payload, resend=True)
         return ok
 
     def _drain_resends(self) -> int:
@@ -1018,7 +1018,7 @@ class CNCController:
             self.streaming_mode = False
             machine_state.set_status("Error", busy=False)
             return
-        log_serial_tx("M110 N0", streaming=True, line_number=0)
+        log_serial_tx("M110 N0", streaming=True, line_number=0, wire=reset_payload)
         # Give Marlin a moment to process the reset and emit its `ok`.
         time.sleep(0.05)
 
