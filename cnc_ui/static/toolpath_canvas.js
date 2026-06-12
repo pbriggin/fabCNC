@@ -1830,7 +1830,7 @@ function duplicateShape() {
     // Deep copy the points with small offset (20mm)
     const newPoints = points.map(p => [p[0] + 20, p[1] + 20]);
     
-    addShape(newName, newPoints);
+    addShape(newName, newPoints, shape.stroke, data.segmentBreaks, data.segmentTypes);
     return newName;
 }
 
@@ -1902,6 +1902,8 @@ function linearArray(axis, count, spacing) {
     if (!points) return [];
     
     const strokeColor = shape.stroke;
+    const segBreaks = data.segmentBreaks;
+    const segTypes  = data.segmentTypes;
     const newNames = [];
     
     for (let i = 1; i < count; i++) {
@@ -1914,7 +1916,7 @@ function linearArray(axis, count, spacing) {
             p[1] + offsetY
         ]);
         
-        addShape(newName, newPoints, strokeColor);
+        addShape(newName, newPoints, strokeColor, segBreaks, segTypes);
         newNames.push(newName);
     }
     
@@ -1948,6 +1950,8 @@ function gridArray(countX, countY) {
     const spacingY = shapeHeight + 15;
     
     const strokeColor = shape.stroke;
+    const segBreaks = shapeData[shape.shapeName] ? shapeData[shape.shapeName].segmentBreaks : null;
+    const segTypes  = shapeData[shape.shapeName] ? shapeData[shape.shapeName].segmentTypes  : null;
     const newNames = [];
     let skipped = 0;
 
@@ -1973,7 +1977,7 @@ function gridArray(countX, countY) {
                 p[1] + offsetY
             ]);
             
-            addShape(newName, newPoints, strokeColor);
+            addShape(newName, newPoints, strokeColor, segBreaks, segTypes);
             newNames.push(newName);
         }
     }
@@ -3139,6 +3143,8 @@ function copyShape() {
     // Deep copy the points
     clipboard = {
         points: data.originalMmPoints.map(p => [p[0], p[1]]),
+        segmentBreaks: (data.segmentBreaks || [0]).slice(),
+        segmentTypes: (data.segmentTypes || []).slice(),
         stroke: shape.stroke
         // lastPastePoints intentionally absent — first paste starts from clipboard.points
     };
@@ -3157,8 +3163,9 @@ function pasteShape() {
     const basePoints = clipboard.lastPastePoints || clipboard.points;
     const newPoints = basePoints.map(p => [p[0] + 10, p[1] + 10]);
     
-    // Pass the original stroke color
-    addShape(newName, newPoints, clipboard.stroke);
+    // Pass the original stroke color, segment breaks, and entity types so
+    // pasted shapes get the same per-segment notch nodes as the original.
+    addShape(newName, newPoints, clipboard.stroke, clipboard.segmentBreaks, clipboard.segmentTypes);
     
     // Update the cascade origin for the next paste
     clipboard.lastPastePoints = newPoints;
