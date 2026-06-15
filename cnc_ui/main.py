@@ -46,6 +46,10 @@ import json
 import asyncio
 import io
 import zipfile
+import re
+import fcntl
+import termios
+import struct
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -2815,51 +2819,75 @@ def main_page():
                                 'background: #111; color: #d4d4d4; border-radius: 6px; padding: 8px;'
                             )
 
-                            # Persistent shell session for this page. Keeping a single
-                            # long-lived bash process means `cd`, exported env vars and
-                            # other state survive between commands like a real terminal.
-                            shell_state: dict = {'proc': None, 'reader': None}
+                            # PTY-backed persistent shell. A pseudo-terminal gives bash
+                            # a real controlling TTY so sudo password prompts and other
+                            # interactive programs work correctly.
+                            _ANSI_ESC = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                            shell_state: dict = {'proc': None, 'master_fd': None}
 
-                            async def ensure_shell():
-                                proc = shell_state['proc']
-                                if proc is not None and proc.returncode is None:
-                                    return proc
-                                proc = await asyncio.create_subprocess_exec(
-                                    'bash',
-                                    stdin=asyncio.subprocess.PIPE,
-                                    stdout=asyncio.subprocess.PIPE,
-                                    stderr=asyncio.subprocess.STDOUT,
-                                    cwd=str(REPO_DIR),
-                                    env={**os.environ, 'PS1': '', 'TERM': 'dumb'},
-                                )
-                                shell_state['proc'] = proc
-
-                                async def pump_output():
-                                    assert proc.stdout is not None
+                            def _start_shell():
+                                # Clean up any dead previous session
+                                old_fd = shell_state.get('master_fd')
+                                if old_fd is not None:
                                     try:
-                                        while True:
-                                            line = await proc.stdout.readline()
-                                            if not line:
-                                                break
-                                            terminal_log.push(line.decode(errors='replace').rstrip('\n'))
-                                    except Exception as exc:  # pragma: no cover - defensive
-                                        terminal_log.push(f'[terminal reader error] {exc}')
+                                        asyncio.get_event_loop().remove_reader(old_fd)
+                                        os.close(old_fd)
+                                    except OSError:
+                                        pass
 
-                                shell_state['reader'] = asyncio.create_task(pump_output())
-                                return proc
+                                master_fd, slave_fd = os.openpty()
+                                # 24 rows × 160 cols — generous width avoids line-wrap artifacts
+                                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                                            struct.pack('HHHH', 24, 160, 0, 0))
+
+                                proc = subprocess.Popen(
+                                    ['bash'],
+                                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                                    close_fds=True,
+                                    start_new_session=True,
+                                    cwd=str(REPO_DIR),
+                                    env={**os.environ, 'TERM': 'xterm-256color',
+                                         'PS1': r'\u@\h:\w\$ '},
+                                )
+                                os.close(slave_fd)  # parent only needs master end
+
+                                # Non-blocking reads so add_reader never stalls
+                                flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+                                fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+                                shell_state['proc'] = proc
+                                shell_state['master_fd'] = master_fd
+                                shell_state['_buf'] = ''
+
+                                def _on_readable():
+                                    try:
+                                        data = os.read(master_fd, 4096)
+                                    except (BlockingIOError, OSError):
+                                        return
+                                    shell_state['_buf'] += data.decode('utf-8', errors='replace')
+                                    lines = shell_state['_buf'].split('\n')
+                                    shell_state['_buf'] = lines[-1]  # incomplete tail
+                                    for raw in lines[:-1]:
+                                        clean = _ANSI_ESC.sub('', raw).rstrip('\r')
+                                        if clean:
+                                            terminal_log.push(clean)
+
+                                asyncio.get_event_loop().add_reader(master_fd, _on_readable)
+
+                            def _ensure_shell():
+                                proc = shell_state.get('proc')
+                                if proc is None or proc.poll() is not None:
+                                    _start_shell()
 
                             async def run_terminal_command():
                                 cmd = term_input.value.rstrip('\n')
                                 if not cmd.strip():
                                     return
-                                proc = await ensure_shell()
-                                terminal_log.push(f'$ {cmd}')
+                                _ensure_shell()
                                 log_event('system', 'terminal_command', command=cmd[:500])
                                 try:
-                                    assert proc.stdin is not None
-                                    proc.stdin.write((cmd + '\n').encode())
-                                    await proc.stdin.drain()
-                                except Exception as exc:
+                                    os.write(shell_state['master_fd'], (cmd + '\n').encode())
+                                except OSError as exc:
                                     terminal_log.push(f'[terminal error] {exc}')
                                 term_input.value = ''
 
