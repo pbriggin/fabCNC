@@ -2884,8 +2884,11 @@ def main_page():
                                         return
                                     shell_state['_buf'] += data.decode('utf-8', errors='replace')
                                     lines = shell_state['_buf'].split('\n')
-                                    shell_state['_buf'] = lines[-1]  # incomplete tail
-                                    for raw in lines[:-1]:
+                                    # Always flush everything — including the tail that has no
+                                    # trailing newline yet. This is essential for prompts like
+                                    # "[sudo] password for …:" which never end with \n.
+                                    shell_state['_buf'] = ''
+                                    for raw in lines:
                                         clean = _ANSI_ESC.sub('', raw).rstrip('\r')
                                         if clean:
                                             terminal_log.push(clean)
@@ -2921,6 +2924,9 @@ def main_page():
                                     .props('dense outline').style('font-size: 11px;')
 
                             term_input.on('keydown.enter', run_terminal_command)
+
+                            # Start the shell immediately so the prompt appears on page load
+                            ui.timer(0.1, _start_shell, once=True)
 
         # Per-page state for disconnect banner and resume dialog
         _prev_status_local: list = [None]
