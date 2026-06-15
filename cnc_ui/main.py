@@ -2822,7 +2822,18 @@ def main_page():
                             # PTY-backed persistent shell. A pseudo-terminal gives bash
                             # a real controlling TTY so sudo password prompts and other
                             # interactive programs work correctly.
-                            _ANSI_ESC = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                            #
+                            # Full ANSI/VT strip:
+                            #   - OSC  \x1B ] ... BEL  — window title, colour palette, etc.
+                            #   - CSI  \x1B [ ...      — colours, cursor movement
+                            #   - Two-char \x1B X      — everything else (SS2, SS3, …)
+                            #   - Standalone BEL / DEL
+                            _ANSI_ESC = re.compile(
+                                r'\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)'  # OSC (title etc.)
+                                r'|\x1B\[[0-?]*[ -/]*[@-~]'            # CSI (colors, cursor)
+                                r'|\x1B[@-Z\\-_]'                      # other 2-char escapes
+                                r'|[\x07\x08\x7f]'                     # BEL, BS, DEL
+                            )
                             shell_state: dict = {'proc': None, 'master_fd': None}
 
                             def _start_shell():
@@ -2846,8 +2857,15 @@ def main_page():
                                     close_fds=True,
                                     start_new_session=True,
                                     cwd=str(REPO_DIR),
-                                    env={**os.environ, 'TERM': 'xterm-256color',
-                                         'PS1': r'\u@\h:\w\$ '},
+                                    env={
+                                        **os.environ,
+                                        'TERM': 'xterm-256color',
+                                        # Simple prompt; no title-update escape sequences
+                                        'PS1': r'\u@\h:\w\$ ',
+                                        # Prevent .bashrc from adding title sequences via
+                                        # PROMPT_COMMAND (common on Debian / Raspberry Pi OS)
+                                        'PROMPT_COMMAND': '',
+                                    },
                                 )
                                 os.close(slave_fd)  # parent only needs master end
 
@@ -2881,10 +2899,10 @@ def main_page():
 
                             async def run_terminal_command():
                                 cmd = term_input.value.rstrip('\n')
-                                if not cmd.strip():
-                                    return
+                                # Allow empty input (e.g. pressing Enter for a sudo password prompt)
                                 _ensure_shell()
-                                log_event('system', 'terminal_command', command=cmd[:500])
+                                log_event('system', 'terminal_command',
+                                          command=cmd[:500] if cmd.strip() else '[enter]')
                                 try:
                                     os.write(shell_state['master_fd'], (cmd + '\n').encode())
                                 except OSError as exc:
