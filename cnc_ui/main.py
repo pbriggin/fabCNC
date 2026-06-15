@@ -2805,6 +2805,77 @@ def main_page():
                             log_cfg = load_logging_config()
                             ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
 
+                        # Right column: live Pi terminal
+                        with ui.column().classes('gap-2').style('flex: 1;'):
+                            ui.label('Terminal').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+                            ui.label('Runs shell commands directly on the Pi.').classes('text-caption').style('color: #666;')
+
+                            terminal_log = ui.log().classes('w-full').style(
+                                'height: 320px; font-family: monospace; font-size: 13px; '
+                                'background: #111; color: #d4d4d4; border-radius: 6px; padding: 8px;'
+                            )
+
+                            # Persistent shell session for this page. Keeping a single
+                            # long-lived bash process means `cd`, exported env vars and
+                            # other state survive between commands like a real terminal.
+                            shell_state: dict = {'proc': None, 'reader': None}
+
+                            async def ensure_shell():
+                                proc = shell_state['proc']
+                                if proc is not None and proc.returncode is None:
+                                    return proc
+                                proc = await asyncio.create_subprocess_exec(
+                                    'bash',
+                                    stdin=asyncio.subprocess.PIPE,
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.STDOUT,
+                                    cwd=str(REPO_DIR),
+                                    env={**os.environ, 'PS1': '', 'TERM': 'dumb'},
+                                )
+                                shell_state['proc'] = proc
+
+                                async def pump_output():
+                                    assert proc.stdout is not None
+                                    try:
+                                        while True:
+                                            line = await proc.stdout.readline()
+                                            if not line:
+                                                break
+                                            terminal_log.push(line.decode(errors='replace').rstrip('\n'))
+                                    except Exception as exc:  # pragma: no cover - defensive
+                                        terminal_log.push(f'[terminal reader error] {exc}')
+
+                                shell_state['reader'] = asyncio.create_task(pump_output())
+                                return proc
+
+                            async def run_terminal_command():
+                                cmd = term_input.value.rstrip('\n')
+                                if not cmd.strip():
+                                    return
+                                proc = await ensure_shell()
+                                terminal_log.push(f'$ {cmd}')
+                                log_event('system', 'terminal_command', command=cmd[:500])
+                                try:
+                                    assert proc.stdin is not None
+                                    proc.stdin.write((cmd + '\n').encode())
+                                    await proc.stdin.drain()
+                                except Exception as exc:
+                                    terminal_log.push(f'[terminal error] {exc}')
+                                term_input.value = ''
+
+                            with ui.row().classes('w-full gap-2 items-center'):
+                                ui.label('$').style('color: #4caf50; font-family: monospace; font-size: 16px;')
+                                term_input = ui.input(placeholder='Type a command…') \
+                                    .classes('flex-1').props('outlined dense autocomplete=off autocapitalize=off spellcheck=false')
+                                ui.button('Run', icon='play_arrow', on_click=run_terminal_command) \
+                                    .props('color=primary dense')
+
+                            with ui.row().classes('gap-1'):
+                                ui.button('Clear', icon='clear_all', on_click=lambda: terminal_log.clear()) \
+                                    .props('dense outline').style('font-size: 11px;')
+
+                            term_input.on('keydown.enter', run_terminal_command)
+
         # Per-page state for disconnect banner and resume dialog
         _prev_status_local: list = [None]
         _resume_dialog_shown: list = [False]
