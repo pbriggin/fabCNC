@@ -2834,7 +2834,16 @@ def main_page():
                                 r'|\x1B[@-Z\\-_]'                      # other 2-char escapes
                                 r'|[\x07\x08\x7f]'                     # BEL, BS, DEL
                             )
-                            shell_state: dict = {'proc': None, 'master_fd': None}
+                            # Matches a typical shell prompt tail: ends with "$ " or "# "
+                            _PROMPT_RE = re.compile(r'[$#]\s*$')
+
+                            shell_state: dict = {
+                                'proc': None, 'master_fd': None,
+                                '_buf': '',             # partial-line accumulator
+                                '_prompt': '',          # pending shell prompt held for combining
+                                '_suppress_echo': None, # command whose PTY echo should be dropped
+                                '_flush_handle': None,  # call_later handle for non-prompt flush
+                            }
 
                             def _start_shell():
                                 # Clean up any dead previous session
@@ -2845,6 +2854,9 @@ def main_page():
                                         os.close(old_fd)
                                     except OSError:
                                         pass
+                                h = shell_state.get('_flush_handle')
+                                if h:
+                                    h.cancel()
 
                                 master_fd, slave_fd = os.openpty()
                                 # 24 rows × 160 cols — generous width avoids line-wrap artifacts
@@ -2860,10 +2872,8 @@ def main_page():
                                     env={
                                         **os.environ,
                                         'TERM': 'xterm-256color',
-                                        # Simple prompt; no title-update escape sequences
                                         'PS1': r'\u@\h:\w\$ ',
-                                        # Prevent .bashrc from adding title sequences via
-                                        # PROMPT_COMMAND (common on Debian / Raspberry Pi OS)
+                                        # Prevent .bashrc from reinstalling title sequences
                                         'PROMPT_COMMAND': '',
                                     },
                                 )
@@ -2873,25 +2883,62 @@ def main_page():
                                 flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
                                 fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-                                shell_state['proc'] = proc
-                                shell_state['master_fd'] = master_fd
-                                shell_state['_buf'] = ''
+                                shell_state.update({
+                                    'proc': proc, 'master_fd': master_fd,
+                                    '_buf': '', '_prompt': '',
+                                    '_suppress_echo': None, '_flush_handle': None,
+                                })
 
                                 def _on_readable():
                                     try:
                                         data = os.read(master_fd, 4096)
                                     except (BlockingIOError, OSError):
                                         return
+
+                                    # Cancel any pending non-prompt flush
+                                    h = shell_state['_flush_handle']
+                                    if h:
+                                        h.cancel()
+                                        shell_state['_flush_handle'] = None
+
                                     shell_state['_buf'] += data.decode('utf-8', errors='replace')
                                     lines = shell_state['_buf'].split('\n')
-                                    # Always flush everything — including the tail that has no
-                                    # trailing newline yet. This is essential for prompts like
-                                    # "[sudo] password for …:" which never end with \n.
-                                    shell_state['_buf'] = ''
-                                    for raw in lines:
+                                    shell_state['_buf'] = lines[-1]  # keep partial tail
+
+                                    for raw in lines[:-1]:
                                         clean = _ANSI_ESC.sub('', raw).rstrip('\r')
+                                        # Drop the PTY echo of the last sent command
+                                        if (shell_state['_suppress_echo'] is not None
+                                                and clean == shell_state['_suppress_echo']):
+                                            shell_state['_suppress_echo'] = None
+                                            continue
                                         if clean:
                                             terminal_log.push(clean)
+
+                                    # Classify the partial line sitting in the buffer
+                                    partial = _ANSI_ESC.sub(
+                                        '', shell_state['_buf']).rstrip('\r').rstrip()
+                                    if not partial:
+                                        return
+
+                                    if _PROMPT_RE.search(partial):
+                                        # Looks like a shell prompt — hold it so we can
+                                        # combine it with the next command on one line.
+                                        shell_state['_prompt'] = partial
+                                        shell_state['_buf'] = ''
+                                    else:
+                                        # Other partial line (sudo password prompt, etc.)
+                                        # — flush to the log after a short delay.
+                                        def _do_flush():
+                                            buf = shell_state['_buf']
+                                            shell_state['_buf'] = ''
+                                            shell_state['_flush_handle'] = None
+                                            clean = _ANSI_ESC.sub('', buf).rstrip('\r')
+                                            if clean:
+                                                terminal_log.push(clean)
+                                        shell_state['_flush_handle'] = (
+                                            asyncio.get_event_loop().call_later(0.25, _do_flush)
+                                        )
 
                                 asyncio.get_event_loop().add_reader(master_fd, _on_readable)
 
@@ -2902,8 +2949,30 @@ def main_page():
 
                             async def run_terminal_command():
                                 cmd = term_input.value.rstrip('\n')
-                                # Allow empty input (e.g. pressing Enter for a sudo password prompt)
                                 _ensure_shell()
+
+                                # Cancel any pending non-prompt flush and grab its buffer
+                                h = shell_state.get('_flush_handle')
+                                if h:
+                                    h.cancel()
+                                    shell_state['_flush_handle'] = None
+                                extra = shell_state.get('_buf', '').strip()
+                                if extra:
+                                    terminal_log.push(_ANSI_ESC.sub('', shell_state['_buf']).rstrip('\r'))
+                                    shell_state['_buf'] = ''
+
+                                # Combine the pending shell prompt with the typed command
+                                # so the log reads:  user@host:~$ ls
+                                prompt = shell_state.get('_prompt', '')
+                                shell_state['_prompt'] = ''
+
+                                if prompt:
+                                    terminal_log.push(f'{prompt}{cmd}')
+                                    # Suppress the PTY line-discipline echo that will follow
+                                    shell_state['_suppress_echo'] = cmd if cmd.strip() else None
+                                # If no prompt is pending (e.g. sudo password input) we show
+                                # nothing — avoids echoing sensitive text into the log.
+
                                 log_event('system', 'terminal_command',
                                           command=cmd[:500] if cmd.strip() else '[enter]')
                                 try:
