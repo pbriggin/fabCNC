@@ -151,6 +151,48 @@ journalctl -u fabcnc -f              # view app logs
 journalctl -u wifi-provision -f      # view provisioning logs
 ```
 
+### Wi-Fi Reliability (for stationary installs)
+
+The Pi's onboard Wi-Fi has two behaviours that cause repeated UI disconnections ("ping timeout") when the controller is used on a bench or fixed table:
+
+**1. Disable Wi-Fi power-save (persistent)**
+
+The radio sleeps between packets by default, causing latency spikes that drop the WebSocket heartbeat. Disable it permanently:
+
+```bash
+echo -e '[connection]\nwifi.powersave = 2' | sudo tee /etc/NetworkManager/conf.d/wifi-powersave-off.conf; ls -l /etc/NetworkManager/conf.d/wifi-powersave-off.conf
+```
+
+Verify (should print `Power save: off` and `Power Management:off`):
+```bash
+iw dev wlan0 get power_save
+iwconfig wlan0 2>/dev/null | grep -i 'Power Management'
+```
+
+**2. Lock to a single access point (stops AP roaming/flapping)**
+
+When multiple APs broadcast the same SSID the Pi ping-pongs between them, causing a full re-associate + DHCP cycle (multi-second blackout) every few minutes. Pin it to the strongest AP at the machine's location:
+
+```bash
+# Auto-detects active connection and strongest BSSID — run from the machine's location
+CON=$(nmcli -t -f NAME,TYPE connection show --active | grep -m1 ':802-11-wireless$' | cut -d: -f1); SSID=$(nmcli -g 802-11-wireless.ssid connection show "$CON"); BSSID=$(nmcli -t -f SSID,BSSID device wifi list | sed 's/\\:/=/g' | grep -m1 "^${SSID}:" | cut -d: -f2 | tr '=' ':'); echo "Conn=$CON SSID=$SSID strongest BSSID=$BSSID"; if [ -z "$BSSID" ]; then echo "No BSSID found — aborting"; else sudo nmcli connection modify "$CON" 802-11-wireless.bssid "$BSSID" && sudo nmcli connection up "$CON" && echo "Locked $SSID to $BSSID"; fi
+```
+
+Verify the lock was saved (`CON` is printed by the lock command above as `Conn=...`):
+```bash
+CON=$(nmcli -t -f NAME,TYPE connection show --active | grep -m1 ':802-11-wireless$' | cut -d: -f1)
+nmcli -g 802-11-wireless.bssid connection show "$CON"
+# Should print the locked BSSID, e.g. AC:8F:A9:8F:FD:44
+```
+
+To clear the lock (e.g. if the pinned AP is retired):
+```bash
+CON=$(nmcli -t -f NAME,TYPE connection show --active | grep -m1 ':802-11-wireless$' | cut -d: -f1)
+sudo nmcli connection modify "$CON" -802-11-wireless.bssid "" && echo "BSSID lock cleared"
+```
+
+> **Note:** wired Ethernet eliminates both issues entirely and is the most reliable option for a machine that doesn't move.
+
 ## Units
 
 - **Linear axes (X, Y, Z)**: Millimeters (mm)
