@@ -2804,7 +2804,7 @@ def main_page():
                                                 'nmcli -t -f NAME,TYPE connection show'
                                                 ' | grep ":802-11-wireless$"'
                                                 ' | cut -d: -f1'
-                                                ' | while IFS= read -r n; do sudo nmcli connection delete "$n"; done'
+                                                ' | while IFS= read -r n; do nmcli connection delete "$n"; done'
                                                 '; sudo reboot\'',
                                                 shell=True,
                                                 stdout=subprocess.DEVNULL,
