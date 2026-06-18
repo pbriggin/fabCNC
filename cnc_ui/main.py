@@ -2785,6 +2785,39 @@ def main_page():
                                     .props('color=negative dense').style('font-size: 13px;')
 
                             ui.separator().classes('my-3')
+                            ui.label('WiFi').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+
+                            def confirm_forget_wifi():
+                                with ui.dialog() as dlg, ui.card():
+                                    ui.label('Forget all WiFi networks?').classes('text-h6')
+                                    ui.label(
+                                        'This will delete all saved WiFi connections and reboot the Pi. '
+                                        'On next boot it will create a "fabCNC" hotspot you can connect to directly.'
+                                    ).classes('text-body2').style('color: #aaa; max-width: 340px;')
+                                    with ui.row().classes('gap-2 justify-end w-full mt-4'):
+                                        ui.button('Cancel', on_click=dlg.close).props('flat dense')
+                                        def do_forget():
+                                            dlg.close()
+                                            ui.notify('Removing WiFi connections and rebooting…', type='warning')
+                                            subprocess.Popen(
+                                                'bash -c \''
+                                                'nmcli -t -f NAME,TYPE connection show'
+                                                ' | grep ":802-11-wireless$"'
+                                                ' | cut -d: -f1'
+                                                ' | while IFS= read -r n; do sudo nmcli connection delete "$n"; done'
+                                                '; sudo reboot\'',
+                                                shell=True,
+                                                stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL,
+                                            )
+                                        ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
+                                dlg.open()
+
+                            with ui.row().classes('gap-2'):
+                                ui.button('Forget WiFi & Reboot', icon='wifi_off', on_click=confirm_forget_wifi) \
+                                    .props('color=negative dense').style('font-size: 13px;')
+
+                            ui.separator().classes('my-3')
 
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
