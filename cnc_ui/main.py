@@ -2887,7 +2887,8 @@ def main_page():
                                             def run_connect():
                                                 cmd = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
                                                 if pwd:
-                                                    cmd += ['password', pwd]
+                                                    cmd += ['password', pwd,
+                                                            '802-11-wireless-security.key-mgmt', 'wpa-psk']
                                                 return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                                             result = await loop.run_in_executor(None, run_connect)
                                             if result.returncode == 0:
