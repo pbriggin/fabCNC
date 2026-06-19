@@ -2791,41 +2791,55 @@ def main_page():
                             wifi_select = ui.select(options={}, label='Available networks').style('min-width: 260px;')
 
                             def _parse_wifi_networks():
-                                """Return list of dicts with ssid, signal, security, in_use."""
-                                # NetworkManager scans continuously in background; no explicit
-                                # rescan needed and listing cached results requires no sudo.
+                                """Return (networks_list, raw_output) using multiline nmcli mode."""
                                 result = subprocess.run(
-                                    ['nmcli', '--terse', '--fields', 'IN-USE,SSID,SIGNAL,SECURITY',
-                                     'device', 'wifi', 'list'],
+                                    ['nmcli', '--mode', 'multiline', '-f',
+                                     'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list'],
                                     capture_output=True, text=True, timeout=15
                                 )
+                                raw = result.stdout
+                                # multiline format: "FIELD[N]: value" one per line
+                                # group by index N
+                                import collections
+                                entries = collections.defaultdict(dict)
+                                for line in raw.splitlines():
+                                    m = re.match(r'^([A-Z_-]+)\[(\d+)\]:\s*(.*)', line)
+                                    if not m:
+                                        continue
+                                    field, idx, val = m.group(1), m.group(2), m.group(3).strip()
+                                    entries[idx][field.lower().replace('-', '_')] = val
                                 networks = []
                                 seen = set()
-                                for line in result.stdout.splitlines():
-                                    # terse fields separated by ':', values escape internal ':' as '\:'
-                                    parts = re.split(r'(?<!\\):', line)
-                                    if len(parts) < 2:
-                                        continue
-                                    in_use = parts[0].strip() == '*'
-                                    ssid = parts[1].replace('\\:', ':').strip()
-                                    signal = parts[2].strip() if len(parts) > 2 else '?'
-                                    security = parts[3].strip() if len(parts) > 3 else ''
+                                for idx in sorted(entries, key=int):
+                                    e = entries[idx]
+                                    ssid = e.get('ssid', '').strip()
                                     if not ssid or ssid in seen:
                                         continue
                                     seen.add(ssid)
-                                    networks.append({'ssid': ssid, 'signal': signal,
-                                                     'security': security, 'in_use': in_use})
-                                networks.sort(key=lambda x: int(x['signal']) if x['signal'].isdigit() else 0, reverse=True)
-                                return networks
+                                    networks.append({
+                                        'ssid': ssid,
+                                        'signal': e.get('signal', '?'),
+                                        'security': e.get('security', ''),
+                                        'in_use': e.get('in_use', '') == '*',
+                                    })
+                                networks.sort(
+                                    key=lambda x: int(x['signal']) if x['signal'].isdigit() else 0,
+                                    reverse=True
+                                )
+                                return networks, raw
 
                             async def scan_wifi():
                                 wifi_status_label.set_text('Scanning…')
                                 wifi_select.set_options({})
                                 loop = asyncio.get_event_loop()
                                 try:
-                                    networks = await loop.run_in_executor(None, _parse_wifi_networks)
+                                    networks, raw = await loop.run_in_executor(None, _parse_wifi_networks)
                                 except Exception as exc:
                                     wifi_status_label.set_text(f'Scan failed: {exc}')
+                                    return
+                                if not networks:
+                                    # show raw output to help diagnose
+                                    wifi_status_label.set_text(f'No networks parsed. Raw: {raw[:200]!r}')
                                     return
                                 options = {}
                                 for n in networks:
