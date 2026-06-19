@@ -2787,12 +2787,88 @@ def main_page():
                             ui.separator().classes('my-3')
                             ui.label('WiFi').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
+                            wifi_status_label = ui.label('Press Scan to find networks.').classes('text-caption').style('color: #888;')
+                            wifi_select = ui.select(options={}, label='Available networks').style('min-width: 260px;')
+
+                            def _parse_wifi_networks():
+                                """Return list of dicts with ssid, signal, security, in_use."""
+                                result = subprocess.run(
+                                    ['nmcli', '--terse', '--fields', 'IN-USE,SSID,SIGNAL,SECURITY',
+                                     'device', 'wifi', 'list', '--rescan', 'yes'],
+                                    capture_output=True, text=True, timeout=20
+                                )
+                                networks = []
+                                seen = set()
+                                for line in result.stdout.splitlines():
+                                    # terse fields separated by ':', values escape internal ':' as '\:'
+                                    parts = re.split(r'(?<!\\):', line)
+                                    if len(parts) < 2:
+                                        continue
+                                    in_use = parts[0].strip() == '*'
+                                    ssid = parts[1].replace('\\:', ':').strip()
+                                    signal = parts[2].strip() if len(parts) > 2 else '?'
+                                    security = parts[3].strip() if len(parts) > 3 else ''
+                                    if not ssid or ssid in seen:
+                                        continue
+                                    seen.add(ssid)
+                                    networks.append({'ssid': ssid, 'signal': signal,
+                                                     'security': security, 'in_use': in_use})
+                                networks.sort(key=lambda x: int(x['signal']) if x['signal'].isdigit() else 0, reverse=True)
+                                return networks
+
+                            async def scan_wifi():
+                                wifi_status_label.set_text('Scanning…')
+                                wifi_select.set_options({})
+                                loop = asyncio.get_event_loop()
+                                try:
+                                    networks = await loop.run_in_executor(None, _parse_wifi_networks)
+                                except Exception as exc:
+                                    wifi_status_label.set_text(f'Scan failed: {exc}')
+                                    return
+                                options = {}
+                                for n in networks:
+                                    label = f"{'★ ' if n['in_use'] else ''}{n['ssid']}  ({n['signal']}%{', ' + n['security'] if n['security'] else ''})"
+                                    options[n['ssid']] = label
+                                wifi_select.set_options(options)
+                                wifi_status_label.set_text(f"Found {len(networks)} network(s).")
+
+                            def open_connect_dialog():
+                                ssid = wifi_select.value
+                                if not ssid:
+                                    ui.notify('Select a network first.', type='warning')
+                                    return
+                                with ui.dialog() as conn_dlg, ui.card().style('min-width: 320px;'):
+                                    ui.label(f'Connect to "{ssid}"').classes('text-h6')
+                                    pwd_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                                    conn_status = ui.label('').classes('text-caption').style('color: #f88;')
+                                    with ui.row().classes('gap-2 justify-end w-full mt-2'):
+                                        ui.button('Cancel', on_click=conn_dlg.close).props('flat dense')
+                                        async def do_connect():
+                                            conn_status.set_text('Connecting…')
+                                            pwd = pwd_input.value
+                                            loop = asyncio.get_event_loop()
+                                            def run_connect():
+                                                cmd = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
+                                                if pwd:
+                                                    cmd += ['password', pwd]
+                                                return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                                            result = await loop.run_in_executor(None, run_connect)
+                                            if result.returncode == 0:
+                                                conn_dlg.close()
+                                                ui.notify(f'Connected to {ssid}', type='positive')
+                                                wifi_status_label.set_text(f'Connected to {ssid}')
+                                            else:
+                                                err = result.stderr.strip() or result.stdout.strip()
+                                                conn_status.set_text(err or 'Connection failed.')
+                                        ui.button('Connect', on_click=do_connect).props('color=primary dense')
+                                conn_dlg.open()
+
                             def confirm_forget_wifi():
                                 with ui.dialog() as dlg, ui.card():
                                     ui.label('Forget all WiFi networks?').classes('text-h6')
                                     ui.label(
                                         'This will delete all saved WiFi connections and reboot the Pi. '
-                                        'On next boot it will create a "fabCNC" hotspot you can connect to directly.'
+                                        'On next boot it will create a "fabCNC Setup" hotspot.'
                                     ).classes('text-body2').style('color: #aaa; max-width: 340px;')
                                     with ui.row().classes('gap-2 justify-end w-full mt-4'):
                                         ui.button('Cancel', on_click=dlg.close).props('flat dense')
@@ -2813,9 +2889,10 @@ def main_page():
                                         ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
                                 dlg.open()
 
-                            with ui.row().classes('gap-2'):
-                                ui.button('Forget WiFi & Reboot', icon='wifi_off', on_click=confirm_forget_wifi) \
-                                    .props('color=negative dense').style('font-size: 13px;')
+                            with ui.row().classes('gap-2 items-center'):
+                                ui.button('Scan', icon='wifi_find', on_click=scan_wifi).props('dense outline').style('font-size: 13px;')
+                                ui.button('Connect', icon='wifi', on_click=open_connect_dialog).props('color=primary dense').style('font-size: 13px;')
+                                ui.button('Forget All & Reboot', icon='wifi_off', on_click=confirm_forget_wifi).props('color=negative dense').style('font-size: 13px;')
 
                             ui.separator().classes('my-3')
 
