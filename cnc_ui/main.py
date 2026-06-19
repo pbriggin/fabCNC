@@ -2792,10 +2792,15 @@ def main_page():
 
                             def _parse_wifi_networks():
                                 """Return list of dicts with ssid, signal, security, in_use."""
+                                # Trigger a fresh scan first (needs privileges on some configs)
+                                subprocess.run(
+                                    ['sudo', 'nmcli', 'device', 'wifi', 'rescan'],
+                                    capture_output=True, timeout=10
+                                )
                                 result = subprocess.run(
                                     ['nmcli', '--terse', '--fields', 'IN-USE,SSID,SIGNAL,SECURITY',
-                                     'device', 'wifi', 'list', '--rescan', 'yes'],
-                                    capture_output=True, text=True, timeout=20
+                                     'device', 'wifi', 'list'],
+                                    capture_output=True, text=True, timeout=15
                                 )
                                 networks = []
                                 seen = set()
