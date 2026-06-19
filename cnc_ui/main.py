@@ -2808,21 +2808,27 @@ def main_page():
                                     capture_output=True, text=True, timeout=15
                                 )
                                 raw = result.stdout
-                                # multiline format: multiple results use "FIELD[N]: value";
-                                # single result omits the index: "FIELD: value"
+                                # multiline format: indexed "FIELD[N]: value" or non-indexed "FIELD: value"
+                                # Non-indexed: nmcli omits [N] on all records on some versions/configs;
+                                # detect record boundaries by watching for IN-USE repeating.
                                 entries = collections.defaultdict(dict)
+                                current_idx = 0
                                 for line in raw.splitlines():
-                                    # indexed form (multiple results)
+                                    # indexed form: FIELD[N]: value
                                     m = re.match(r'^([A-Z_-]+)\[(\d+)\]:\s*(.*)', line)
                                     if m:
                                         field, idx, val = m.group(1), m.group(2), m.group(3).strip()
                                         entries[idx][field.lower().replace('-', '_')] = val
                                         continue
-                                    # non-indexed form (single result)
+                                    # non-indexed form: FIELD: value
                                     m2 = re.match(r'^([A-Z_-]+):\s*(.*)', line)
                                     if m2:
                                         field, val = m2.group(1), m2.group(2).strip()
-                                        entries['0'][field.lower().replace('-', '_')] = val
+                                        field_key = field.lower().replace('-', '_')
+                                        # IN-USE marks the start of each record
+                                        if field_key == 'in_use' and 'in_use' in entries[str(current_idx)]:
+                                            current_idx += 1
+                                        entries[str(current_idx)][field_key] = val
                                 networks = []
                                 seen = set()
                                 for idx in sorted(entries, key=lambda x: int(x)):
