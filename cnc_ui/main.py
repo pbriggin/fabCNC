@@ -2792,25 +2792,40 @@ def main_page():
 
                             def _parse_wifi_networks():
                                 """Return (networks_list, raw_output) using multiline nmcli mode."""
+                                import collections, time
+                                # Force a fresh scan; goodpigeon has NOPASSWD sudo
+                                try:
+                                    subprocess.run(
+                                        ['sudo', 'nmcli', 'device', 'wifi', 'rescan'],
+                                        capture_output=True, text=True, timeout=10
+                                    )
+                                    time.sleep(4)
+                                except Exception:
+                                    pass
                                 result = subprocess.run(
                                     ['nmcli', '--mode', 'multiline', '-f',
                                      'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list'],
                                     capture_output=True, text=True, timeout=15
                                 )
                                 raw = result.stdout
-                                # multiline format: "FIELD[N]: value" one per line
-                                # group by index N
-                                import collections
+                                # multiline format: multiple results use "FIELD[N]: value";
+                                # single result omits the index: "FIELD: value"
                                 entries = collections.defaultdict(dict)
                                 for line in raw.splitlines():
+                                    # indexed form (multiple results)
                                     m = re.match(r'^([A-Z_-]+)\[(\d+)\]:\s*(.*)', line)
-                                    if not m:
+                                    if m:
+                                        field, idx, val = m.group(1), m.group(2), m.group(3).strip()
+                                        entries[idx][field.lower().replace('-', '_')] = val
                                         continue
-                                    field, idx, val = m.group(1), m.group(2), m.group(3).strip()
-                                    entries[idx][field.lower().replace('-', '_')] = val
+                                    # non-indexed form (single result)
+                                    m2 = re.match(r'^([A-Z_-]+):\s*(.*)', line)
+                                    if m2:
+                                        field, val = m2.group(1), m2.group(2).strip()
+                                        entries['0'][field.lower().replace('-', '_')] = val
                                 networks = []
                                 seen = set()
-                                for idx in sorted(entries, key=int):
+                                for idx in sorted(entries, key=lambda x: int(x)):
                                     e = entries[idx]
                                     ssid = e.get('ssid', '').strip()
                                     if not ssid or ssid in seen:
