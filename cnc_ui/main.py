@@ -2885,10 +2885,15 @@ def main_page():
                                             pwd = pwd_input.value
                                             loop = asyncio.get_event_loop()
                                             def run_connect():
+                                                # Delete any stale/incomplete profile for this SSID
+                                                # (avoids "key-mgmt: property is missing" from old profiles)
+                                                subprocess.run(
+                                                    ['sudo', 'nmcli', 'connection', 'delete', ssid],
+                                                    capture_output=True, text=True, timeout=10
+                                                )
                                                 cmd = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
                                                 if pwd:
-                                                    cmd += ['password', pwd,
-                                                            '802-11-wireless-security.key-mgmt', 'wpa-psk']
+                                                    cmd += ['password', pwd]
                                                 return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                                             result = await loop.run_in_executor(None, run_connect)
                                             if result.returncode == 0:
