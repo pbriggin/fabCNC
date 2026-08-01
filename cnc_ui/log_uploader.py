@@ -376,15 +376,20 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
             zf.writestr("system_info.txt", sys_text)
             manifest["files"].append({"name": "system_info.txt", "bytes": len(sys_text)})
             manifest["throttled_flags"] = sys_info.get("throttled_flags", [])
-            # Raw system logs as separate files for easy viewing
-            dmesg_full = _run(["dmesg", "--color=never", "-T"], timeout=10)
-            zf.writestr("system/dmesg.txt", dmesg_full)
-            manifest["files"].append({"name": "system/dmesg.txt", "bytes": len(dmesg_full)})
-            journal_full = _run(
-                ["journalctl", "-b", "--no-pager", "--output=short-iso"], timeout=15
+            # Raw system logs as separate files for easy viewing — last hour only
+            # so bundle size stays bounded regardless of Pi uptime.
+            dmesg_recent = _run(
+                ["journalctl", "-k", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
+                timeout=10,
             )
-            zf.writestr("system/journal.txt", journal_full)
-            manifest["files"].append({"name": "system/journal.txt", "bytes": len(journal_full)})
+            zf.writestr("system/dmesg.txt", dmesg_recent)
+            manifest["files"].append({"name": "system/dmesg.txt", "bytes": len(dmesg_recent)})
+            journal_recent = _run(
+                ["journalctl", "-b", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
+                timeout=15,
+            )
+            zf.writestr("system/journal.txt", journal_recent)
+            manifest["files"].append({"name": "system/journal.txt", "bytes": len(journal_recent)})
         except Exception as e:
             logger.warning(f"Could not collect system info for bundle: {e}")
 
