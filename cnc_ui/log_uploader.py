@@ -417,12 +417,33 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 
 
 # ── Upload transport ──────────────────────────────────────────────────────────
+_DISCORD_MAX_BYTES = 7 * 1024 * 1024  # 7 MB — safe margin below Discord's 8 MB hard limit
+
+
+def _strip_system_files(zip_bytes: bytes) -> bytes:
+    """Rebuild zip without system/ entries to reduce size."""
+    src = io.BytesIO(zip_bytes)
+    dst = io.BytesIO()
+    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if not item.filename.startswith("system/"):
+                zout.writestr(item, zin.read(item.filename))
+    return dst.getvalue()
+
+
 def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
     """Upload a log zip as a Discord file attachment via a webhook URL."""
     cfg = logging_setup.load_config()["upload"]
     url = cfg["url"]
     if "?" not in url:
         url += "?wait=true"
+
+    if len(zip_bytes) > _DISCORD_MAX_BYTES:
+        logger.warning(
+            f"Bundle is {len(zip_bytes) // 1024} KB — stripping system/ files to fit Discord's 8 MB limit"
+        )
+        zip_bytes = _strip_system_files(zip_bytes)
+        filename = filename.replace(".zip", "_nosysinfo.zip")
 
     device_id = _get_device_id()
     ts = manifest.get("created_at", "")[:19].replace("T", " ")
