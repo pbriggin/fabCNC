@@ -420,15 +420,46 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 _DISCORD_MAX_BYTES = 7 * 1024 * 1024  # 7 MB — safe margin below Discord's 8 MB hard limit
 
 
-def _strip_system_files(zip_bytes: bytes) -> bytes:
-    """Rebuild zip without system/ entries to reduce size."""
+def _rebuild_zip_excluding(zip_bytes: bytes, *prefixes: str) -> bytes:
     src = io.BytesIO(zip_bytes)
     dst = io.BytesIO()
     with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            if not item.filename.startswith("system/"):
+            if not any(item.filename.startswith(p) for p in prefixes):
                 zout.writestr(item, zin.read(item.filename))
     return dst.getvalue()
+
+
+def _truncate_log_entries(zip_bytes: bytes, max_entry_bytes: int = 400 * 1024) -> bytes:
+    """Rebuild zip keeping only the tail of oversized logs/ entries."""
+    src = io.BytesIO(zip_bytes)
+    dst = io.BytesIO()
+    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("logs/") and len(data) > max_entry_bytes:
+                data = data[-max_entry_bytes:]
+            zout.writestr(item, data)
+    return dst.getvalue()
+
+
+def _trim_to_discord_limit(zip_bytes: bytes, filename: str) -> tuple[bytes, str]:
+    """Progressively shrink zip to fit Discord's 8 MB limit."""
+    limit = _DISCORD_MAX_BYTES
+    if len(zip_bytes) <= limit:
+        return zip_bytes, filename
+    # Pass 1: drop system snapshots
+    zip_bytes = _rebuild_zip_excluding(zip_bytes, "system/")
+    filename = filename.replace(".zip", "_nosysinfo.zip")
+    if len(zip_bytes) <= limit:
+        return zip_bytes, filename
+    # Pass 2: drop rotated log backups
+    zip_bytes = _rebuild_zip_excluding(zip_bytes, "logs/backups/")
+    if len(zip_bytes) <= limit:
+        return zip_bytes, filename
+    # Pass 3: truncate large log chunks to their most-recent tail
+    zip_bytes = _truncate_log_entries(zip_bytes)
+    return zip_bytes, filename
 
 
 def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
@@ -439,11 +470,11 @@ def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
         url += "?wait=true"
 
     if len(zip_bytes) > _DISCORD_MAX_BYTES:
+        original_kb = len(zip_bytes) // 1024
+        zip_bytes, filename = _trim_to_discord_limit(zip_bytes, filename)
         logger.warning(
-            f"Bundle is {len(zip_bytes) // 1024} KB — stripping system/ files to fit Discord's 8 MB limit"
+            f"Bundle trimmed from {original_kb} KB to {len(zip_bytes) // 1024} KB for Discord"
         )
-        zip_bytes = _strip_system_files(zip_bytes)
-        filename = filename.replace(".zip", "_nosysinfo.zip")
 
     device_id = _get_device_id()
     ts = manifest.get("created_at", "")[:19].replace("T", " ")
