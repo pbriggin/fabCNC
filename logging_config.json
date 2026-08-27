@@ -14,7 +14,7 @@
     "interval_minutes": 0,
     "device_id": "",
     "auth_header": "",
-    "piece_count_webhook_url": "https://discord.com/api/webhooks/1542582506883256400/TcGTRJDN_WXhl3-wtO9zh3CIQiDTjJzdNCoV3QQUPrXjIraWmmoFjSDJiYiydfwF3iPn",
+    "piece_count_webhook_url": "https://v0-good-pigeon.vercel.app/api/cnc-webhook",
     "include_gcode": true,
     "include_all_gcode_once": true,
     "include_uploads": true,
