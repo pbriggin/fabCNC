@@ -240,6 +240,9 @@ background uploader live — no service restart needed), **Test Upload** to
 send one bundle immediately and confirm the URL works, or **Upload Now** to
 push a fresh incremental bundle.
 
+> For per-job piece-count posts, set `upload.piece_count_webhook_url` directly
+> in `logging_config.json` (below).
+
 ### Configure via `logging_config.json`
 
 You can also edit [`logging_config.json`](logging_config.json) directly and
@@ -262,12 +265,25 @@ You can also edit [`logging_config.json`](logging_config.json) directly and
     "interval_minutes": 60,
     "device_id": "shop-pi-1",
     "auth_header": "Bearer YOUR_TOKEN",
+    "piece_count_webhook_url": "https://discord.com/api/webhooks/...",
     "include_gcode": true,
     "include_uploads": false,
     "max_bundle_mb": 50
   }
 }
 ```
+
+### Per-job piece-count posts to Discord
+
+If you want a dedicated Discord channel that only shows the number of pieces
+cut per completed job:
+
+1. Create a new Discord text channel (for example, `#piece-count`).
+2. In that channel, create a webhook (Channel Settings → Integrations → Webhooks).
+3. Put the webhook URL in `upload.piece_count_webhook_url`.
+
+On each successful `job_complete`, fabCNC posts a plain-text line with piece
+count and source device ID (for example `12 shop-pi-1`).
 
 ### Remote upload destinations
 

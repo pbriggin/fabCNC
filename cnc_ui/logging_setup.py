@@ -57,7 +57,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interval_minutes": 60,     # 0 disables the periodic uploader
         "device_id": "",            # Defaults to hostname when blank
         "auth_header": "",          # e.g. "Bearer abc123" (optional)
+        "piece_count_webhook_url": "",  # Optional dedicated Discord webhook for plain count posts
         "include_gcode": True,
+        "include_all_gcode_once": False,  # True means include all gcode on next successful upload only
         "include_uploads": False,   # DXFs can be big; off by default
         "max_bundle_mb": 50,
     },

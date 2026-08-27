@@ -1870,7 +1870,7 @@ async def start_job():
               filename=machine_state.loaded_filename)
     
     # Start job without callback - we'll monitor completion via state
-    cnc_controller.start_job(current_gcode)
+    cnc_controller.start_job(current_gcode, piece_count=len(current_toolpath_shapes))
 
 
 def pause_job():

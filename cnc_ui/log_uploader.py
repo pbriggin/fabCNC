@@ -16,6 +16,7 @@ Configure in logging_config.json:
       "interval_minutes": 60,
       "device_id": "shop-pi",       # blank = hostname
       "auth_header": "Bearer xyz",  # optional
+            "piece_count_webhook_url": "", # optional dedicated Discord webhook
       "include_gcode": true,
       "include_uploads": false,
       "max_bundle_mb": 50
@@ -357,11 +358,15 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
         if upload_cfg.get("include_gcode", True):
             gdir = uploads_root / "gcode_output"
             if gdir.exists():
-                for f in sorted(
+                include_all_once = bool(upload_cfg.get("include_all_gcode_once", False))
+                gcode_files = sorted(
                     gdir.glob("*.gcode"),
                     key=lambda x: x.stat().st_mtime,
                     reverse=True,
-                )[:30]:
+                )
+                if not include_all_once:
+                    gcode_files = gcode_files[:30]
+                for f in gcode_files:
                     zf.write(f, f"gcode/{f.name}")
         if upload_cfg.get("include_uploads", False) and uploads_root.exists():
             for f in sorted(uploads_root.glob("*.dxf")):
@@ -574,6 +579,65 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
     }
 
 
+def send_piece_count(piece_count: int) -> dict:
+    """Send a plain-text piece count + source device to Discord webhook.
+
+    The webhook URL is read from ``upload.piece_count_webhook_url``.
+    If empty, this call is a no-op so existing installs keep working.
+    """
+    cfg = logging_setup.load_config().get("upload", {})
+    url = (cfg.get("piece_count_webhook_url") or "").strip()
+    count = max(0, int(piece_count or 0))
+    device_id = _get_device_id()
+    if not url or count <= 0:
+        return {"ok": False, "skipped": True, "reason": "not_configured_or_zero"}
+
+    if "?" not in url:
+        url += "?wait=true"
+
+    body = json.dumps({"content": f"{count} {device_id}"}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "fabCNC/1.0",
+    }
+
+    started = time.time()
+    try:
+        req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
+        with _urlrequest.urlopen(req, timeout=20, context=_ssl_context()) as resp:
+            status = resp.status
+            resp_body = resp.read(1024).decode("utf-8", errors="replace")
+
+        logging_setup.log_event(
+            "job",
+            "piece_count_posted",
+            ok=True,
+            piece_count=count,
+            device_id=device_id,
+            status=status,
+            duration_s=round(time.time() - started, 2),
+        )
+        return {
+            "ok": True,
+            "status": status,
+            "piece_count": count,
+            "device_id": device_id,
+            "duration_s": round(time.time() - started, 2),
+            "response": resp_body[:256],
+        }
+    except Exception as e:
+        logging_setup.log_event(
+            "job",
+            "piece_count_posted",
+            ok=False,
+            piece_count=count,
+            device_id=device_id,
+            error=str(e),
+        )
+        logger.warning(f"Failed posting piece count to Discord: {e}")
+        return {"ok": False, "error": str(e), "piece_count": count}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 def upload_now(full: bool = False, trigger: str = "retry") -> dict:
     """Build and upload a bundle synchronously. Returns a status dict."""
@@ -583,9 +647,15 @@ def upload_now(full: bool = False, trigger: str = "retry") -> dict:
 
     with _state_lock:
         zip_bytes, filename, manifest = build_bundle(full=full, trigger=trigger)
+        include_all_once = bool(cfg.get("include_all_gcode_once", False))
         try:
             result = _do_upload(zip_bytes, filename, manifest)
             _write_state(manifest.pop("_state"))
+            if include_all_once:
+                try:
+                    logging_setup.save_upload_config({"include_all_gcode_once": False})
+                except Exception as e:
+                    logger.warning(f"Could not reset include_all_gcode_once after upload: {e}")
             logging_setup.log_event(
                 "system",
                 "log_upload",

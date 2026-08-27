@@ -96,6 +96,7 @@ class CNCController:
         # Try to connect on initialization
         self.homed = False              # True only after a successful home_all()
         self._current_job_gcode: list = []  # Copy of last started job's gcode
+        self._current_job_piece_count = 0
         self._auto_connect()
     
     def _auto_connect(self) -> bool:
@@ -893,12 +894,13 @@ class CNCController:
         )
         self.job_thread.start()
 
-    def start_job(self, gcode_lines: list[str]) -> None:
+    def start_job(self, gcode_lines: list[str], piece_count: int = 0) -> None:
         """
         Start executing a G-code job via serial streaming.
         
         Args:
             gcode_lines: List of G-code commands to execute
+            piece_count: Number of pieces this job is expected to cut.
         """
         if not machine_state.is_idle() or not machine_state.job_loaded or not self.connected:
             log_controller_event(
@@ -912,10 +914,12 @@ class CNCController:
         self.stop_requested = False
         self.pause_requested = False
         self._current_job_gcode = list(gcode_lines)
+        self._current_job_piece_count = max(0, int(piece_count or 0))
         log_controller_event(
             "job_start",
             command_count=len(gcode_lines),
             filename=machine_state.loaded_filename,
+            piece_count=self._current_job_piece_count,
         )
         if _log_uploader:
             _log_uploader.notify_job_run()
@@ -1237,6 +1241,13 @@ class CNCController:
                         max_wait_s=round(max_wait_time, 2),
                     )
                     if _log_uploader:
+                        if self._current_job_piece_count > 0:
+                            threading.Thread(
+                                target=_log_uploader.send_piece_count,
+                                args=(self._current_job_piece_count,),
+                                daemon=True,
+                                name="piece-count-on-complete",
+                            ).start()
                         threading.Thread(
                             target=_log_uploader.upload_now,
                             args=(False, "job_complete"),
@@ -1273,6 +1284,7 @@ class CNCController:
             log_controller_event("job_error", error=str(e))
         finally:
             self.streaming_mode = False
+            self._current_job_piece_count = 0
 
 
 # Global controller instance
