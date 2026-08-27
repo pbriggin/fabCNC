@@ -297,6 +297,9 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
     log_dir = logging_setup.get_log_dir()
     upload_cfg = cfg["upload"]
     device_id = _get_device_id()
+    include_all_once = bool(upload_cfg.get("include_all_gcode_once", False))
+    bundle_tag = "allgcode" if include_all_once else ""
+    trigger_tag = trigger if not bundle_tag else f"{trigger}_{bundle_tag}"
 
     state = _read_state() if not full else {}
     offsets: dict[str, int] = state.get("offsets", {})
@@ -306,7 +309,9 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
         "bundle_id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "full": full,
-        "trigger": trigger,
+        "trigger": trigger_tag,
+        "include_all_gcode": include_all_once,
+        "bundle_tag": bundle_tag,
         "hostname": socket.gethostname(),
         "files": [],
     }
@@ -358,7 +363,6 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
         if upload_cfg.get("include_gcode", True):
             gdir = uploads_root / "gcode_output"
             if gdir.exists():
-                include_all_once = bool(upload_cfg.get("include_all_gcode_once", False))
                 gcode_files = sorted(
                     gdir.glob("*.gcode"),
                     key=lambda x: x.stat().st_mtime,
@@ -368,6 +372,7 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
                     gcode_files = gcode_files[:30]
                 for f in gcode_files:
                     zf.write(f, f"gcode/{f.name}")
+                manifest["gcode_file_count"] = len(gcode_files)
         if upload_cfg.get("include_uploads", False) and uploads_root.exists():
             for f in sorted(uploads_root.glob("*.dxf")):
                 zf.write(f, f"uploads/{f.name}")
@@ -408,7 +413,7 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
         )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"fabcnc_{device_id}_{ts}_{trigger}.zip"
+    filename = f"fabcnc_{device_id}_{ts}_{trigger_tag}.zip"
     state["offsets"] = new_offsets
     state["last_bundle"] = {
         "filename": filename,
