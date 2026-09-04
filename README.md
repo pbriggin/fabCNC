@@ -56,6 +56,8 @@ The application will be available at:
 ```
 cnc_ui/
 ├── main.py                        # NiceGUI application entry point; UI layout and API endpoints
+├── logging_setup.py               # Structured logging config (events/controller/toolpath JSON logs)
+├── log_uploader.py                # Remote log bundle upload + per-job piece-count webhook
 ├── cnc/
 │   ├── controller.py              # Marlin serial controller (auto-connects, streams G-code)
 │   ├── state.py                   # Thread-safe MachineState (position, status, job progress)
@@ -64,6 +66,7 @@ cnc_ui/
 │   └── dxf_processor.py           # DXF → point-list conversion using ezdxf
 ├── toolpath_planning/
 │   ├── toolpath_generator.py      # Point lists → G-code with Z/A axis management
+│   ├── overlap_detector.py        # Detects overlapping shapes in nested layouts
 │   └── gcode_visualizer.py        # G-code → matplotlib 2D toolpath visualization
 ├── static/
 │   └── toolpath_canvas.js         # Client-side canvas rendering for toolpath preview
@@ -102,7 +105,7 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 |---|---|---|
 | Cutting height (Z) | −30 mm | Z when blade is down |
 | Safe height (Z) | −15 mm | Z when blade is raised |
-| Corner angle threshold | 30° | Angle above which Z raises at corners |
+| Corner angle threshold | 20° | Angle above which Z raises at corners |
 | Feed rate | 15,000 mm/min | Cutting speed |
 | Plunge rate | 12,000 mm/min | Z plunge speed |
 | Rapid rate | 18,000 mm/min | Travel moves |
@@ -223,32 +226,28 @@ All four files rotate (default 10 MB × 10 backups).
 
 ### Configure from the GUI (no SSH needed)
 
-Open the **System** tab → **Remote Log Upload**. Fill in:
+Open the **System** tab → **Debug** section. There is no editable form for
+upload settings (URL, interval, device ID, etc.) — those are only set via
+`logging_config.json` (see below). The GUI gives you two buttons:
 
-| Field | What to put |
-|-------|-------------|
-| Enable automatic uploads | Tick to start pushing in the background |
-| Upload URL | A webhook you control (see below) |
-| Method | `POST` for most receivers, `PUT` for pre-signed S3/R2 URLs |
-| Every (minutes) | Push interval. `0` = manual only |
-| Device ID | Anything — used to label this machine in the upload |
-| Auth header | Optional, e.g. `Bearer my-token` |
-| Include recent gcode / DXFs | Bundle extra artefacts with each upload |
+| Button | What it does |
+|--------|--------------|
+| Send Logs to Dev | Runs an immediate incremental upload to `upload.url`, using the currently saved config |
+| Download Logs | Opens `/debug-bundle` in a new tab — a zip of logs + uploads + canvases + recent gcode |
 
-Click **Save** to persist (writes `logging_config.json` and restarts the
-background uploader live — no service restart needed), **Test Upload** to
-send one bundle immediately and confirm the URL works, or **Upload Now** to
-push a fresh incremental bundle.
+The current `log_dir` is shown underneath the buttons.
 
-> For per-job piece-count posts, set `upload.piece_count_webhook_url` directly
-> in `logging_config.json` (below).
+> Per-job piece-count posts (to `upload.piece_count_webhook_url`) happen
+> automatically on job completion — there's no separate GUI control for them.
+> They use the same `upload.auth_header` field as log uploads (sent as an
+> `Authorization` header) if your relay requires one.
 
 ### Configure via `logging_config.json`
 
-You can also edit [`logging_config.json`](logging_config.json) directly and
-`git pull` on the Pi if you have shell access. Same effect as the GUI form.
-`git pull` on the Pi to push changes. Restart the fabcnc service to apply
-(or use the **Restart Service** button in the System tab).
+There's no in-UI form for these settings (see above) — edit
+[`logging_config.json`](logging_config.json) directly, commit and push, then
+`git pull` on the Pi if you have shell access. Restart the fabcnc service to
+apply (or use the **Restart Service** button in the System tab).
 
 ```json
 {
@@ -260,30 +259,35 @@ You can also edit [`logging_config.json`](logging_config.json) directly and
   "backup_count": 10,
   "upload": {
     "enabled": true,
-    "url": "https://your-webhook.example.com/fabcnc-logs",
+    "url": "https://v0-good-pigeon.vercel.app/api/fabcnc-logs",
     "method": "POST",
-    "interval_minutes": 60,
+    "interval_minutes": 0,
     "device_id": "shop-pi-1",
-    "auth_header": "Bearer YOUR_TOKEN",
-    "piece_count_webhook_url": "https://discord.com/api/webhooks/...",
+    "auth_header": "",
+    "piece_count_webhook_url": "https://v0-good-pigeon.vercel.app/api/cnc-webhook",
     "include_gcode": true,
-    "include_uploads": false,
-    "max_bundle_mb": 50
+    "include_all_gcode_once": false,
+    "include_uploads": true,
+    "max_bundle_mb": 24
   }
 }
 ```
 
-### Per-job piece-count posts to Discord
+### Per-job piece-count relay (Good Pigeon)
 
-If you want a dedicated Discord channel that only shows the number of pieces
-cut per completed job:
+fabCNC sends one JSON payload per completed job to the Good Pigeon endpoint.
+The website counts the job and relays the same payload to your downstream notification destination.
+This is a separate mechanism from the log-bundle upload above — it uses its own
+URL (`upload.piece_count_webhook_url`), but shares the same auth strategy: the
+`upload.auth_header` value (if set) is sent as an `Authorization` header on
+both the piece-count post and the log-bundle upload.
 
-1. Create a new Discord text channel (for example, `#piece-count`).
-2. In that channel, create a webhook (Channel Settings → Integrations → Webhooks).
-3. Put the webhook URL in `upload.piece_count_webhook_url`.
+1. Set `upload.piece_count_webhook_url` to `https://v0-good-pigeon.vercel.app/api/cnc-webhook`.
+2. Keep the payload format exactly `<pieceCount> <machineId>`.
+3. If your relay requires auth, set `upload.auth_header` (e.g. `Bearer my-token`) in `logging_config.json` — the same value is used for both endpoints.
 
-On each successful `job_complete`, fabCNC posts a plain-text line with piece
-count and source device ID (for example `12 shop-pi-1`).
+On each successful `job_complete`, fabCNC posts JSON with exact content format
+`"<pieceCount> <machineId>"` (for example `"12 shop-pi-1"`).
 
 ### Remote upload destinations
 
@@ -296,6 +300,10 @@ Any HTTPS endpoint that accepts an upload works:
 - **PUT raw** (`"method": "PUT"`): the entire request body is the zip — point at
   a pre-signed S3 / GCS / R2 URL.
 
+For this repository's current defaults, log bundles are sent to
+`https://v0-good-pigeon.vercel.app/api/fabcnc-logs` using `POST` multipart with
+fields `manifest` and `file`.
+
 The Pi only pushes *new bytes since the last successful upload*, tracked in
 `cnc_ui/logs/.uploader_state.json`, so traffic stays small.
 
@@ -303,10 +311,11 @@ The Pi only pushes *new bytes since the last successful upload*, tracked in
 
 Three ways:
 
-1. **Automatic push** — set `upload.enabled=true` and `upload.url=…`. The
-   uploader thread runs every `interval_minutes`.
+1. **Automatic push** — set `upload.enabled=true` and `upload.interval_minutes`
+   to a nonzero value in `logging_config.json`, then restart the service. The
+   uploader thread runs on that interval.
 2. **One-click upload from the GUI** — open the System tab and click
-   **Upload Logs Now**. Same bundle, sent immediately.
+   **Send Logs to Dev**. Same bundle, sent immediately.
 3. **Download from any browser** — `http://<pi>:8080/debug-bundle` returns a
    zip of logs + canvas saves + recent gcode. Useful before remote-upload is
    wired up.

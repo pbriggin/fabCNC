@@ -7,16 +7,16 @@
   "max_file_size_mb": 10,
   "backup_count": 10,
   "upload": {
-    "_comment": "Discord webhook — logs are posted as zip file attachments to the #fabcnc-logs channel.",
+    "_comment": "Remote log upload endpoint (Vercel relay recommended).",
     "enabled": true,
-    "url": "https://discord.com/api/webhooks/1504880086099296358/KeT2ZvjgVb4Yg04XcCfbMMOp7PsHkEPhAL8sAR2WG7aBPPqHQcnKFNCzLzx1PQlHSEti",
-    "method": "discord",
+    "url": "https://v0-good-pigeon.vercel.app/api/fabcnc-logs",
+    "method": "POST",
     "interval_minutes": 0,
     "device_id": "",
     "auth_header": "",
-    "piece_count_webhook_url": "https://discord.com/api/webhooks/1542582506883256400/TcGTRJDN_WXhl3-wtO9zh3CIQiDTjJzdNCoV3QQUPrXjIraWmmoFjSDJiYiydfwF3iPn",
+    "piece_count_webhook_url": "https://v0-good-pigeon.vercel.app/api/cnc-webhook",
     "include_gcode": true,
-    "include_all_gcode_once": true,
+    "include_all_gcode_once": false,
     "include_uploads": true,
     "max_bundle_mb": 24
   }

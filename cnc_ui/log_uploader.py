@@ -16,7 +16,7 @@ Configure in logging_config.json:
       "interval_minutes": 60,
       "device_id": "shop-pi",       # blank = hostname
       "auth_header": "Bearer xyz",  # optional
-            "piece_count_webhook_url": "", # optional dedicated Discord webhook
+    "piece_count_webhook_url": "", # optional Good Pigeon relay endpoint
       "include_gcode": true,
       "include_uploads": false,
       "max_bundle_mb": 50
@@ -48,6 +48,14 @@ from urllib import request as _urlrequest
 import logging_setup
 
 logger = logging.getLogger(__name__)
+
+
+def _resp_preview(text: str, limit: int = 400) -> str:
+    """Return a compact, single-line preview for logging responses/errors."""
+    if not text:
+        return ""
+    one_line = " ".join(str(text).split())
+    return one_line[:limit]
 
 # Build an SSL context that works on macOS (no system keychain) and Pi alike.
 def _ssl_context() -> ssl.SSLContext:
@@ -286,7 +294,7 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
     Create an in-memory zip of logs + (optionally) recent artefacts.
 
     *trigger* is embedded in the filename so bundles are easy to distinguish
-    in Discord/storage. Common values: ``"auto"``, ``"manual"``,
+    in remote storage. Common values: ``"auto"``, ``"manual"``,
     ``"disconnect"``, ``"job_complete"``, ``"job_abort"``.
 
     Returns ``(zip_bytes, filename, manifest)``. When ``full`` is False the
@@ -427,109 +435,6 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 
 
 # ── Upload transport ──────────────────────────────────────────────────────────
-_DISCORD_MAX_BYTES = 7 * 1024 * 1024  # 7 MB — safe margin below Discord's 8 MB hard limit
-
-
-def _rebuild_zip_excluding(zip_bytes: bytes, *prefixes: str) -> bytes:
-    src = io.BytesIO(zip_bytes)
-    dst = io.BytesIO()
-    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            if not any(item.filename.startswith(p) for p in prefixes):
-                zout.writestr(item, zin.read(item.filename))
-    return dst.getvalue()
-
-
-def _truncate_log_entries(zip_bytes: bytes, max_entry_bytes: int = 400 * 1024) -> bytes:
-    """Rebuild zip keeping only the tail of oversized logs/ entries."""
-    src = io.BytesIO(zip_bytes)
-    dst = io.BytesIO()
-    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename.startswith("logs/") and len(data) > max_entry_bytes:
-                data = data[-max_entry_bytes:]
-            zout.writestr(item, data)
-    return dst.getvalue()
-
-
-def _trim_to_discord_limit(zip_bytes: bytes, filename: str) -> tuple[bytes, str]:
-    """Progressively shrink zip to fit Discord's 8 MB limit."""
-    limit = _DISCORD_MAX_BYTES
-    if len(zip_bytes) <= limit:
-        return zip_bytes, filename
-    # Pass 1: drop system snapshots
-    zip_bytes = _rebuild_zip_excluding(zip_bytes, "system/")
-    filename = filename.replace(".zip", "_nosysinfo.zip")
-    if len(zip_bytes) <= limit:
-        return zip_bytes, filename
-    # Pass 2: drop rotated log backups
-    zip_bytes = _rebuild_zip_excluding(zip_bytes, "logs/backups/")
-    if len(zip_bytes) <= limit:
-        return zip_bytes, filename
-    # Pass 3: truncate large log chunks to their most-recent tail
-    zip_bytes = _truncate_log_entries(zip_bytes)
-    return zip_bytes, filename
-
-
-def _do_discord_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
-    """Upload a log zip as a Discord file attachment via a webhook URL."""
-    cfg = logging_setup.load_config()["upload"]
-    url = cfg["url"]
-    if "?" not in url:
-        url += "?wait=true"
-
-    if len(zip_bytes) > _DISCORD_MAX_BYTES:
-        original_kb = len(zip_bytes) // 1024
-        zip_bytes, filename = _trim_to_discord_limit(zip_bytes, filename)
-        logger.warning(
-            f"Bundle trimmed from {original_kb} KB to {len(zip_bytes) // 1024} KB for Discord"
-        )
-
-    device_id = _get_device_id()
-    ts = manifest.get("created_at", "")[:19].replace("T", " ")
-    content = (
-        f"\U0001f4cb **fabCNC log bundle**\n"
-        f"`device:` {device_id}   `time:` {ts} UTC   `size:` {len(zip_bytes)//1024} KB"
-    )
-    payload_json = json.dumps({"content": content}).encode("utf-8")
-
-    boundary = f"WebKitFormBoundary{uuid.uuid4().hex}"
-
-    # Build each multipart part explicitly to avoid implicit-concat ambiguity.
-    part_json = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="payload_json"\r\n'
-        f"Content-Type: application/json\r\n\r\n"
-    ).encode("utf-8") + payload_json
-
-    part_file = (
-        f"\r\n--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
-        f"Content-Type: application/zip\r\n\r\n"
-    ).encode("utf-8") + zip_bytes
-
-    body = part_json + part_file + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}",
-               "User-Agent": "DiscordBot (https://github.com/pbriggin/fabCNC, 1.0)"}
-    req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
-    started = time.time()
-    try:
-        with _urlrequest.urlopen(req, timeout=60, context=_ssl_context()) as resp:
-            status = resp.status
-            resp_body = resp.read(2048).decode("utf-8", errors="replace")
-    except _urlerror.HTTPError as exc:
-        discord_error = exc.read(2048).decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} from Discord: {discord_error}") from exc
-
-    return {
-        "status": status,
-        "duration_s": round(time.time() - started, 2),
-        "response": resp_body[:512],
-        "bytes": len(zip_bytes),
-        "filename": filename,
-    }
 
 
 def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
@@ -539,10 +444,6 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
         raise RuntimeError("upload.url not configured")
 
     method = cfg.get("method", "POST").upper()
-
-    # Discord webhook — use the dedicated formatter.
-    if method == "DISCORD" or "discord.com/api/webhooks" in url:
-        return _do_discord_upload(zip_bytes, filename, manifest)
 
     auth = cfg.get("auth_header", "")
     headers = {"X-Device-Id": _get_device_id()}
@@ -570,10 +471,33 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
 
     req = _urlrequest.Request(url, data=body, method=method, headers=headers)
+    logger.info(
+        "Log upload request: mode=%s url=%s bytes=%d filename=%s",
+        method,
+        url,
+        len(zip_bytes),
+        filename,
+    )
     started = time.time()
-    with _urlrequest.urlopen(req, timeout=60, context=_ssl_context()) as resp:
-        status = resp.status
-        resp_body = resp.read(2048).decode("utf-8", errors="replace")
+    try:
+        with _urlrequest.urlopen(req, timeout=60, context=_ssl_context()) as resp:
+            status = resp.status
+            resp_body = resp.read(2048).decode("utf-8", errors="replace")
+            logger.info(
+                "Log upload response: mode=%s status=%s body=%s",
+                method,
+                status,
+                _resp_preview(resp_body),
+            )
+    except _urlerror.HTTPError as exc:
+        err_body = exc.read(2048).decode("utf-8", errors="replace")
+        logger.error(
+            "Log upload HTTP error: mode=%s status=%s body=%s",
+            method,
+            exc.code,
+            _resp_preview(err_body),
+        )
+        raise RuntimeError(f"HTTP {exc.code} from upload endpoint: {err_body}") from exc
     duration = time.time() - started
     return {
         "status": status,
@@ -585,62 +509,99 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
 
 
 def send_piece_count(piece_count: int) -> dict:
-    """Send a plain-text piece count + source device to Discord webhook.
+    """Send a plain-text piece count + source device to the Good Pigeon relay.
 
-    The webhook URL is read from ``upload.piece_count_webhook_url``.
-    If empty, this call is a no-op so existing installs keep working.
+    The endpoint URL is read from ``upload.piece_count_webhook_url`` and defaults
+    to Good Pigeon's Vercel route when empty. Uses the same ``upload.auth_header``
+    config field as the log-bundle upload (sent as an ``Authorization`` header).
     """
     cfg = logging_setup.load_config().get("upload", {})
-    url = (cfg.get("piece_count_webhook_url") or "").strip()
+    url = (cfg.get("piece_count_webhook_url") or "https://v0-good-pigeon.vercel.app/api/cnc-webhook").strip()
     count = max(0, int(piece_count or 0))
     device_id = _get_device_id()
-    if not url or count <= 0:
+    if count <= 0:
         return {"ok": False, "skipped": True, "reason": "not_configured_or_zero"}
 
-    if "?" not in url:
-        url += "?wait=true"
-
+    # Must remain exactly: "<pieceCount> <machineId>" for server parsing.
     body = json.dumps({"content": f"{count} {device_id}"}).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "fabCNC/1.0",
     }
+    auth = cfg.get("auth_header", "")
+    if auth:
+        headers["Authorization"] = auth
 
-    started = time.time()
-    try:
-        req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
-        with _urlrequest.urlopen(req, timeout=20, context=_ssl_context()) as resp:
-            status = resp.status
-            resp_body = resp.read(1024).decode("utf-8", errors="replace")
+    # Retry only when we do not receive 200 (network error / timeout / 5xx / 4xx).
+    # Never retry after 200 to avoid double-counting completed jobs.
+    max_attempts = 2
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        started = time.time()
+        try:
+            req = _urlrequest.Request(url, data=body, method="POST", headers=headers)
+            with _urlrequest.urlopen(req, timeout=20, context=_ssl_context()) as resp:
+                status = resp.status
+                resp_body = resp.read(1024).decode("utf-8", errors="replace")
+            duration = round(time.time() - started, 2)
 
-        logging_setup.log_event(
-            "job",
-            "piece_count_posted",
-            ok=True,
-            piece_count=count,
-            device_id=device_id,
-            status=status,
-            duration_s=round(time.time() - started, 2),
-        )
-        return {
-            "ok": True,
-            "status": status,
-            "piece_count": count,
-            "device_id": device_id,
-            "duration_s": round(time.time() - started, 2),
-            "response": resp_body[:256],
-        }
-    except Exception as e:
-        logging_setup.log_event(
-            "job",
-            "piece_count_posted",
-            ok=False,
-            piece_count=count,
-            device_id=device_id,
-            error=str(e),
-        )
-        logger.warning(f"Failed posting piece count to Discord: {e}")
-        return {"ok": False, "error": str(e), "piece_count": count}
+            if status == 200:
+                logging_setup.log_event(
+                    "job",
+                    "piece_count_posted",
+                    ok=True,
+                    piece_count=count,
+                    device_id=device_id,
+                    status=status,
+                    attempt=attempt,
+                    duration_s=duration,
+                )
+                return {
+                    "ok": True,
+                    "status": status,
+                    "piece_count": count,
+                    "device_id": device_id,
+                    "attempt": attempt,
+                    "duration_s": duration,
+                    "response": resp_body[:256],
+                }
+
+            last_err = f"unexpected_status_{status}: {resp_body[:256]}"
+        except Exception as e:
+            last_err = str(e)
+
+        if attempt < max_attempts:
+            logger.warning(f"Piece-count webhook attempt {attempt} failed; retrying once: {last_err}")
+
+    logging_setup.log_event(
+        "job",
+        "piece_count_posted",
+        ok=False,
+        piece_count=count,
+        device_id=device_id,
+        attempts=max_attempts,
+        error=last_err,
+    )
+    logger.warning(f"Failed posting piece count webhook after {max_attempts} attempts: {last_err}")
+    return {"ok": False, "error": last_err, "piece_count": count, "attempts": max_attempts}
+
+
+def simulate_job_complete(piece_count: int = 1) -> dict:
+    """Dry-run the post-completion flow without needing a connected machine.
+
+    This sends the same piece-count webhook payload and the same log bundle
+    upload that a real `job_complete` path would trigger, but it does not
+    stream G-code or talk to the controller.
+    """
+    count = max(0, int(piece_count or 0))
+    piece_result = send_piece_count(count)
+    upload_result = upload_now(full=False, trigger="job_complete_test")
+    return {
+        "ok": bool(piece_result.get("ok")) and bool(upload_result.get("ok")),
+        "piece_count": count,
+        "piece_result": piece_result,
+        "upload_result": upload_result,
+    }
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
