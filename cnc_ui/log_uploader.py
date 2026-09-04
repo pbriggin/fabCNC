@@ -289,13 +289,19 @@ def log_system_snapshot(trigger: str = "manual") -> None:
 
 
 # ── Bundle building ───────────────────────────────────────────────────────────
-def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, str, dict]:
+def build_bundle(
+    *, full: bool = False, trigger: str = "retry", max_bytes_override: int | None = None
+) -> tuple[bytes, str, dict]:
     """
     Create an in-memory zip of logs + (optionally) recent artefacts.
 
     *trigger* is embedded in the filename so bundles are easy to distinguish
     in remote storage. Common values: ``"auto"``, ``"manual"``,
     ``"disconnect"``, ``"job_complete"``, ``"job_abort"``.
+
+    *max_bytes_override*, when given, replaces ``upload.max_bundle_mb`` for this
+    call — used by ``upload_now`` to retry with a shrinking budget after the
+    endpoint rejects a bundle as too large.
 
     Returns ``(zip_bytes, filename, manifest)``. When ``full`` is False the
     bundle only contains the log bytes appended since the last upload (the
@@ -326,7 +332,10 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
     }
 
     buf = io.BytesIO()
-    max_bytes = int(upload_cfg.get("max_bundle_mb", 50)) * 1024 * 1024
+    if max_bytes_override is not None:
+        max_bytes = max_bytes_override
+    else:
+        max_bytes = int(upload_cfg.get("max_bundle_mb", 50)) * 1024 * 1024
     new_offsets = dict(offsets)
     total_log_bytes = 0
 
@@ -343,6 +352,10 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
                     # File rotated/truncated since we last looked.
                     start = 0
                 if start >= size:
+                    continue
+                if buf.tell() >= max_bytes:
+                    # Leave the offset unadvanced so this content is retried later.
+                    manifest["logs_truncated"] = True
                     continue
                 with f.open("rb") as fh:
                     fh.seek(start)
@@ -362,6 +375,9 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
                 key = f"{f.name}:{f.stat().st_size}"
                 if key in seen_backups and not full:
                     continue
+                if buf.tell() >= max_bytes:
+                    manifest["backups_truncated"] = True
+                    break
                 zf.write(f, f"logs/backups/{f.name}")
                 manifest["files"].append({"name": f"logs/backups/{f.name}", "bytes": f.stat().st_size})
                 backup_record.append(key)
@@ -369,7 +385,7 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 
         # Optional gcode + canvas saves
         uploads_root = Path(__file__).resolve().parent / "uploads"
-        if upload_cfg.get("include_gcode", True):
+        if upload_cfg.get("include_gcode", True) and buf.tell() < max_bytes:
             gdir = uploads_root / "gcode_output"
             if gdir.exists():
                 gcode_files = sorted(
@@ -379,13 +395,24 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
                 )
                 if not include_all_once:
                     gcode_files = gcode_files[:30]
+                written = 0
                 for f in gcode_files:
+                    if buf.tell() >= max_bytes:
+                        manifest["gcode_truncated"] = True
+                        break
                     zf.write(f, f"gcode/{f.name}")
-                manifest["gcode_file_count"] = len(gcode_files)
-        if upload_cfg.get("include_uploads", False) and uploads_root.exists():
+                    written += 1
+                manifest["gcode_file_count"] = written
+        if upload_cfg.get("include_uploads", False) and uploads_root.exists() and buf.tell() < max_bytes:
             for f in sorted(uploads_root.glob("*.dxf")):
+                if buf.tell() >= max_bytes:
+                    manifest["uploads_truncated"] = True
+                    break
                 zf.write(f, f"uploads/{f.name}")
             for f in sorted(uploads_root.glob("*.json")):
+                if buf.tell() >= max_bytes:
+                    manifest["uploads_truncated"] = True
+                    break
                 zf.write(f, f"canvases/{f.name}")
 
         # System health snapshot (always included — invaluable for debugging)
@@ -397,18 +424,24 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
             manifest["throttled_flags"] = sys_info.get("throttled_flags", [])
             # Raw system logs as separate files for easy viewing — last hour only
             # so bundle size stays bounded regardless of Pi uptime.
-            dmesg_recent = _run(
-                ["journalctl", "-k", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
-                timeout=10,
-            )
-            zf.writestr("system/dmesg.txt", dmesg_recent)
-            manifest["files"].append({"name": "system/dmesg.txt", "bytes": len(dmesg_recent)})
-            journal_recent = _run(
-                ["journalctl", "-b", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
-                timeout=15,
-            )
-            zf.writestr("system/journal.txt", journal_recent)
-            manifest["files"].append({"name": "system/journal.txt", "bytes": len(journal_recent)})
+            if buf.tell() < max_bytes:
+                dmesg_recent = _run(
+                    ["journalctl", "-k", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
+                    timeout=10,
+                )
+                zf.writestr("system/dmesg.txt", dmesg_recent)
+                manifest["files"].append({"name": "system/dmesg.txt", "bytes": len(dmesg_recent)})
+            else:
+                manifest["system_logs_truncated"] = True
+            if buf.tell() < max_bytes:
+                journal_recent = _run(
+                    ["journalctl", "-b", "--no-pager", "--output=short-iso", "--since", "1 hour ago"],
+                    timeout=15,
+                )
+                zf.writestr("system/journal.txt", journal_recent)
+                manifest["files"].append({"name": "system/journal.txt", "bytes": len(journal_recent)})
+            else:
+                manifest["system_logs_truncated"] = True
         except Exception as e:
             logger.warning(f"Could not collect system info for bundle: {e}")
 
@@ -417,9 +450,11 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
     data = buf.getvalue()
     if len(data) > max_bytes:
         logger.warning(
-            f"Log bundle is {len(data)/1e6:.1f}MB which exceeds "
-            f"max_bundle_mb={upload_cfg.get('max_bundle_mb')}; sending anyway."
+            f"Log bundle is {len(data)/1e6:.1f}MB which exceeds the "
+            f"{max_bytes/1e6:.2f}MB budget even after dropping optional content "
+            f"(backups/gcode/uploads/system logs); sending anyway."
         )
+        manifest["oversized"] = True
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"fabcnc_{device_id}_{ts}_{trigger_tag}.zip"
@@ -436,6 +471,10 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 
 
 # ── Upload transport ──────────────────────────────────────────────────────────
+
+
+class PayloadTooLargeError(RuntimeError):
+    """Raised when the upload endpoint rejects a bundle for being too large."""
 
 
 def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
@@ -498,6 +537,8 @@ def _do_upload(zip_bytes: bytes, filename: str, manifest: dict) -> dict:
             exc.code,
             _resp_preview(err_body),
         )
+        if exc.code in (413,):
+            raise PayloadTooLargeError(f"HTTP {exc.code} from upload endpoint: {err_body}") from exc
         raise RuntimeError(f"HTTP {exc.code} from upload endpoint: {err_body}") from exc
     duration = time.time() - started
     return {
@@ -607,42 +648,75 @@ def simulate_job_complete(piece_count: int = 1) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 def upload_now(full: bool = False, trigger: str = "retry") -> dict:
-    """Build and upload a bundle synchronously. Returns a status dict."""
+    """
+    Build and upload a bundle synchronously. Returns a status dict.
+
+    If the endpoint rejects the bundle as too large (HTTP 413), rebuilds it
+    with a progressively smaller size budget (dropping backups, then gcode,
+    then uploads, then trimming log/system content) and retries, so a job's
+    logs always go out even if some optional content has to be dropped.
+    """
     cfg = logging_setup.load_config()["upload"]
     if not cfg.get("url"):
         return {"ok": False, "error": "upload.url not configured"}
 
+    max_attempts = 5
+    min_budget_bytes = 256 * 1024
+    override = None
+
     with _state_lock:
-        zip_bytes, filename, manifest = build_bundle(full=full, trigger=trigger)
-        include_all_once = bool(cfg.get("include_all_gcode_once", False))
-        try:
-            result = _do_upload(zip_bytes, filename, manifest)
-            _write_state(manifest.pop("_state"))
-            if include_all_once:
-                try:
-                    logging_setup.save_upload_config({"include_all_gcode_once": False})
-                except Exception as e:
-                    logger.warning(f"Could not reset include_all_gcode_once after upload: {e}")
-            logging_setup.log_event(
-                "system",
-                "log_upload",
-                ok=True,
-                filename=filename,
-                bytes=result["bytes"],
-                status=result["status"],
-                duration_s=result["duration_s"],
+        for attempt in range(1, max_attempts + 1):
+            zip_bytes, filename, manifest = build_bundle(
+                full=full, trigger=trigger, max_bytes_override=override
             )
-            logger.info(
-                f"Uploaded {filename} ({result['bytes']/1024:.1f} KB) "
-                f"-> HTTP {result['status']} in {result['duration_s']}s"
-            )
-            return {"ok": True, **result}
-        except Exception as e:
-            logger.error(f"Log upload failed: {e}")
-            logging_setup.log_event(
-                "system", "log_upload", ok=False, error=str(e), filename=filename
-            )
-            return {"ok": False, "error": str(e), "filename": filename, "bytes": len(zip_bytes)}
+            include_all_once = bool(cfg.get("include_all_gcode_once", False))
+            try:
+                result = _do_upload(zip_bytes, filename, manifest)
+                _write_state(manifest.pop("_state"))
+                if include_all_once:
+                    try:
+                        logging_setup.save_upload_config({"include_all_gcode_once": False})
+                    except Exception as e:
+                        logger.warning(f"Could not reset include_all_gcode_once after upload: {e}")
+                logging_setup.log_event(
+                    "system",
+                    "log_upload",
+                    ok=True,
+                    filename=filename,
+                    bytes=result["bytes"],
+                    status=result["status"],
+                    duration_s=result["duration_s"],
+                )
+                logger.info(
+                    f"Uploaded {filename} ({result['bytes']/1024:.1f} KB) "
+                    f"-> HTTP {result['status']} in {result['duration_s']}s"
+                )
+                return {"ok": True, **result}
+            except PayloadTooLargeError as e:
+                if attempt >= max_attempts:
+                    logger.error(
+                        f"Log upload still rejected as too large after {attempt} attempt(s); giving up: {e}"
+                    )
+                    logging_setup.log_event(
+                        "system",
+                        "log_upload",
+                        ok=False,
+                        error=f"too_large_after_{attempt}_attempts: {e}",
+                        filename=filename,
+                    )
+                    return {"ok": False, "error": str(e), "filename": filename, "bytes": len(zip_bytes)}
+                override = max(len(zip_bytes) // 2, min_budget_bytes)
+                logger.warning(
+                    f"Upload rejected as too large (attempt {attempt}/{max_attempts}); "
+                    f"retrying with a smaller bundle (~{override/1e6:.2f}MB budget)"
+                )
+                continue
+            except Exception as e:
+                logger.error(f"Log upload failed: {e}")
+                logging_setup.log_event(
+                    "system", "log_upload", ok=False, error=str(e), filename=filename
+                )
+                return {"ok": False, "error": str(e), "filename": filename, "bytes": len(zip_bytes)}
 
 
 def _uploader_loop(interval_s: float) -> None:

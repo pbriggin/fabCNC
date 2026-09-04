@@ -7,7 +7,7 @@
   "max_file_size_mb": 10,
   "backup_count": 10,
   "upload": {
-    "_comment": "Remote log upload endpoint (Vercel relay recommended).",
+    "_comment": "Remote log upload endpoint (Vercel relay recommended). max_bundle_mb is capped below Vercel's 4.5MB Serverless Function request limit.",
     "enabled": true,
     "url": "https://v0-good-pigeon.vercel.app/api/fabcnc-logs",
     "method": "POST",
@@ -18,6 +18,6 @@
     "include_gcode": true,
     "include_all_gcode_once": false,
     "include_uploads": true,
-    "max_bundle_mb": 24
+    "max_bundle_mb": 4
   }
 }

@@ -268,7 +268,7 @@ apply (or use the **Restart Service** button in the System tab).
     "include_gcode": true,
     "include_all_gcode_once": false,
     "include_uploads": true,
-    "max_bundle_mb": 24
+    "max_bundle_mb": 4
   }
 }
 ```
@@ -306,6 +306,26 @@ fields `manifest` and `file`.
 
 The Pi only pushes *new bytes since the last successful upload*, tracked in
 `cnc_ui/logs/.uploader_state.json`, so traffic stays small.
+
+**Size limit:** Vercel's Serverless Functions reject request bodies over
+4.5 MB before the handler even runs, so `upload.max_bundle_mb` is enforced
+while building the zip — log backups, gcode files, and DXF/canvas uploads are
+dropped (in that order) once the running size approaches the budget. The
+tracked config sets `max_bundle_mb: 4` to stay safely under Vercel's limit;
+raise it if you point `upload.url` at a receiver without that constraint
+(e.g. a pre-signed S3 PUT).
+
+Uploads are never silently skipped just because a bundle is too big: if the
+receiving end actually rejects a bundle with HTTP 413, `upload_now()` rebuilds
+it with a smaller size budget (roughly half the previous attempt) and retries,
+up to 5 attempts. Each retry drops more content, in priority order — rotated
+log backups, then old gcode files, then DXF/canvas uploads, then (as a last
+resort) the tail of the current log files and the recent dmesg/journal
+snapshot. Anything dropped is flagged in the manifest (`backups_truncated`,
+`gcode_truncated`, `uploads_truncated`, `logs_truncated`,
+`system_logs_truncated`, `oversized`) for observability. Log content that gets
+skipped this way is not marked as delivered, so it's picked up again on the
+next upload once the backlog eases.
 
 ### How to fetch logs
 
