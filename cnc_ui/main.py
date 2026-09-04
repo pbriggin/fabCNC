@@ -18,6 +18,7 @@ from logging_setup import (
     log_event,
     log_toolpath,
     get_log_dir,
+    APP_VERSION,
     load_config as load_logging_config,
 )
 import log_uploader
@@ -53,9 +54,6 @@ import struct
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
-# Application version
-APP_VERSION = "v1.0.44"
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent

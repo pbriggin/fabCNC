@@ -314,6 +314,7 @@ def build_bundle(*, full: bool = False, trigger: str = "retry") -> tuple[bytes, 
 
     manifest = {
         "device_id": device_id,
+        "app_version": logging_setup.APP_VERSION,
         "bundle_id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "full": full,
