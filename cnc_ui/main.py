@@ -3222,31 +3222,14 @@ def main_page():
                     .props('dense color=positive').style('font-size: 12px; color: #111;')
         update_alert.set_visibility(False)
 
-        def _show_connection_alert(mode: str, current_status: str) -> None:
-            if mode == 'disconnected':
-                connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
-                connection_alert_icon.props('name=usb_off color=red-4')
-                connection_alert_title.set_text('Marlin controller disconnected')
-                if current_status == 'Reconnecting...':
-                    connection_alert_subtitle.set_text('Release the E-Stop switch.')
-                else:
-                    connection_alert_subtitle.set_text('Release the E-Stop switch.')
-                connection_alert_steps.set_text('Release the E-Stop switch.')
-                retry_connection_button.set_visibility(True)
-                connection_alert.set_visibility(True)
-                return
-
-            if mode == 'estop':
-                connection_alert.style('background: #352818; border: 1px solid #9c6a1c;')
-                connection_alert_icon.props('name=warning_amber color=orange-4')
-                connection_alert_title.set_text('Controller halted by E-stop')
-                connection_alert_subtitle.set_text('Release the E-Stop switch.')
-                connection_alert_steps.set_text('Release the E-Stop switch.')
-                retry_connection_button.set_visibility(True)
-                connection_alert.set_visibility(True)
-                return
-
-            connection_alert.set_visibility(False)
+        def _show_connection_alert() -> None:
+            connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
+            connection_alert_icon.props('name=usb_off color=red-4')
+            connection_alert_title.set_text('Controller disconnected')
+            connection_alert_subtitle.set_text('Release the E-Stop switch.')
+            connection_alert_steps.set_text('Release the E-Stop switch.')
+            retry_connection_button.set_visibility(True)
+            connection_alert.set_visibility(True)
 
         def _show_resume_dialog():
             _resume_dialog_shown[0] = True
@@ -3278,20 +3261,22 @@ def main_page():
 
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
-            is_disconnected = (not cnc_controller.connected) or current_status in ('Disconnected', 'Reconnecting...')
+            needs_disconnect_alert = (
+                (not cnc_controller.connected)
+                or current_status in ('Disconnected', 'Reconnecting...')
+                or cnc_controller.reset_required
+                or current_status == 'E-Stop Reset Required'
+            )
             showing_connection_alert = False
 
             # Track whether we've ever seen a disconnect since this page loaded.
-            if is_disconnected:
+            if needs_disconnect_alert:
                 _was_disconnected[0] = True
                 _resume_dialog_shown[0] = False
-                _show_connection_alert('disconnected', current_status)
-                showing_connection_alert = True
-            elif cnc_controller.reset_required or current_status == 'E-Stop Reset Required':
-                _show_connection_alert('estop', current_status)
+                _show_connection_alert()
                 showing_connection_alert = True
             else:
-                _show_connection_alert('hidden', current_status)
+                connection_alert.set_visibility(False)
 
             if update_state['available'] and not update_state['acknowledged'] and not showing_connection_alert:
                 update_alert.set_visibility(True)
