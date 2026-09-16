@@ -610,7 +610,8 @@ def create_header():
                 .style('font-size: 11px; min-width: 140px;')
             
             with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
-                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888; margin-right: 8px;')
+                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
+                ui.element('div').style('width: 10px; flex-shrink: 0;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
