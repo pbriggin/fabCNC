@@ -110,8 +110,12 @@ class CNCController:
         try:
             # List all available serial ports
             ports = serial.tools.list_ports.comports()
+            candidate_ports = [p for p in ports if self._is_candidate_marlin_port(p)]
+            if not candidate_ports:
+                logger.warning("No candidate USB serial ports found for Marlin reconnect")
+                candidate_ports = ports
             
-            for port in ports:
+            for port in candidate_ports:
                 # Try connecting to this port
                 try:
                     logger.info(f"Trying to connect to {port.device} ({port.description})")
@@ -166,6 +170,21 @@ class CNCController:
         except Exception as e:
             logger.error(f"Error during auto-connect: {e}")
             return False
+
+    @staticmethod
+    def _is_candidate_marlin_port(port) -> bool:
+        """Return True for likely Marlin USB serial devices, False for SoC UARTs."""
+        device = str(getattr(port, 'device', '') or '').lower()
+        desc = str(getattr(port, 'description', '') or '').lower()
+
+        if device.startswith('/dev/ttyacm') or device.startswith('/dev/ttyusb'):
+            return True
+        if 'marlin' in desc or 'skr' in desc or 'usb' in desc:
+            return True
+        # VID/PID present usually indicates USB-backed adapters.
+        if getattr(port, 'vid', None) is not None and getattr(port, 'pid', None) is not None:
+            return True
+        return False
     
     def _handle_disconnect(self) -> None:
         """Handle an unexpected serial disconnection (e.g. controller power loss or USB drop)."""
@@ -316,6 +335,10 @@ class CNCController:
             return
         machine_state.set_status("Retrying connection...", busy=False)
         log_controller_event("serial_reconnect_requested")
+
+        # Manual retry is an explicit operator action; run USB recovery once
+        # immediately before we start retry attempts.
+        self._attempt_usb_recovery(0)
         self._start_reconnect_loop(use_usb_recovery=True)
 
     def reset_controller_after_estop(self) -> bool:
