@@ -609,9 +609,9 @@ def create_header():
                 .props('dense flat no-caps color=grey-6') \
                 .style('font-size: 11px; min-width: 140px;')
             
-            with ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
-                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
-                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
+            with ui.element('div').classes('flex items-center gap-1 px-3 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
+                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888; margin: 0;')
+                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap; margin: 0; line-height: 1;')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
