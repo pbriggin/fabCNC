@@ -105,7 +105,7 @@ class CNCController:
         self._current_job_piece_count = 0
         self._auto_connect()
     
-    def _auto_connect(self) -> bool:
+    def _auto_connect(self, strict_candidates: bool = False) -> bool:
         """Auto-detect and connect to the first available serial port."""
         try:
             # List all available serial ports
@@ -113,6 +113,8 @@ class CNCController:
             candidate_ports = [p for p in ports if self._is_candidate_marlin_port(p)]
             if not candidate_ports:
                 logger.warning("No candidate USB serial ports found for Marlin reconnect")
+                if strict_candidates:
+                    return False
                 candidate_ports = ports
             
             for port in candidate_ports:
@@ -262,7 +264,7 @@ class CNCController:
                     attempt += 1
                     machine_state.set_status("Retrying connection...", busy=False)
                     logger.info(f"Reconnection attempt {attempt}...")
-                    if self._auto_connect():
+                    if self._auto_connect(strict_candidates=True):
                         logger.info(f"Reconnected on attempt {attempt}")
                         self.stop_requested = False
                         machine_state.set_status("Idle", busy=False)
@@ -339,6 +341,7 @@ class CNCController:
                 logger.warning(f"USB recovery unbind/bind error: {e}")
 
         # 2) Fallback: trigger tty/usb re-enumeration.
+        any_trigger_ok = False
         for cmd in (
             ['sudo', '-n', 'udevadm', 'trigger', '--subsystem-match=tty', '--action=add'],
             ['sudo', '-n', 'udevadm', 'trigger', '--subsystem-match=usb', '--action=add'],
@@ -347,7 +350,8 @@ class CNCController:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
                 if result.returncode == 0:
                     logger.warning(f"USB recovery triggered with: {' '.join(cmd)}")
-                    return True
+                    any_trigger_ok = True
+                    continue
                 logger.warning(
                     f"USB recovery trigger failed rc={result.returncode}: "
                     f"{(result.stderr or result.stdout).strip()[:200]}"
@@ -355,7 +359,7 @@ class CNCController:
             except Exception as e:
                 logger.warning(f"USB recovery trigger error for {cmd}: {e}")
 
-        return False
+        return any_trigger_ok
 
     def attempt_reconnect(self) -> None:
         """Kick off a reconnect attempt when the controller is offline."""
