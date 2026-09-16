@@ -40,7 +40,7 @@ from typing import Any, Optional
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 # Application version — shared by main.py (UI display) and log_uploader.py (bundle manifest)
-APP_VERSION = "v1.0.49"
+APP_VERSION = "v1.0.50"
 DEFAULT_LOG_DIR = REPO_DIR / "cnc_ui" / "logs"
 CONFIG_PATH = REPO_DIR / "logging_config.json"
 

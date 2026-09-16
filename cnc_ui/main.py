@@ -553,6 +553,25 @@ def acknowledge_software_update():
     log_event('system', 'software_update_acknowledged', current_version=APP_VERSION)
 
 
+def _get_current_wifi_status():
+    """Return (ssid, signal_percent) for the active Wi-Fi connection, or (None, None)."""
+    try:
+        result = subprocess.run(
+            ['nmcli', '-t', '-f', 'active,ssid,signal', 'dev', 'wifi', 'list', '--rescan', 'no'],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            # Terse mode escapes ':' inside fields as '\:', so split on unescaped colons only.
+            parts = re.split(r'(?<!\\):', line)
+            if len(parts) >= 3 and parts[0] == 'yes':
+                ssid = parts[1].replace('\\:', ':')
+                signal = int(parts[2]) if parts[2].isdigit() else None
+                return ssid, signal
+    except Exception as e:
+        logger.warning(f"Wi-Fi status check failed: {e}")
+    return None, None
+
+
 def create_header():
     """Create the application header with tabs, position, status, and controls."""
     pos_labels = {}
@@ -580,6 +599,10 @@ def create_header():
         
         # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
+            with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
+                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
+
             for axis in ['X', 'Y', 'Z', 'A']:
                 with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
                     ui.label(f'{axis}').classes('text-caption font-bold').style('color: #888; width: 12px;')
@@ -592,7 +615,8 @@ def create_header():
             
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
-    return pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn, status_pill, status_icon
+    return (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
+            status_pill, status_icon, wifi_status_icon, wifi_status_text)
 
 
 def create_jog_controls():
@@ -2308,7 +2332,8 @@ def main_page():
         </script>
     ''')
     
-    pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn, status_pill, status_icon = create_header()
+    (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
+     status_pill, status_icon, wifi_status_icon, wifi_status_text) = create_header()
     
     # Update button click handler
     async def do_software_update():
@@ -2385,6 +2410,24 @@ def main_page():
             update_btn.style('font-size: 11px; min-width: 140px; background: none; border: none;')
     ui.timer(0.1, _check_update_timer, once=True)
     ui.timer(300.0, _check_update_timer)  # Every 5 min — was 30 s; frequent git fetch stresses WiFi
+
+    # Periodic Wi-Fi status check (SSID + signal strength shown in header)
+    async def _check_wifi_status_timer():
+        import asyncio
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            ssid, signal = await loop.run_in_executor(executor, _get_current_wifi_status)
+        if ssid is None:
+            wifi_status_icon.props('name=wifi_off color=grey-6')
+            wifi_status_text.set_text('Wi-Fi: —')
+        else:
+            signal_icon = 'wifi' if signal is None or signal >= 40 else 'wifi_1_bar'
+            wifi_status_icon.props(f'name={signal_icon} color=green-5')
+            signal_text = f'{signal}%' if signal is not None else '?'
+            wifi_status_text.set_text(f'{ssid} ({signal_text})')
+    ui.timer(0.1, _check_wifi_status_timer, once=True)
+    ui.timer(30.0, _check_wifi_status_timer)
     
     # Register JavaScript functions for jog control
     ui.run_javascript('''
