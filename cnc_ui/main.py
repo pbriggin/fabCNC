@@ -3236,6 +3236,22 @@ def main_page():
                                 ui.button('Run', icon='play_arrow', on_click=run_terminal_command) \
                                     .props('color=primary dense')
 
+                            async def _run_quick_command(cmd: str):
+                                term_input.value = cmd
+                                await run_terminal_command()
+
+                            quick_commands = [
+                                ('View Logs', 'sudo journalctl -u fabcnc -n 200 --no-pager', 'article'),
+                                ('Service Status', 'sudo systemctl status fabcnc', 'info'),
+                                ('Restart Service', 'sudo systemctl restart fabcnc', 'restart_alt'),
+                                ('List USB', 'lsusb', 'usb'),
+                                ('Serial Ports', 'ls -la /dev/ttyACM* /dev/ttyUSB* 2>/dev/null', 'cable'),
+                            ]
+                            with ui.row().classes('gap-1 flex-wrap'):
+                                for label, cmd, icon in quick_commands:
+                                    ui.button(label, icon=icon, on_click=lambda c=cmd: _run_quick_command(c)) \
+                                        .props('dense outline').style('font-size: 11px;')
+
                             with ui.row().classes('gap-1'):
                                 ui.button('Clear', icon='clear_all', on_click=lambda: terminal_log.clear()) \
                                     .props('dense outline').style('font-size: 11px;')
