@@ -2474,17 +2474,15 @@ def main_page():
             wifi_status_icon.props('name=wifi_off color=grey-6')
             wifi_status_text.set_text('Wi-Fi: —')
         else:
-            if signal is None:
-                signal_icon, color = 'signal_wifi_4_bar', 'grey-5'
-            elif signal >= 80:
-                signal_icon, color = 'signal_wifi_4_bar', 'green-5'
+            if signal is None or signal >= 80:
+                color = 'green-5'
             elif signal >= 55:
-                signal_icon, color = 'signal_wifi_3_bar', 'green-5'
+                color = 'green-5'
             elif signal >= 30:
-                signal_icon, color = 'network_wifi_2_bar', 'amber-5'
+                color = 'amber-5'
             else:
-                signal_icon, color = 'network_wifi_1_bar', 'red-5'
-            wifi_status_icon.props(f'name={signal_icon} color={color}')
+                color = 'red-5'
+            wifi_status_icon.props(f'name=wifi color={color}')
             wifi_status_text.set_text(ssid)
     ui.timer(0.1, _check_wifi_status_timer, once=True)
     ui.timer(30.0, _check_wifi_status_timer)
