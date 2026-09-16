@@ -426,6 +426,30 @@ class CNCController:
             except Exception as e:
                 logger.warning(f"USB power cycle error for -l {location} -p {port}: {e}")
 
+        # If we don't have a specific USB path (or targeted cycles failed),
+        # do a broad cycle on hubs that support per-port power switching.
+        # This is only called from manual retry.
+        try:
+            global_cycle = subprocess.run(
+                ['sudo', '-n', uhubctl, '-a', 'cycle'],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if global_cycle.returncode == 0:
+                logger.warning("USB power cycle succeeded via global uhubctl -a cycle")
+                log_controller_event(
+                    "serial_reconnect_usb_power_cycle_global",
+                    bus_id=bus_id,
+                )
+                return True
+            logger.warning(
+                "USB global power cycle failed: "
+                f"{(global_cycle.stderr or global_cycle.stdout).strip()[:200]}"
+            )
+        except Exception as e:
+            logger.warning(f"USB global power cycle error: {e}")
+
         return False
 
     @staticmethod
