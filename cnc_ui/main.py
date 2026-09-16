@@ -2440,11 +2440,11 @@ def main_page():
     # Wi-Fi settings dropdown, anchored to the header Wi-Fi widget
     with wifi_widget:
         with ui.menu() as wifi_menu:
-            with ui.column().classes('gap-2 p-3').style('min-width: 300px;'):
-                ui.label('Wi-Fi').classes('text-body1 font-bold').style('color: #aaa;')
-                wifi_status_label = ui.label('Click to scan…').classes('text-caption').style('color: #888;')
+            with ui.column().classes('gap-1 p-2').style('min-width: 230px;'):
+                ui.label('Wi-Fi').classes('text-caption font-bold').style('color: #aaa;')
+                wifi_status_label = ui.label('Click to scan…').classes('text-caption').style('color: #888; font-size: 11px;')
                 wifi_select = ui.select(options={}, label='Available networks') \
-                    .props('dense').style('min-width: 260px;')
+                    .props('dense options-dense').style('min-width: 210px; font-size: 12px;')
 
                 def _parse_wifi_networks():
                     """Return (networks_list, raw_output) using multiline nmcli mode."""
@@ -2616,15 +2616,17 @@ def main_page():
                             ui.button('Forget Others', on_click=do_forget_others).props('color=warning dense')
                     dlg.open()
 
-                with ui.row().classes('gap-2 items-center'):
-                    ui.button('Rescan', icon='wifi_find', on_click=scan_wifi).props('dense outline').style('font-size: 12px;')
-                    ui.button('Connect', icon='wifi', on_click=open_connect_dialog).props('color=primary dense').style('font-size: 12px;')
-                ui.separator()
-                with ui.row().classes('gap-2 items-center'):
+                with ui.row().classes('gap-1 items-center'):
+                    ui.button('Rescan', icon='wifi_find', on_click=scan_wifi) \
+                        .props('dense outline size=sm').style('font-size: 11px; padding: 2px 8px;')
+                    ui.button('Connect', icon='wifi', on_click=open_connect_dialog) \
+                        .props('color=primary dense size=sm').style('font-size: 11px; padding: 2px 8px;')
+                ui.separator().classes('my-0')
+                with ui.row().classes('gap-1 items-center'):
                     ui.button('Forget Others', icon='wifi_off', on_click=confirm_forget_wifi_except_current) \
-                        .props('color=warning dense').style('font-size: 12px;')
+                        .props('color=warning dense size=sm').style('font-size: 11px; padding: 2px 8px;')
                     ui.button('Forget All & Reboot', icon='wifi_off', on_click=confirm_forget_wifi) \
-                        .props('color=negative dense').style('font-size: 12px;')
+                        .props('color=negative dense size=sm').style('font-size: 11px; padding: 2px 8px;')
 
     async def _open_wifi_menu():
         wifi_menu.open()
