@@ -1942,20 +1942,22 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     # Update status
     current_status = machine_state.status_text
     display_status = current_status
-    if not cnc_controller.connected and current_status not in ('Disconnected', 'Reconnecting...'):
+    if current_status == 'Retrying connection...':
+        display_status = 'Retrying connection...'
+    elif (
+        not cnc_controller.connected
+        or cnc_controller.reset_required
+        or current_status == 'E-Stop Reset Required'
+    ):
         display_status = 'Disconnected'
     status_label.set_text(display_status)
 
     # Update status pill appearance
     if status_pill and status_icon:
-        if display_status in ('Disconnected', 'Reconnecting...'):
+        if display_status in ('Disconnected', 'Retrying connection...'):
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
-        elif current_status == 'E-Stop Reset Required':
-            status_pill.style('background: #4a3822; border: 1px solid #9c6a1c;')
-            status_icon.classes(add='text-orange-4', remove='text-green-4 text-red-5 text-yellow-4')
-            status_label.classes(add='text-orange-4', remove='text-green-4 text-red-5 text-yellow-4')
         elif machine_state.busy:
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
             status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
@@ -3263,7 +3265,7 @@ def main_page():
             prev = _prev_status_local[0]
             needs_disconnect_alert = (
                 (not cnc_controller.connected)
-                or current_status in ('Disconnected', 'Reconnecting...')
+                or current_status in ('Disconnected', 'Retrying connection...')
                 or cnc_controller.reset_required
                 or current_status == 'E-Stop Reset Required'
             )

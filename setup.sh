@@ -256,7 +256,7 @@ EOF
     # Allow the service user to run privileged commands without a password:
     #   - restart fabcnc service  (in-app "Update Software" / "Restart Service")
     #   - reboot                  (in-app "Reboot System" / "Forget WiFi & Reboot")
-    echo "${CURRENT_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart fabcnc.service, /usr/bin/systemctl restart fabcnc.service, /sbin/reboot" \
+    echo "${CURRENT_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart fabcnc.service, /usr/bin/systemctl restart fabcnc.service, /sbin/reboot, /usr/bin/udevadm trigger --subsystem-match=tty --action=add, /usr/bin/udevadm trigger --subsystem-match=usb --action=add, /usr/bin/tee /sys/bus/usb/drivers/usb/unbind, /usr/bin/tee /sys/bus/usb/drivers/usb/bind" \
         | sudo tee /etc/sudoers.d/fabcnc-restart > /dev/null
     sudo chmod 0440 /etc/sudoers.d/fabcnc-restart
     echo "    Sudoers rule added: ${CURRENT_USER} can restart fabcnc and reboot without password."

@@ -5,7 +5,9 @@ This implementation communicates with Marlin firmware via serial.
 """
 
 import json
+import os
 import re
+import subprocess
 import time
 import threading
 from pathlib import Path
@@ -67,6 +69,7 @@ class CNCController:
         self.reconnect_thread_active = False
         self.reset_required = False
         self.last_controller_error = ""
+        self.last_serial_device = ""
         self.read_loop_paused = False
         self.read_lock = threading.Lock()
         
@@ -133,6 +136,7 @@ class CNCController:
                     if response and "FIRMWARE_NAME" in response:
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
+                        self.last_serial_device = str(port.device)
                         self.reset_required = False
                         self.last_controller_error = ""
                         
@@ -183,48 +187,136 @@ class CNCController:
                 daemon=True,
                 name="log-upload-on-disconnect",
             ).start()
-        self._start_reconnect_loop()
+        # Stay in Disconnected until the operator explicitly clicks Retry.
+        # This keeps the UI state deterministic and avoids implicit USB recovery.
 
-    def _start_reconnect_loop(self) -> None:
-        """Background thread: waits for the serial device to re-enumerate then reconnects."""
+    def _start_reconnect_loop(self, use_usb_recovery: bool = False) -> None:
+        """Background thread: retries reconnect, optionally with USB recovery escalation."""
         if self.reconnect_thread_active:
             return
 
         def _worker():
             self.reconnect_thread_active = True
-            # Close the stale port first
-            if self.serial_port:
-                try:
-                    self.serial_port.close()
-                except Exception:
-                    pass
-                self.serial_port = None
+            try:
+                # Close the stale port first
+                if self.serial_port:
+                    try:
+                        self.last_serial_device = self.last_serial_device or str(self.serial_port.port or "")
+                    except Exception:
+                        pass
+                    try:
+                        self.serial_port.close()
+                    except Exception:
+                        pass
+                    self.serial_port = None
 
-            attempt = 0
-            while not self.connected:
-                attempt += 1
-                machine_state.set_status("Reconnecting...", busy=False)
-                logger.info(f"Reconnection attempt {attempt}...")
-                if self._auto_connect():
-                    logger.info(f"Reconnected on attempt {attempt}")
-                    self.stop_requested = False
-                    machine_state.set_status("Idle", busy=False)
-                    log_controller_event("serial_reconnect", attempt=attempt)
-                    self.reconnect_thread_active = False
-                    return
-                time.sleep(3.0)
+                attempt = 0
+                while not self.connected:
+                    attempt += 1
+                    machine_state.set_status("Retrying connection...", busy=False)
+                    logger.info(f"Reconnection attempt {attempt}...")
+                    if self._auto_connect():
+                        logger.info(f"Reconnected on attempt {attempt}")
+                        self.stop_requested = False
+                        machine_state.set_status("Idle", busy=False)
+                        log_controller_event("serial_reconnect", attempt=attempt)
+                        return
 
-            self.reconnect_thread_active = False
+                    # If the E-stop keeps the controller unpowered for a long period,
+                    # Linux can occasionally keep a stale USB state. Periodically
+                    # force USB re-enumeration / port cycle and continue retrying.
+                    if use_usb_recovery and attempt % 20 == 0:
+                        recovered = self._attempt_usb_recovery(attempt)
+                        if recovered:
+                            time.sleep(2.0)
+
+                    time.sleep(3.0)
+            finally:
+                self.reconnect_thread_active = False
 
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
+
+    def _usb_bus_id_from_tty(self, tty_device: str) -> str:
+        """Best-effort map `/dev/tty*` -> Linux USB bus id like `1-1.3`."""
+        try:
+            tty_name = Path(tty_device).name
+            sysfs_tty = Path('/sys/class/tty') / tty_name / 'device'
+            resolved = os.path.realpath(str(sysfs_tty))
+            for part in reversed(Path(resolved).parts):
+                if re.match(r'^\d+-\d+(\.\d+)*$', part):
+                    return part
+                if re.match(r'^\d+-\d+(\.\d+)*:\d+\.\d+$', part):
+                    return part.split(':', 1)[0]
+        except Exception:
+            pass
+        return ''
+
+    def _attempt_usb_recovery(self, attempt: int) -> bool:
+        """Try to recover a stale USB serial device on Linux after repeated reconnect failures."""
+        bus_id = self._usb_bus_id_from_tty(self.last_serial_device) if self.last_serial_device else ''
+        log_controller_event(
+            "serial_reconnect_usb_recovery",
+            attempt=attempt,
+            last_serial_device=self.last_serial_device,
+            usb_bus_id=bus_id,
+        )
+
+        # 1) Best option: targeted unbind/bind for the exact USB device.
+        if bus_id:
+            try:
+                unbind = subprocess.run(
+                    ['sudo', '-n', 'tee', '/sys/bus/usb/drivers/usb/unbind'],
+                    input=bus_id,
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if unbind.returncode == 0:
+                    time.sleep(2.0)
+                bind = subprocess.run(
+                    ['sudo', '-n', 'tee', '/sys/bus/usb/drivers/usb/bind'],
+                    input=bus_id,
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if unbind.returncode == 0 and bind.returncode == 0:
+                    logger.warning(f"USB recovery succeeded via unbind/bind for {bus_id}")
+                    return True
+                logger.warning(
+                    f"USB recovery unbind/bind failed unbind_rc={unbind.returncode} "
+                    f"bind_rc={bind.returncode}: "
+                    f"{(unbind.stderr or bind.stderr or unbind.stdout or bind.stdout).strip()[:200]}"
+                )
+            except Exception as e:
+                logger.warning(f"USB recovery unbind/bind error: {e}")
+
+        # 2) Fallback: trigger tty/usb re-enumeration.
+        for cmd in (
+            ['sudo', '-n', 'udevadm', 'trigger', '--subsystem-match=tty', '--action=add'],
+            ['sudo', '-n', 'udevadm', 'trigger', '--subsystem-match=usb', '--action=add'],
+        ):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                if result.returncode == 0:
+                    logger.warning(f"USB recovery triggered with: {' '.join(cmd)}")
+                    return True
+                logger.warning(
+                    f"USB recovery trigger failed rc={result.returncode}: "
+                    f"{(result.stderr or result.stdout).strip()[:200]}"
+                )
+            except Exception as e:
+                logger.warning(f"USB recovery trigger error for {cmd}: {e}")
+
+        return False
 
     def attempt_reconnect(self) -> None:
         """Kick off a reconnect attempt when the controller is offline."""
         if self.connected:
             return
-        machine_state.set_status("Reconnecting...", busy=False)
+        machine_state.set_status("Retrying connection...", busy=False)
         log_controller_event("serial_reconnect_requested")
-        self._start_reconnect_loop()
+        self._start_reconnect_loop(use_usb_recovery=True)
 
     def reset_controller_after_estop(self) -> bool:
         """Clear a Marlin halt state after the physical E-stop has been released."""
