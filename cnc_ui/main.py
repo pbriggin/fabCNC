@@ -61,6 +61,19 @@ REPO_DIR = Path(__file__).parent.parent
 # Update check state
 update_state = {'available': False, 'acknowledged': False}
 
+# Set to True by any control/move command when the controller isn't connected;
+# polled by the per-page UI timer to (re)open the disconnect alert popup.
+disconnect_alert_state = {'requested': False}
+
+
+def _require_controller_connected() -> bool:
+    """Return True if the controller is connected; otherwise flag the disconnect alert."""
+    if cnc_controller.connected:
+        return True
+    disconnect_alert_state['requested'] = True
+    return False
+
+
 # Mount static files directory
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
 
@@ -642,11 +655,19 @@ def create_jog_controls():
     .home-btn:hover {
         background: #4a5a4a !important;
     }
+    /* Grey out move/control buttons when the controller is disconnected, but
+       keep them clickable so a click still surfaces the disconnect popup. */
+    body.controller-disconnected .motion-controls button,
+    body.controller-disconnected .motion-controls .home-btn,
+    body.controller-disconnected .motion-controls .jog-segment {
+        opacity: 0.35 !important;
+        filter: grayscale(70%);
+    }
     </style>
     ''')
     
     # Main container - inline layout for toolpath panel
-    with ui.column().classes('items-center gap-2'):
+    with ui.column().classes('items-center gap-2 motion-controls'):
         
         # XY Circular Wheel
         with ui.column().classes('items-center gap-2'):
@@ -926,7 +947,7 @@ def create_jog_controls():
                         .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
                 
                 # XY Zero button - spans full width (5 * 44px + 4 gaps * 4px = 236px)
-                ui.button('XY Zero', on_click=lambda: cnc_controller.send_command("G92 X0 Y0")).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
+                ui.button('XY Zero', on_click=xy_zero).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
                     .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
 
                 # Tape Fabric button — homes then moves to center of work area
@@ -1016,7 +1037,7 @@ def create_file_controls():
 
 def create_job_controls():
     """Create the compact job execution control panel."""
-    with ui.column().classes('w-full gap-1'):
+    with ui.column().classes('w-full gap-1 motion-controls'):
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
@@ -1096,8 +1117,18 @@ def create_job_controls():
 
 # Event handlers
 
+def xy_zero():
+    """Handle XY Zero button click."""
+    if not _require_controller_connected():
+        return
+    log_event('control', 'xy_zero')
+    cnc_controller.send_command("G92 X0 Y0")
+
+
 async def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
+    if not _require_controller_connected():
+        return
     if not await safety_confirm():
         log_event('jog', 'jog_cancelled', axis=axis, distance=distance)
         return
@@ -1108,18 +1139,24 @@ async def jog_axis(axis: str, distance: float):
 
 def home_axis(axis: str):
     """Handle home axis button click."""
+    if not _require_controller_connected():
+        return
     log_event('home', 'home_axis', axis=axis)
     cnc_controller.home_axis(axis)
 
 
 def home_all():
     """Handle home all button click."""
+    if not _require_controller_connected():
+        return
     log_event('home', 'home_all')
     cnc_controller.home_all()
 
 
 async def tape_fabric():
     """Home the machine then move toolhead to center of work area for fabric taping."""
+    if not _require_controller_connected():
+        return
     if not await safety_confirm():
         return
     rapid = SPEED_MAP['Medium'][1]  # 10000 mm/min — medium rapid rate
@@ -1161,6 +1198,8 @@ async def _wheel_step_confirm(step: str, instruction: str, confirm_label: str = 
 
 async def change_cutting_wheel():
     """Multi-step guided cutting wheel replacement."""
+    if not _require_controller_connected():
+        return
     if not await safety_confirm():
         return
 
@@ -1816,6 +1855,9 @@ async def outline_job():
     """Trace the bounding box of loaded shapes at safe height to show material placement."""
     global current_toolpath_shapes
 
+    if not _require_controller_connected():
+        return
+
     if not current_toolpath_shapes:
         ui.notify('No shapes loaded', type='warning')
         return
@@ -1872,7 +1914,10 @@ async def outline_job():
 async def start_job():
     """Handle start job button click - streams generated gcode via serial."""
     global current_gcode
-    
+
+    if not _require_controller_connected():
+        return
+
     if not machine_state.toolpath_generated:
         ui.notify('Please generate toolpath first', type='warning')
         return
@@ -1904,6 +1949,8 @@ async def start_job():
 
 def pause_job():
     """Handle pause job button click."""
+    if not _require_controller_connected():
+        return
     log_event('job', 'pause_clicked')
     cnc_controller.pause_job()
     ui.notify('Job paused', type='warning')
@@ -1911,6 +1958,8 @@ def pause_job():
 
 def resume_job():
     """Handle resume job button click."""
+    if not _require_controller_connected():
+        return
     log_event('job', 'resume_clicked')
     cnc_controller.resume_job()
     ui.notify('Job resumed', type='positive')
@@ -1918,6 +1967,8 @@ def resume_job():
 
 def stop_job():
     """Handle stop job button click."""
+    if not _require_controller_connected():
+        return
     log_event('job', 'stop_clicked')
     cnc_controller.stop_job()
     ui.notify('Job stopped', type='negative')
@@ -3309,6 +3360,7 @@ def main_page():
         _resume_dialog_shown: list = [False]
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
+        _prev_controls_disabled_look: list = [False]  # last CSS-toggled disconnected-look state sent to browser
 
         # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
         # instead of blending into the dark theme.
@@ -3436,6 +3488,12 @@ def main_page():
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label, status_pill, status_icon)
 
+            # A move/control command was attempted while disconnected — force the
+            # alert back open even if the operator had previously dismissed it.
+            if disconnect_alert_state['requested']:
+                disconnect_alert_state['requested'] = False
+                _connection_alert_dismissed[0] = False
+
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
             needs_disconnect_alert = (
@@ -3445,6 +3503,14 @@ def main_page():
                 or current_status == 'E-Stop Reset Required'
             )
             showing_connection_alert = False
+
+            # Grey out move/control buttons while disconnected (CSS class toggle,
+            # only sent to the browser when the state actually changes).
+            if needs_disconnect_alert != _prev_controls_disabled_look[0]:
+                _prev_controls_disabled_look[0] = needs_disconnect_alert
+                await ui.run_javascript(
+                    f"document.body.classList.toggle('controller-disconnected', {str(needs_disconnect_alert).lower()})"
+                )
 
             # Track whether we've ever seen a disconnect since this page loaded.
             if needs_disconnect_alert:
