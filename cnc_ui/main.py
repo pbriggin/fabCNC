@@ -3246,8 +3246,12 @@ def main_page():
             connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
             connection_alert_icon.props('name=usb_off color=red-4')
             connection_alert_title.set_text('Controller disconnected')
-            connection_alert_subtitle.set_text('Release the E-Stop switch.')
-            connection_alert_steps.set_text('Release the E-Stop switch.')
+            connection_alert_subtitle.set_text('Follow these steps to reconnect:')
+            connection_alert_steps.set_text(
+                '1. Disengage E-Stop.\n'
+                '2. Power cycle the fabCNC control box (red switch).\n'
+                '3. Click "Retry Connection".'
+            )
             retry_connection_button.set_visibility(True)
             connection_alert.set_visibility(True)
 
