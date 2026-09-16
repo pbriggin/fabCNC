@@ -2334,6 +2334,24 @@ def main_page():
                     capture_output=True, timeout=30
                 )
             )
+            setup_result = await loop.run_in_executor(
+                executor,
+                lambda: subprocess.run(
+                    ['bash', str(REPO_DIR / 'setup.sh'), '--post-update'],
+                    capture_output=True, text=True, timeout=300
+                )
+            )
+
+        if setup_result.returncode != 0:
+            msg = (setup_result.stderr or setup_result.stdout or '').strip()
+            log_event('system', 'post_update_setup_failed',
+                      returncode=setup_result.returncode,
+                      output=msg[:1000])
+            ui.notify('Update applied, but post-update setup failed. Run: bash setup.sh',
+                      type='warning', timeout=12000)
+        else:
+            log_event('system', 'post_update_setup_ok')
+
         # Tell the browser to reload after a delay, then exit.
         # systemd Restart=always will relaunch the service automatically — no sudo needed.
         await ui.run_javascript('setTimeout(() => window.location.reload(), 8000)')

@@ -10,110 +10,121 @@ VENV_DIR=".venv"
 PYTHON_MIN="3.10"
 PACKAIDE_REPO="https://github.com/DanielLiamAnderson/Packaide.git"
 
-# ── Python check ────────────────────────────────────────────────────────────
-echo "==> Checking Python version..."
-PYTHON_BIN=$(command -v python3 || true)
-if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: python3 not found. Install Python ${PYTHON_MIN}+ and try again."
-    exit 1
+POST_UPDATE_ONLY=0
+if [[ "${1:-}" == "--post-update" ]]; then
+    POST_UPDATE_ONLY=1
 fi
 
-PYTHON_VER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PYTHON_OK=$("$PYTHON_BIN" -c "import sys; print('yes' if sys.version_info >= (3, 10) else 'no')")
-if [ "$PYTHON_OK" != "yes" ]; then
-    echo "ERROR: Python ${PYTHON_MIN}+ required (found ${PYTHON_VER})."
-    exit 1
+if [ "$POST_UPDATE_ONLY" -eq 1 ]; then
+    echo "==> Post-update mode: skipping Python/packaide rebuild and refreshing system integration only..."
 fi
-echo "    Found Python ${PYTHON_VER}"
 
-# ── Virtual environment ──────────────────────────────────────────────────────
-echo ""
-echo "==> Creating virtual environment at ${VENV_DIR}..."
-"$PYTHON_BIN" -m venv "$VENV_DIR"
-
-PIP="${VENV_DIR}/bin/pip"
-VENV_PYTHON="${VENV_DIR}/bin/python"
-VENV_PREFIX=$("$VENV_PYTHON" -c "import sys; print(sys.prefix)")
-
-# ── Python dependencies ──────────────────────────────────────────────────────
-echo ""
-echo "==> Installing Python dependencies..."
-"$PIP" install --upgrade pip --quiet
-"$PIP" install -r requirements.txt
-
-# ── Packaide (build from source) ─────────────────────────────────────────────
-echo ""
-echo "==> Installing packaide (shape nesting — builds from source)..."
-
-SKIP_PACKAIDE=0
-
-# Install system build dependencies
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    if ! command -v brew &>/dev/null; then
-        echo "    WARNING: Homebrew not found. Cannot auto-install packaide build deps."
-        echo "             Install Homebrew, then run: brew install cmake boost cgal"
-        SKIP_PACKAIDE=1
-    else
-        echo "    Installing build deps via Homebrew (cmake, boost, cgal)..."
-        brew install cmake boost cgal 2>/dev/null || true
+if [ "$POST_UPDATE_ONLY" -eq 0 ]; then
+    # ── Python check ────────────────────────────────────────────────────────────
+    echo "==> Checking Python version..."
+    PYTHON_BIN=$(command -v python3 || true)
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "ERROR: python3 not found. Install Python ${PYTHON_MIN}+ and try again."
+        exit 1
     fi
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    echo "    Installing build deps via apt (cmake, libboost-all-dev, libcgal-dev)..."
-    sudo apt-get install -y cmake libboost-all-dev libcgal-dev 2>/dev/null || {
-        echo "    WARNING: apt install failed. Cannot auto-install packaide build deps."
-        SKIP_PACKAIDE=1
-    }
-else
-    echo "    WARNING: Unsupported OS '${OSTYPE}'. Skipping packaide."
-    SKIP_PACKAIDE=1
-fi
 
-if [ "$SKIP_PACKAIDE" -eq 0 ]; then
-    PACKAIDE_TMP=$(mktemp -d)
-    trap 'rm -rf "$PACKAIDE_TMP"' EXIT
-
-    echo "    Cloning packaide..."
-    git clone --depth=1 "$PACKAIDE_REPO" "$PACKAIDE_TMP/Packaide" --quiet
-
-    echo "    Building packaide..."
-    mkdir -p "$PACKAIDE_TMP/Packaide/build"
-    cmake -S "$PACKAIDE_TMP/Packaide" \
-          -B "$PACKAIDE_TMP/Packaide/build" \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX="$VENV_PREFIX" \
-          -DPython3_EXECUTABLE="$VENV_PYTHON" \
-          -DPYTHON_EXECUTABLE="$VENV_PYTHON" \
-          > /dev/null 2>&1
-
-    CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-    cmake --build "$PACKAIDE_TMP/Packaide/build" --parallel "$CPU_COUNT"
-
-    # Install packaide as a proper Python package into venv site-packages
-    # The C++ extension is built as PackaideBindings.so; __init__.py wraps it as 'packaide'
-    SITE_PACKAGES=$("$VENV_PYTHON" -c "import site; print(site.getsitepackages()[0])")
-    SO_FILE=$(find "$PACKAIDE_TMP/Packaide/build" -name "*.so" | head -n 1)
-    if [ -n "$SO_FILE" ]; then
-        PACKAIDE_PKG="${SITE_PACKAGES}/packaide"
-        mkdir -p "$PACKAIDE_PKG"
-        # Copy __init__.py from the repo's python package
-        cp "$PACKAIDE_TMP/Packaide/python/packaide/__init__.py" "$PACKAIDE_PKG/"
-        # Copy the C extension, named so __init__.py can import it as '.packaide'
-        cp "$SO_FILE" "$PACKAIDE_PKG/packaide.so"
-        echo "    packaide installed successfully."
-    else
-        echo "    WARNING: packaide .so not found after build. Check the build output above."
+    PYTHON_VER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    PYTHON_OK=$("$PYTHON_BIN" -c "import sys; print('yes' if sys.version_info >= (3, 10) else 'no')")
+    if [ "$PYTHON_OK" != "yes" ]; then
+        echo "ERROR: Python ${PYTHON_MIN}+ required (found ${PYTHON_VER})."
+        exit 1
     fi
+    echo "    Found Python ${PYTHON_VER}"
+
+    # ── Virtual environment ──────────────────────────────────────────────────────
+    echo ""
+    echo "==> Creating virtual environment at ${VENV_DIR}..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+
+    PIP="${VENV_DIR}/bin/pip"
+    VENV_PYTHON="${VENV_DIR}/bin/python"
+    VENV_PREFIX=$("$VENV_PYTHON" -c "import sys; print(sys.prefix)")
+
+    # ── Python dependencies ──────────────────────────────────────────────────────
+    echo ""
+    echo "==> Installing Python dependencies..."
+    "$PIP" install --upgrade pip --quiet
+    "$PIP" install -r requirements.txt
+
+    # ── Packaide (build from source) ─────────────────────────────────────────────
+    echo ""
+    echo "==> Installing packaide (shape nesting — builds from source)..."
+
+    SKIP_PACKAIDE=0
+
+    # Install system build dependencies
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if ! command -v brew &>/dev/null; then
+            echo "    WARNING: Homebrew not found. Cannot auto-install packaide build deps."
+            echo "             Install Homebrew, then run: brew install cmake boost cgal"
+            SKIP_PACKAIDE=1
+        else
+            echo "    Installing build deps via Homebrew (cmake, boost, cgal)..."
+            brew install cmake boost cgal 2>/dev/null || true
+        fi
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "    Installing build deps via apt (cmake, libboost-all-dev, libcgal-dev)..."
+        sudo apt-get install -y cmake libboost-all-dev libcgal-dev 2>/dev/null || {
+            echo "    WARNING: apt install failed. Cannot auto-install packaide build deps."
+            SKIP_PACKAIDE=1
+        }
+    else
+        echo "    WARNING: Unsupported OS '${OSTYPE}'. Skipping packaide."
+        SKIP_PACKAIDE=1
+    fi
+
+    if [ "$SKIP_PACKAIDE" -eq 0 ]; then
+        PACKAIDE_TMP=$(mktemp -d)
+        trap 'rm -rf "$PACKAIDE_TMP"' EXIT
+
+        echo "    Cloning packaide..."
+        git clone --depth=1 "$PACKAIDE_REPO" "$PACKAIDE_TMP/Packaide" --quiet
+
+        echo "    Building packaide..."
+        mkdir -p "$PACKAIDE_TMP/Packaide/build"
+        cmake -S "$PACKAIDE_TMP/Packaide" \
+              -B "$PACKAIDE_TMP/Packaide/build" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$VENV_PREFIX" \
+              -DPython3_EXECUTABLE="$VENV_PYTHON" \
+              -DPYTHON_EXECUTABLE="$VENV_PYTHON" \
+              > /dev/null 2>&1
+
+        CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+        cmake --build "$PACKAIDE_TMP/Packaide/build" --parallel "$CPU_COUNT"
+
+        # Install packaide as a proper Python package into venv site-packages
+        # The C++ extension is built as PackaideBindings.so; __init__.py wraps it as 'packaide'
+        SITE_PACKAGES=$("$VENV_PYTHON" -c "import site; print(site.getsitepackages()[0])")
+        SO_FILE=$(find "$PACKAIDE_TMP/Packaide/build" -name "*.so" | head -n 1)
+        if [ -n "$SO_FILE" ]; then
+            PACKAIDE_PKG="${SITE_PACKAGES}/packaide"
+            mkdir -p "$PACKAIDE_PKG"
+            # Copy __init__.py from the repo's python package
+            cp "$PACKAIDE_TMP/Packaide/python/packaide/__init__.py" "$PACKAIDE_PKG/"
+            # Copy the C extension, named so __init__.py can import it as '.packaide'
+            cp "$SO_FILE" "$PACKAIDE_PKG/packaide.so"
+            echo "    packaide installed successfully."
+        else
+            echo "    WARNING: packaide .so not found after build. Check the build output above."
+        fi
+    fi
+
+    # ── Verify ───────────────────────────────────────────────────────────────────
+    echo ""
+    echo "==> Verifying install..."
+    "$VENV_PYTHON" -c "import nicegui, ezdxf, numpy, matplotlib, serial" \
+        && echo "    Core dependencies: OK"
+
+    "$VENV_PYTHON" -c "import packaide" 2>/dev/null \
+        && echo "    packaide: OK" \
+        || echo "    packaide: not available (nesting feature will be disabled)"
 fi
-
-# ── Verify ───────────────────────────────────────────────────────────────────
-echo ""
-echo "==> Verifying install..."
-"$VENV_PYTHON" -c "import nicegui, ezdxf, numpy, matplotlib, serial" \
-    && echo "    Core dependencies: OK"
-
-"$VENV_PYTHON" -c "import packaide" 2>/dev/null \
-    && echo "    packaide: OK" \
-    || echo "    packaide: not available (nesting feature will be disabled)"
 
 # ── wifi-connect (Linux only) ────────────────────────────────────────────────
 if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
