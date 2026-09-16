@@ -64,6 +64,9 @@ class CNCController:
         self.job_thread: Optional[threading.Thread] = None
         self.read_thread: Optional[threading.Thread] = None
         self.connected = False
+        self.reconnect_thread_active = False
+        self.reset_required = False
+        self.last_controller_error = ""
         self.read_loop_paused = False
         self.read_lock = threading.Lock()
         
@@ -130,6 +133,8 @@ class CNCController:
                     if response and "FIRMWARE_NAME" in response:
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
+                        self.reset_required = False
+                        self.last_controller_error = ""
                         
                         # Start background thread to read responses
                         self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -182,7 +187,11 @@ class CNCController:
 
     def _start_reconnect_loop(self) -> None:
         """Background thread: waits for the serial device to re-enumerate then reconnects."""
+        if self.reconnect_thread_active:
+            return
+
         def _worker():
+            self.reconnect_thread_active = True
             # Close the stale port first
             if self.serial_port:
                 try:
@@ -201,10 +210,54 @@ class CNCController:
                     self.stop_requested = False
                     machine_state.set_status("Idle", busy=False)
                     log_controller_event("serial_reconnect", attempt=attempt)
+                    self.reconnect_thread_active = False
                     return
                 time.sleep(3.0)
 
+            self.reconnect_thread_active = False
+
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
+
+    def attempt_reconnect(self) -> None:
+        """Kick off a reconnect attempt when the controller is offline."""
+        if self.connected:
+            return
+        machine_state.set_status("Reconnecting...", busy=False)
+        log_controller_event("serial_reconnect_requested")
+        self._start_reconnect_loop()
+
+    def reset_controller_after_estop(self) -> bool:
+        """Clear a Marlin halt state after the physical E-stop has been released."""
+        if not self.connected:
+            return False
+
+        response = self.send_command_with_response("M999", timeout=5.0)
+        normalized = response.strip().lower()
+        failed = (
+            not normalized
+            or "error: not connected" in normalized
+            or "printer halted" in normalized
+            or "stopped due to errors" in normalized
+            or "kill() called" in normalized
+        )
+        if failed:
+            self.last_controller_error = response.strip() or "No response from M999"
+            log_controller_event(
+                "controller_reset_failed",
+                response=self.last_controller_error[:500],
+            )
+            return False
+
+        self.reset_required = False
+        self.last_controller_error = ""
+        self.stop_requested = False
+        self.pause_requested = False
+        self.homed = False
+        machine_state.reset_job()
+        machine_state.set_status("Idle", busy=False)
+        self._send_command("M114")
+        log_controller_event("controller_reset", response=response[:500])
+        return True
 
     # ==================== Resume After Disconnect ====================
 
@@ -636,6 +689,22 @@ class CNCController:
                         # Log errors
                         if 'error' in line.lower() or 'err:' in line.lower():
                             logger.warning(f"Controller error: {line}")
+                        lower = line.lower()
+                        if (
+                            'printer halted' in lower
+                            or 'stopped due to errors' in lower
+                            or 'kill() called' in lower
+                        ):
+                            if not self.reset_required:
+                                log_controller_event("controller_reset_required", response=line[:500])
+                            self.reset_required = True
+                            self.last_controller_error = line
+                            self.homed = False
+                            self.stop_requested = True
+                            self.pause_requested = False
+                            self.ok_event.set()
+                            machine_state.reset_job()
+                            machine_state.set_status("E-Stop Reset Required", busy=False)
                         
                 time.sleep(0.005)  # 5ms polling rate
             except OSError as e:

@@ -1907,6 +1907,26 @@ async def resume_disconnect_job():
     ui.notify('Resuming from last safe point…', type='positive')
 
 
+def retry_controller_connection():
+    """Retry Marlin controller discovery after power or USB is restored."""
+    log_event('system', 'controller_reconnect_clicked')
+    cnc_controller.attempt_reconnect()
+    ui.notify('Retrying controller connection…', type='info')
+
+
+async def reset_controller_after_estop():
+    """Send M999 after the hardware E-stop has been released."""
+    log_event('system', 'controller_reset_clicked')
+    ui.notify('Sending M999 to Marlin…', type='info')
+    loop = asyncio.get_event_loop()
+    recovered = await loop.run_in_executor(None, cnc_controller.reset_controller_after_estop)
+    if recovered:
+        ui.notify('Controller reset. Home all axes before moving or resuming.', type='positive', timeout=8000)
+        return
+    details = cnc_controller.last_controller_error or 'Release the E-stop, then power-cycle the controller and retry.'
+    ui.notify(f'Reset failed: {details}', type='negative', timeout=10000)
+
+
 # Track previous status for change detection
 _previous_status = {'text': None}
 
@@ -1928,22 +1948,29 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     
     # Update status
     current_status = machine_state.status_text
-    status_label.set_text(current_status)
+    display_status = current_status
+    if not cnc_controller.connected and current_status not in ('Disconnected', 'Reconnecting...'):
+        display_status = 'Disconnected'
+    status_label.set_text(display_status)
 
     # Update status pill appearance
     if status_pill and status_icon:
-        if current_status == 'Disconnected':
+        if display_status in ('Disconnected', 'Reconnecting...'):
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
+        elif current_status == 'E-Stop Reset Required':
+            status_pill.style('background: #4a3822; border: 1px solid #9c6a1c;')
+            status_icon.classes(add='text-orange-4', remove='text-green-4 text-red-5 text-yellow-4')
+            status_label.classes(add='text-orange-4', remove='text-green-4 text-red-5 text-yellow-4')
         elif machine_state.busy:
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
-            status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
-            status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
+            status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
+            status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
         else:
             status_pill.style('background: #2d4a2d; border: 1px solid #3d5a3d;')
-            status_icon.classes(add='text-green-4', remove='text-red-5 text-yellow-4')
-            status_label.classes(add='text-green-4', remove='text-red-5 text-yellow-4')
+            status_icon.classes(add='text-green-4', remove='text-red-5 text-yellow-4 text-orange-4')
+            status_label.classes(add='text-green-4', remove='text-red-5 text-yellow-4 text-orange-4')
 
     # Detect status changes and show notifications (Complete/Error only — 
     # disconnect/reconnect handled per-page in _update_ui_timer)
@@ -3148,28 +3175,77 @@ def main_page():
                             # Start the shell immediately so the prompt appears on page load
                             ui.timer(0.1, _start_shell, once=True)
 
-        # Per-page state for disconnect banner and resume dialog
+        # Per-page state for disconnect recovery and resume dialog
         _prev_status_local: list = [None]
         _resume_dialog_shown: list = [False]
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
 
-        # Persistent disconnect banner pinned to the bottom of the viewport.
-        # Hidden by default; shown while status == 'Disconnected'.
-        disconnect_banner = ui.card().style(
-            'position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); '
-            'z-index: 9999; background: #4a2d2d; border: 1px solid #7a3d3d; '
-            'color: #ffb4b4; padding: 14px 22px; border-radius: 8px; '
-            'box-shadow: 0 6px 18px rgba(0,0,0,0.5); min-width: 360px;'
+        connection_alert = ui.card().style(
+            'position: fixed; top: 72px; right: 24px; width: 430px; z-index: 9999; '
+            'background: #2d1f1f; border: 1px solid #7a3d3d; color: #fff; '
+            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.45);'
         )
-        with disconnect_banner:
-            with ui.row().classes('items-center gap-3 no-wrap'):
-                ui.icon('error_outline', size='28px').style('color: #ff6b6b;')
-                with ui.column().classes('gap-0'):
-                    ui.label('Controller disconnected') \
+        with connection_alert:
+            with ui.row().classes('items-start gap-3 no-wrap w-full'):
+                connection_alert_icon = ui.icon('usb_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
+                with ui.column().classes('gap-1 w-full'):
+                    connection_alert_title = ui.label('Controller disconnected') \
                         .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
-                    ui.label('Attempting to reconnect…') \
-                        .classes('text-caption').style('color: #ffb4b4;')
-        disconnect_banner.set_visibility(False)
+                    connection_alert_subtitle = ui.label('') \
+                        .classes('text-caption').style('color: #ffb4b4; white-space: normal;')
+            connection_alert_steps = ui.label('').style(
+                'white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;'
+            )
+            with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
+                ui.button('Open System Tab', on_click=lambda: tabs.set_value(wifi_tab)).props('flat dense') \
+                    .style('color: #aaa;')
+                retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
+                    .props('dense outline color=warning').style('font-size: 12px;')
+                reset_controller_button = ui.button('Send M999', on_click=reset_controller_after_estop) \
+                    .props('dense color=orange').style('font-size: 12px; color: #111;')
+                home_all_button = ui.button('Home All', on_click=home_all) \
+                    .props('dense color=primary').style('font-size: 12px;')
+        connection_alert.set_visibility(False)
+
+        def _show_connection_alert(mode: str, current_status: str) -> None:
+            if mode == 'disconnected':
+                connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
+                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_title.set_text('Marlin controller disconnected')
+                if current_status == 'Reconnecting...':
+                    connection_alert_subtitle.set_text('The Raspberry Pi is retrying the USB connection in the background.')
+                else:
+                    connection_alert_subtitle.set_text('The Raspberry Pi cannot talk to the Marlin controller over USB right now.')
+                connection_alert_steps.set_text(
+                    '1. Release the physical E-stop and restore controller power.\n'
+                    '2. Check the USB cable between the Raspberry Pi and the Marlin board.\n'
+                    '3. If you power-cycled or replugged the controller, press Retry Connection.\n'
+                    '4. After it reconnects, home all axes before jogging or resuming a job.'
+                )
+                retry_connection_button.set_visibility(True)
+                reset_controller_button.set_visibility(False)
+                home_all_button.set_visibility(False)
+                connection_alert.set_visibility(True)
+                return
+
+            if mode == 'estop':
+                connection_alert.style('background: #352818; border: 1px solid #9c6a1c;')
+                connection_alert_icon.props('name=warning_amber color=orange-4')
+                connection_alert_title.set_text('Controller halted by E-stop')
+                connection_alert_subtitle.set_text('Marlin is still online, but motion is locked until the halt is cleared.')
+                connection_alert_steps.set_text(
+                    '1. Twist or release the physical E-stop so the controller can run again.\n'
+                    '2. Press Send M999 to clear the Marlin halt state.\n'
+                    '3. Press Home All before jogging or resuming work.\n'
+                    '4. If M999 fails, power-cycle the controller and then press Retry Connection.'
+                )
+                retry_connection_button.set_visibility(True)
+                reset_controller_button.set_visibility(True)
+                home_all_button.set_visibility(True)
+                connection_alert.set_visibility(True)
+                return
+
+            connection_alert.set_visibility(False)
 
         def _show_resume_dialog():
             _resume_dialog_shown[0] = True
@@ -3201,12 +3277,17 @@ def main_page():
 
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
+            is_disconnected = (not cnc_controller.connected) or current_status in ('Disconnected', 'Reconnecting...')
 
             # Track whether we've ever seen a disconnect since this page loaded.
-            if current_status in ('Disconnected', 'Reconnecting...'):
+            if is_disconnected:
                 _was_disconnected[0] = True
-                disconnect_banner.set_visibility(True)
                 _resume_dialog_shown[0] = False
+                _show_connection_alert('disconnected', current_status)
+            elif cnc_controller.reset_required or current_status == 'E-Stop Reset Required':
+                _show_connection_alert('estop', current_status)
+            else:
+                _show_connection_alert('hidden', current_status)
 
             if prev != current_status:
                 _prev_status_local[0] = current_status
@@ -3222,7 +3303,7 @@ def main_page():
                 and cnc_controller.connected
                 and current_status == 'Idle'
             ):
-                disconnect_banner.set_visibility(False)
+                connection_alert.set_visibility(False)
                 ui.notify('Controller reconnected.', type='positive')
                 _was_disconnected[0] = False
                 if cnc_controller.has_resume_state():
