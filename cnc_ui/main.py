@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 REPO_DIR = Path(__file__).parent.parent
 
 # Update check state
-update_state = {'available': False}
+update_state = {'available': False, 'acknowledged': False}
 
 # Mount static files directory
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
@@ -545,6 +545,12 @@ def check_for_updates():
     except Exception as e:
         logger.warning(f"Update check failed: {e}")
         return False
+
+
+def acknowledge_software_update():
+    """Dismiss the current software update prompt until availability changes."""
+    update_state['acknowledged'] = True
+    log_event('system', 'software_update_acknowledged', current_version=APP_VERSION)
 
 
 def create_header():
@@ -2354,7 +2360,13 @@ def main_page():
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as executor:
             available = await loop.run_in_executor(executor, check_for_updates)
+        previous = update_state['available']
         update_state['available'] = available
+        if available and not previous:
+            update_state['acknowledged'] = False
+            log_event('system', 'software_update_available', current_version=APP_VERSION)
+        elif not available:
+            update_state['acknowledged'] = False
         if available:
             update_btn.set_text('Update Software')
             update_btn.props('dense flat no-caps icon=system_update_alt color=green-5')
@@ -2364,6 +2376,7 @@ def main_page():
             update_btn.set_text('Software Up To Date')
             update_btn.props('dense flat no-caps icon=check_circle color=grey-6')
             update_btn.style('font-size: 11px; min-width: 140px; background: none; border: none;')
+    ui.timer(0.1, _check_update_timer, once=True)
     ui.timer(300.0, _check_update_timer)  # Every 5 min — was 30 s; frequent git fetch stresses WiFi
     
     # Register JavaScript functions for jog control
@@ -3181,7 +3194,7 @@ def main_page():
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
 
         connection_alert = ui.card().style(
-            'position: fixed; top: 72px; right: 24px; width: 430px; z-index: 9999; '
+            'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9999; '
             'background: #2d1f1f; border: 1px solid #7a3d3d; color: #fff; '
             'padding: 16px 18px; border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.45);'
         )
@@ -3207,21 +3220,38 @@ def main_page():
                     .props('dense color=primary').style('font-size: 12px;')
         connection_alert.set_visibility(False)
 
+        update_alert = ui.card().style(
+            'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9998; '
+            'background: #1f2d22; border: 1px solid #3d7a4f; color: #fff; '
+            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.45);'
+        )
+        with update_alert:
+            with ui.row().classes('items-start gap-3 no-wrap w-full'):
+                ui.icon('system_update_alt', size='28px').style('color: #66bb6a; margin-top: 2px;')
+                with ui.column().classes('gap-1 w-full'):
+                    ui.label('Software update available') \
+                        .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
+                    ui.label('A software update is ready to install.') \
+                        .classes('text-caption').style('color: #b7dfc1; white-space: normal;')
+            ui.label('Acknowledge this notice or install the update now.') \
+                .style('white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;')
+            with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
+                ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
+                    .style('color: #aaa;')
+                ui.button('Update Now', on_click=do_software_update) \
+                    .props('dense color=positive').style('font-size: 12px; color: #111;')
+        update_alert.set_visibility(False)
+
         def _show_connection_alert(mode: str, current_status: str) -> None:
             if mode == 'disconnected':
                 connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
                 connection_alert_icon.props('name=usb_off color=red-4')
                 connection_alert_title.set_text('Marlin controller disconnected')
                 if current_status == 'Reconnecting...':
-                    connection_alert_subtitle.set_text('The Raspberry Pi is retrying the USB connection in the background.')
+                    connection_alert_subtitle.set_text('Release the E-Stop switch.')
                 else:
-                    connection_alert_subtitle.set_text('The Raspberry Pi cannot talk to the Marlin controller over USB right now.')
-                connection_alert_steps.set_text(
-                    '1. Release the physical E-stop and restore controller power.\n'
-                    '2. Check the USB cable between the Raspberry Pi and the Marlin board.\n'
-                    '3. If you power-cycled or replugged the controller, press Retry Connection.\n'
-                    '4. After it reconnects, home all axes before jogging or resuming a job.'
-                )
+                    connection_alert_subtitle.set_text('Release the E-Stop switch.')
+                connection_alert_steps.set_text('Release the E-Stop switch.')
                 retry_connection_button.set_visibility(True)
                 reset_controller_button.set_visibility(False)
                 home_all_button.set_visibility(False)
@@ -3232,13 +3262,8 @@ def main_page():
                 connection_alert.style('background: #352818; border: 1px solid #9c6a1c;')
                 connection_alert_icon.props('name=warning_amber color=orange-4')
                 connection_alert_title.set_text('Controller halted by E-stop')
-                connection_alert_subtitle.set_text('Marlin is still online, but motion is locked until the halt is cleared.')
-                connection_alert_steps.set_text(
-                    '1. Twist or release the physical E-stop so the controller can run again.\n'
-                    '2. Press Send M999 to clear the Marlin halt state.\n'
-                    '3. Press Home All before jogging or resuming work.\n'
-                    '4. If M999 fails, power-cycle the controller and then press Retry Connection.'
-                )
+                connection_alert_subtitle.set_text('Release the E-Stop switch.')
+                connection_alert_steps.set_text('Release the E-Stop switch.')
                 retry_connection_button.set_visibility(True)
                 reset_controller_button.set_visibility(True)
                 home_all_button.set_visibility(True)
@@ -3278,16 +3303,24 @@ def main_page():
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
             is_disconnected = (not cnc_controller.connected) or current_status in ('Disconnected', 'Reconnecting...')
+            showing_connection_alert = False
 
             # Track whether we've ever seen a disconnect since this page loaded.
             if is_disconnected:
                 _was_disconnected[0] = True
                 _resume_dialog_shown[0] = False
                 _show_connection_alert('disconnected', current_status)
+                showing_connection_alert = True
             elif cnc_controller.reset_required or current_status == 'E-Stop Reset Required':
                 _show_connection_alert('estop', current_status)
+                showing_connection_alert = True
             else:
                 _show_connection_alert('hidden', current_status)
+
+            if update_state['available'] and not update_state['acknowledged'] and not showing_connection_alert:
+                update_alert.set_visibility(True)
+            else:
+                update_alert.set_visibility(False)
 
             if prev != current_status:
                 _prev_status_local[0] = current_status
