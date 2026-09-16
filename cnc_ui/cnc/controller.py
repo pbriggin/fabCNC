@@ -7,6 +7,7 @@ This implementation communicates with Marlin firmware via serial.
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import threading
@@ -70,6 +71,7 @@ class CNCController:
         self.reset_required = False
         self.last_controller_error = ""
         self.last_serial_device = ""
+        self.last_candidate_count = 0
         self.read_loop_paused = False
         self.read_lock = threading.Lock()
         
@@ -111,8 +113,8 @@ class CNCController:
             # List all available serial ports
             ports = serial.tools.list_ports.comports()
             candidate_ports = [p for p in ports if self._is_candidate_marlin_port(p)]
+            self.last_candidate_count = len(candidate_ports)
             if not candidate_ports:
-                logger.warning("No candidate USB serial ports found for Marlin reconnect")
                 if strict_candidates:
                     return False
                 candidate_ports = ports
@@ -121,6 +123,9 @@ class CNCController:
                 # Try connecting to this port
                 try:
                     logger.info(f"Trying to connect to {port.device} ({port.description})")
+                    # Keep the most recent USB tty so recovery can target it
+                    # even if handshake fails before a full connection is established.
+                    self.last_serial_device = str(port.device)
                     self.serial_port = serial.Serial(
                         port=port.device,
                         baudrate=self.baudrate,
@@ -260,6 +265,7 @@ class CNCController:
                     self.serial_port = None
 
                 attempt = 0
+                no_candidate_streak = 0
                 while not self.connected:
                     attempt += 1
                     machine_state.set_status("Retrying connection...", busy=False)
@@ -270,6 +276,25 @@ class CNCController:
                         machine_state.set_status("Idle", busy=False)
                         log_controller_event("serial_reconnect", attempt=attempt)
                         return
+
+                    if self.last_candidate_count == 0:
+                        no_candidate_streak += 1
+                        if no_candidate_streak == 1:
+                            logger.warning(
+                                "No Marlin USB serial device detected; waiting for controller to enumerate"
+                            )
+                            log_controller_event("serial_reconnect_no_usb_device")
+                        # If no candidate appears for several retries, stop retrying
+                        # so the UI returns to Disconnected until the operator retries again.
+                        if no_candidate_streak >= 5:
+                            machine_state.set_status("Disconnected", busy=False)
+                            log_controller_event(
+                                "serial_reconnect_aborted_no_usb",
+                                attempts=attempt,
+                            )
+                            return
+                    else:
+                        no_candidate_streak = 0
 
                     # If the E-stop keeps the controller unpowered for a long period,
                     # Linux can occasionally keep a stale USB state. Periodically
@@ -340,7 +365,11 @@ class CNCController:
             except Exception as e:
                 logger.warning(f"USB recovery unbind/bind error: {e}")
 
-        # 2) Fallback: trigger tty/usb re-enumeration.
+        # 2) Strong fallback: toggle USB port power when supported by hub chipset.
+        if self._attempt_usb_power_cycle(bus_id):
+            return True
+
+        # 3) Final fallback: trigger tty/usb re-enumeration.
         any_trigger_ok = False
         for cmd in (
             ['sudo', '-n', 'udevadm', 'trigger', '--subsystem-match=tty', '--action=add'],
@@ -360,6 +389,62 @@ class CNCController:
                 logger.warning(f"USB recovery trigger error for {cmd}: {e}")
 
         return any_trigger_ok
+
+    def _attempt_usb_power_cycle(self, bus_id: str) -> bool:
+        """Try power-cycling the target USB port via uhubctl (Linux only)."""
+        uhubctl = shutil.which('uhubctl')
+        if not uhubctl:
+            return False
+
+        location_port_candidates = self._uhubctl_location_port_candidates(bus_id)
+        for location, port in location_port_candidates:
+            off_cmd = ['sudo', '-n', uhubctl, '-l', location, '-p', port, '-a', 'off']
+            on_cmd = ['sudo', '-n', uhubctl, '-l', location, '-p', port, '-a', 'on']
+            try:
+                off = subprocess.run(off_cmd, capture_output=True, text=True, timeout=10)
+                if off.returncode != 0:
+                    logger.warning(
+                        f"USB power OFF failed for -l {location} -p {port}: "
+                        f"{(off.stderr or off.stdout).strip()[:200]}"
+                    )
+                    continue
+                time.sleep(1.5)
+                on = subprocess.run(on_cmd, capture_output=True, text=True, timeout=10)
+                if on.returncode == 0:
+                    logger.warning(f"USB power cycle succeeded for -l {location} -p {port}")
+                    log_controller_event(
+                        "serial_reconnect_usb_power_cycle",
+                        location=location,
+                        port=port,
+                        bus_id=bus_id,
+                    )
+                    return True
+                logger.warning(
+                    f"USB power ON failed for -l {location} -p {port}: "
+                    f"{(on.stderr or on.stdout).strip()[:200]}"
+                )
+            except Exception as e:
+                logger.warning(f"USB power cycle error for -l {location} -p {port}: {e}")
+
+        return False
+
+    @staticmethod
+    def _uhubctl_location_port_candidates(bus_id: str) -> list[tuple[str, str]]:
+        """Build likely (hub-location, port) tuples from a USB bus id like 1-1.3.4."""
+        if not bus_id or '-' not in bus_id:
+            return []
+        root, chain = bus_id.split('-', 1)
+        parts = [p for p in chain.split('.') if p]
+        if len(parts) < 2:
+            return []
+
+        candidates: list[tuple[str, str]] = []
+        # Most specific first: 1-1.3 + port 4, then 1-1 + port 3, etc.
+        for i in range(len(parts) - 1, 0, -1):
+            location = f"{root}-{'.'.join(parts[:i])}"
+            port = parts[i]
+            candidates.append((location, port))
+        return candidates
 
     def attempt_reconnect(self) -> None:
         """Kick off a reconnect attempt when the controller is offline."""

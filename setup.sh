@@ -214,6 +214,11 @@ WIFICONF
         sudo iw dev "$IFACE" set power_save off 2>/dev/null || true
     done
     echo "    WiFi power management disabled (persistent via NetworkManager)."
+
+    echo ""
+    echo "==> Installing optional USB power-cycle utility (uhubctl)..."
+    sudo apt-get install -y uhubctl --quiet 2>/dev/null || \
+        echo "    WARNING: could not install uhubctl (USB power cycle fallback disabled)."
 fi
 
 # ── Systemd auto-start (Linux only) ─────────────────────────────────────────
@@ -256,7 +261,7 @@ EOF
     # Allow the service user to run privileged commands without a password:
     #   - restart fabcnc service  (in-app "Update Software" / "Restart Service")
     #   - reboot                  (in-app "Reboot System" / "Forget WiFi & Reboot")
-    echo "${CURRENT_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart fabcnc.service, /usr/bin/systemctl restart fabcnc.service, /sbin/reboot, /usr/bin/udevadm trigger --subsystem-match=tty --action=add, /usr/bin/udevadm trigger --subsystem-match=usb --action=add, /usr/bin/tee /sys/bus/usb/drivers/usb/unbind, /usr/bin/tee /sys/bus/usb/drivers/usb/bind" \
+    echo "${CURRENT_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart fabcnc.service, /usr/bin/systemctl restart fabcnc.service, /sbin/reboot, /usr/bin/udevadm trigger --subsystem-match=tty --action=add, /usr/bin/udevadm trigger --subsystem-match=usb --action=add, /usr/bin/tee /sys/bus/usb/drivers/usb/unbind, /usr/bin/tee /sys/bus/usb/drivers/usb/bind, /usr/bin/uhubctl, /usr/sbin/uhubctl" \
         | sudo tee /etc/sudoers.d/fabcnc-restart > /dev/null
     sudo chmod 0440 /etc/sudoers.d/fabcnc-restart
     echo "    Sudoers rule added: ${CURRENT_USER} can restart fabcnc and reboot without password."
