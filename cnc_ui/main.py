@@ -3366,10 +3366,18 @@ def main_page():
             ui.label('Acknowledge this notice or install the update now.') \
                 .style('white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;')
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
-                ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
+                acknowledge_update_button = ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
                     .style('color: #aaa;')
-                ui.button('Update Now', on_click=do_software_update) \
-                    .props('dense color=positive').style('font-size: 12px; color: #111;')
+                update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;')
+
+                async def _do_update_now():
+                    update_now_button.set_text('Updating...')
+                    update_now_button.props('icon=hourglass_top')
+                    update_now_button.disable()
+                    acknowledge_update_button.disable()
+                    await do_software_update()
+
+                update_now_button.on_click(_do_update_now)
         update_alert.set_visibility(False)
 
         def _show_connection_alert() -> None:
