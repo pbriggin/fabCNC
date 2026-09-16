@@ -623,7 +623,7 @@ def create_header():
                 .style('font-size: 11px; min-width: 140px;')
             
             with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
-                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
+                wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
                 ui.element('div').style('width: 10px; flex-shrink: 0;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
 
@@ -2471,18 +2471,20 @@ def main_page():
         with concurrent.futures.ThreadPoolExecutor() as executor:
             ssid, signal = await loop.run_in_executor(executor, _get_current_wifi_status)
         if ssid is None:
-            wifi_status_icon.props('name=wifi_off color=grey-6')
+            wifi_status_icon.props('name=signal_wifi_off color=grey-6')
             wifi_status_text.set_text('Wi-Fi: —')
         else:
+            # Single consistent icon family (network_wifi_*) so only the number of
+            # filled bars changes with signal strength, like macOS's Wi-Fi icon.
             if signal is None or signal >= 80:
-                color = 'green-5'
+                bar_icon, color = 'network_wifi', 'green-5'
             elif signal >= 55:
-                color = 'green-5'
+                bar_icon, color = 'network_wifi_3_bar', 'green-5'
             elif signal >= 30:
-                color = 'amber-5'
+                bar_icon, color = 'network_wifi_2_bar', 'amber-5'
             else:
-                color = 'red-5'
-            wifi_status_icon.props(f'name=wifi color={color}')
+                bar_icon, color = 'network_wifi_1_bar', 'red-5'
+            wifi_status_icon.props(f'name={bar_icon} color={color}')
             wifi_status_text.set_text(ssid)
     ui.timer(0.1, _check_wifi_status_timer, once=True)
     ui.timer(30.0, _check_wifi_status_timer)
