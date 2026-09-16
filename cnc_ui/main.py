@@ -3249,6 +3249,7 @@ def main_page():
         _prev_status_local: list = [None]
         _resume_dialog_shown: list = [False]
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
+        _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
 
         connection_alert = ui.card().style(
             'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9999; '
@@ -3263,6 +3264,13 @@ def main_page():
                         .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
                     connection_alert_subtitle = ui.label('') \
                         .classes('text-caption').style('color: #ffb4b4; white-space: normal;')
+
+                def _dismiss_connection_alert():
+                    _connection_alert_dismissed[0] = True
+                    connection_alert.set_visibility(False)
+
+                ui.button(icon='close', on_click=_dismiss_connection_alert) \
+                    .props('flat dense round').style('color: #aaa; margin: -4px -4px 0 0;')
             connection_alert_steps = ui.label('').style(
                 'white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;'
             )
@@ -3306,6 +3314,21 @@ def main_page():
             retry_connection_button.set_visibility(True)
             connection_alert.set_visibility(True)
 
+        def _reopen_connection_alert():
+            """Let the operator bring back a dismissed disconnect popup via the status pill."""
+            current_status = machine_state.status_text
+            if (
+                not cnc_controller.connected
+                or current_status in ('Disconnected', 'Retrying connection...')
+                or cnc_controller.reset_required
+                or current_status == 'E-Stop Reset Required'
+            ):
+                _connection_alert_dismissed[0] = False
+                _show_connection_alert()
+
+        status_pill.style('cursor: pointer;')
+        status_pill.on('click', _reopen_connection_alert)
+
         def _show_resume_dialog():
             _resume_dialog_shown[0] = True
             with ui.dialog().props('persistent') as dlg, \
@@ -3348,10 +3371,12 @@ def main_page():
             if needs_disconnect_alert:
                 _was_disconnected[0] = True
                 _resume_dialog_shown[0] = False
-                _show_connection_alert()
-                showing_connection_alert = True
+                if not _connection_alert_dismissed[0]:
+                    _show_connection_alert()
+                    showing_connection_alert = True
             else:
                 connection_alert.set_visibility(False)
+                _connection_alert_dismissed[0] = False  # reset so the next disconnect shows fresh
 
             if update_state['available'] and not update_state['acknowledged'] and not showing_connection_alert:
                 update_alert.set_visibility(True)
