@@ -3309,10 +3309,19 @@ def main_page():
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
 
+        # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
+        # instead of blending into the dark theme.
+        alert_backdrop = ui.element('div').style(
+            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9996; display: none;'
+        )
+
+        def _set_alert_backdrop(visible: bool) -> None:
+            alert_backdrop.style(f'display: {"block" if visible else "none"};')
+
         connection_alert = ui.card().style(
             'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9999; '
-            'background: #2d1f1f; border: 1px solid #7a3d3d; color: #fff; '
-            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.45);'
+            'background: #3a1414; border: 2px solid #e05252; color: #fff; '
+            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.65);'
         )
         with connection_alert:
             with ui.row().classes('items-start gap-3 no-wrap w-full'):
@@ -3326,6 +3335,8 @@ def main_page():
                 def _dismiss_connection_alert():
                     _connection_alert_dismissed[0] = True
                     connection_alert.set_visibility(False)
+                    if not update_alert.visible:
+                        _set_alert_backdrop(False)
 
                 ui.button(icon='close', on_click=_dismiss_connection_alert) \
                     .props('flat dense round').style('color: #aaa; margin: -4px -4px 0 0;')
@@ -3339,8 +3350,8 @@ def main_page():
 
         update_alert = ui.card().style(
             'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9998; '
-            'background: #1f2d22; border: 1px solid #3d7a4f; color: #fff; '
-            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.45);'
+            'background: #12301c; border: 2px solid #4fd07a; color: #fff; '
+            'padding: 16px 18px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.65);'
         )
         with update_alert:
             with ui.row().classes('items-start gap-3 no-wrap w-full'):
@@ -3360,7 +3371,7 @@ def main_page():
         update_alert.set_visibility(False)
 
         def _show_connection_alert() -> None:
-            connection_alert.style('background: #2d1f1f; border: 1px solid #7a3d3d;')
+            connection_alert.style('background: #3a1414; border: 2px solid #e05252;')
             connection_alert_icon.props('name=usb_off color=red-4')
             connection_alert_title.set_text('Controller disconnected')
             connection_alert_subtitle.set_text('Follow these steps to reconnect:')
@@ -3371,6 +3382,7 @@ def main_page():
             )
             retry_connection_button.set_visibility(True)
             connection_alert.set_visibility(True)
+            _set_alert_backdrop(True)
 
         def _reopen_connection_alert():
             """Let the operator bring back a dismissed disconnect popup via the status pill."""
@@ -3438,8 +3450,11 @@ def main_page():
 
             if update_state['available'] and not update_state['acknowledged'] and not showing_connection_alert:
                 update_alert.set_visibility(True)
+                _set_alert_backdrop(True)
             else:
                 update_alert.set_visibility(False)
+                if not showing_connection_alert:
+                    _set_alert_backdrop(False)
 
             if prev != current_status:
                 _prev_status_local[0] = current_status
