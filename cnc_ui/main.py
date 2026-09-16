@@ -2433,8 +2433,7 @@ def main_page():
             else:
                 signal_icon, color = 'network_wifi_1_bar', 'red-5'
             wifi_status_icon.props(f'name={signal_icon} color={color}')
-            signal_text = f'{signal}%' if signal is not None else '?'
-            wifi_status_text.set_text(f'{ssid} ({signal_text})')
+            wifi_status_text.set_text(ssid)
     ui.timer(0.1, _check_wifi_status_timer, once=True)
     ui.timer(30.0, _check_wifi_status_timer)
     
