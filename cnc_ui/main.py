@@ -599,10 +599,6 @@ def create_header():
         
         # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
-            with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
-                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
-                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
-
             for axis in ['X', 'Y', 'Z', 'A']:
                 with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
                     ui.label(f'{axis}').classes('text-caption font-bold').style('color: #888; width: 12px;')
@@ -613,6 +609,10 @@ def create_header():
                 .props('dense flat no-caps color=grey-6') \
                 .style('font-size: 11px; min-width: 140px;')
             
+            with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+                wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
+                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
+
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
     return (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
@@ -2422,8 +2422,17 @@ def main_page():
             wifi_status_icon.props('name=wifi_off color=grey-6')
             wifi_status_text.set_text('Wi-Fi: —')
         else:
-            signal_icon = 'wifi' if signal is None or signal >= 40 else 'wifi_1_bar'
-            wifi_status_icon.props(f'name={signal_icon} color=green-5')
+            if signal is None:
+                signal_icon, color = 'signal_wifi_4_bar', 'grey-5'
+            elif signal >= 80:
+                signal_icon, color = 'signal_wifi_4_bar', 'green-5'
+            elif signal >= 55:
+                signal_icon, color = 'signal_wifi_3_bar', 'green-5'
+            elif signal >= 30:
+                signal_icon, color = 'network_wifi_2_bar', 'amber-5'
+            else:
+                signal_icon, color = 'network_wifi_1_bar', 'red-5'
+            wifi_status_icon.props(f'name={signal_icon} color={color}')
             signal_text = f'{signal}%' if signal is not None else '?'
             wifi_status_text.set_text(f'{ssid} ({signal_text})')
     ui.timer(0.1, _check_wifi_status_timer, once=True)
