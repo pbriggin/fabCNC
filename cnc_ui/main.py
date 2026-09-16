@@ -609,14 +609,14 @@ def create_header():
                 .props('dense flat no-caps color=grey-6') \
                 .style('font-size: 11px; min-width: 140px;')
             
-            with ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+            with ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
                 wifi_status_icon = ui.icon('wifi_off', size='16px').style('color: #888;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
     return (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
-            status_pill, status_icon, wifi_status_icon, wifi_status_text)
+            status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget)
 
 
 def create_jog_controls():
@@ -2333,7 +2333,7 @@ def main_page():
     ''')
     
     (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
-     status_pill, status_icon, wifi_status_icon, wifi_status_text) = create_header()
+     status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget) = create_header()
     
     # Update button click handler
     async def do_software_update():
@@ -2436,6 +2436,201 @@ def main_page():
             wifi_status_text.set_text(ssid)
     ui.timer(0.1, _check_wifi_status_timer, once=True)
     ui.timer(30.0, _check_wifi_status_timer)
+
+    # Wi-Fi settings dropdown, anchored to the header Wi-Fi widget
+    with wifi_widget:
+        with ui.menu() as wifi_menu:
+            with ui.column().classes('gap-2 p-3').style('min-width: 300px;'):
+                ui.label('Wi-Fi').classes('text-body1 font-bold').style('color: #aaa;')
+                wifi_status_label = ui.label('Click to scan…').classes('text-caption').style('color: #888;')
+                wifi_select = ui.select(options={}, label='Available networks') \
+                    .props('dense').style('min-width: 260px;')
+
+                def _parse_wifi_networks():
+                    """Return (networks_list, raw_output) using multiline nmcli mode."""
+                    import collections, time
+                    # Force a fresh scan; goodpigeon has NOPASSWD sudo
+                    try:
+                        subprocess.run(
+                            ['sudo', 'nmcli', 'device', 'wifi', 'rescan'],
+                            capture_output=True, text=True, timeout=10
+                        )
+                        time.sleep(4)
+                    except Exception:
+                        pass
+                    result = subprocess.run(
+                        ['nmcli', '--mode', 'multiline', '-f',
+                         'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list'],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    raw = result.stdout
+                    # multiline format: indexed "FIELD[N]: value" or non-indexed "FIELD: value"
+                    # Non-indexed: nmcli omits [N] on all records on some versions/configs;
+                    # detect record boundaries by watching for IN-USE repeating.
+                    entries = collections.defaultdict(dict)
+                    current_idx = 0
+                    for line in raw.splitlines():
+                        # indexed form: FIELD[N]: value
+                        m = re.match(r'^([A-Z_-]+)\[(\d+)\]:\s*(.*)', line)
+                        if m:
+                            field, idx, val = m.group(1), m.group(2), m.group(3).strip()
+                            entries[idx][field.lower().replace('-', '_')] = val
+                            continue
+                        # non-indexed form: FIELD: value
+                        m2 = re.match(r'^([A-Z_-]+):\s*(.*)', line)
+                        if m2:
+                            field, val = m2.group(1), m2.group(2).strip()
+                            field_key = field.lower().replace('-', '_')
+                            # IN-USE marks the start of each record
+                            if field_key == 'in_use' and 'in_use' in entries[str(current_idx)]:
+                                current_idx += 1
+                            entries[str(current_idx)][field_key] = val
+                    networks = []
+                    seen = set()
+                    for idx in sorted(entries, key=lambda x: int(x)):
+                        e = entries[idx]
+                        ssid = e.get('ssid', '').strip()
+                        if not ssid or ssid in seen:
+                            continue
+                        seen.add(ssid)
+                        networks.append({
+                            'ssid': ssid,
+                            'signal': e.get('signal', '?'),
+                            'security': e.get('security', ''),
+                            'in_use': e.get('in_use', '') == '*',
+                        })
+                    networks.sort(
+                        key=lambda x: int(x['signal']) if x['signal'].isdigit() else 0,
+                        reverse=True
+                    )
+                    return networks, raw
+
+                async def scan_wifi():
+                    wifi_status_label.set_text('Scanning…')
+                    wifi_select.set_options({})
+                    loop = asyncio.get_event_loop()
+                    try:
+                        networks, raw = await loop.run_in_executor(None, _parse_wifi_networks)
+                    except Exception as exc:
+                        wifi_status_label.set_text(f'Scan failed: {exc}')
+                        return
+                    if not networks:
+                        # show raw output to help diagnose
+                        wifi_status_label.set_text(f'No networks parsed. Raw: {raw[:200]!r}')
+                        return
+                    options = {}
+                    for n in networks:
+                        label = f"{'★ ' if n['in_use'] else ''}{n['ssid']}  ({n['signal']}%{', ' + n['security'] if n['security'] else ''})"
+                        options[n['ssid']] = label
+                    wifi_select.set_options(options)
+                    wifi_status_label.set_text(f"Found {len(networks)} network(s).")
+
+                def open_connect_dialog():
+                    ssid = wifi_select.value
+                    if not ssid:
+                        ui.notify('Select a network first.', type='warning')
+                        return
+                    with ui.dialog() as conn_dlg, ui.card().style('min-width: 320px;'):
+                        ui.label(f'Connect to "{ssid}"').classes('text-h6')
+                        pwd_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                        conn_status = ui.label('').classes('text-caption').style('color: #f88;')
+                        with ui.row().classes('gap-2 justify-end w-full mt-2'):
+                            ui.button('Cancel', on_click=conn_dlg.close).props('flat dense')
+                            async def do_connect():
+                                conn_status.set_text('Connecting…')
+                                pwd = pwd_input.value
+                                loop = asyncio.get_event_loop()
+                                def run_connect():
+                                    # Delete any stale/incomplete profile for this SSID
+                                    # (avoids "key-mgmt: property is missing" from old profiles)
+                                    subprocess.run(
+                                        ['sudo', 'nmcli', 'connection', 'delete', ssid],
+                                        capture_output=True, text=True, timeout=10
+                                    )
+                                    cmd = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
+                                    if pwd:
+                                        cmd += ['password', pwd]
+                                    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                                result = await loop.run_in_executor(None, run_connect)
+                                if result.returncode == 0:
+                                    conn_dlg.close()
+                                    ui.notify(f'Connected to {ssid}', type='positive')
+                                    wifi_status_label.set_text(f'Connected to {ssid}')
+                                else:
+                                    err = result.stderr.strip() or result.stdout.strip()
+                                    conn_status.set_text(err or 'Connection failed.')
+                            ui.button('Connect', on_click=do_connect).props('color=primary dense')
+                    conn_dlg.open()
+
+                def confirm_forget_wifi():
+                    with ui.dialog() as dlg, ui.card():
+                        ui.label('Forget all WiFi networks?').classes('text-h6')
+                        ui.label(
+                            'This will delete all saved WiFi connections and reboot the Pi. '
+                            'On next boot it will create a "fabCNC Setup" hotspot.'
+                        ).classes('text-body2').style('color: #aaa; max-width: 340px;')
+                        with ui.row().classes('gap-2 justify-end w-full mt-4'):
+                            ui.button('Cancel', on_click=dlg.close).props('flat dense')
+                            def do_forget():
+                                dlg.close()
+                                ui.notify('Removing WiFi connections and rebooting…', type='warning')
+                                subprocess.Popen(
+                                    'bash -c \''
+                                    'nmcli -t -f NAME,TYPE connection show'
+                                    ' | grep ":802-11-wireless$"'
+                                    ' | cut -d: -f1'
+                                    ' | while IFS= read -r n; do nmcli connection delete "$n"; done'
+                                    '; sudo reboot\'',
+                                    shell=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                            ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
+                    dlg.open()
+
+                def confirm_forget_wifi_except_current():
+                    with ui.dialog() as dlg, ui.card():
+                        ui.label('Forget all other WiFi networks?').classes('text-h6')
+                        ui.label(
+                            'This deletes every saved WiFi profile except the one currently '
+                            'connected. No reboot needed.'
+                        ).classes('text-body2').style('color: #aaa; max-width: 340px;')
+                        with ui.row().classes('gap-2 justify-end w-full mt-4'):
+                            ui.button('Cancel', on_click=dlg.close).props('flat dense')
+                            def do_forget_others():
+                                dlg.close()
+                                ui.notify('Removing other saved WiFi networks…', type='warning')
+                                subprocess.Popen(
+                                    'bash -c \''
+                                    'active=$(nmcli -t -f NAME,TYPE connection show --active'
+                                    ' | grep ":802-11-wireless$" | cut -d: -f1);'
+                                    'nmcli -t -f NAME,TYPE connection show'
+                                    ' | grep ":802-11-wireless$"'
+                                    ' | cut -d: -f1'
+                                    ' | while IFS= read -r n; do'
+                                    ' [ "$n" != "$active" ] && nmcli connection delete "$n"; done\'',
+                                    shell=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                            ui.button('Forget Others', on_click=do_forget_others).props('color=warning dense')
+                    dlg.open()
+
+                with ui.row().classes('gap-2 items-center'):
+                    ui.button('Rescan', icon='wifi_find', on_click=scan_wifi).props('dense outline').style('font-size: 12px;')
+                    ui.button('Connect', icon='wifi', on_click=open_connect_dialog).props('color=primary dense').style('font-size: 12px;')
+                ui.separator()
+                with ui.row().classes('gap-2 items-center'):
+                    ui.button('Forget Others', icon='wifi_off', on_click=confirm_forget_wifi_except_current) \
+                        .props('color=warning dense').style('font-size: 12px;')
+                    ui.button('Forget All & Reboot', icon='wifi_off', on_click=confirm_forget_wifi) \
+                        .props('color=negative dense').style('font-size: 12px;')
+
+    async def _open_wifi_menu():
+        wifi_menu.open()
+        await scan_wifi()
+
+    wifi_widget.on('click', _open_wifi_menu)
     
     # Register JavaScript functions for jog control
     ui.run_javascript('''
@@ -2878,159 +3073,6 @@ def main_page():
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
                                     .props('color=negative dense').style('font-size: 13px;')
-
-                            ui.separator().classes('my-3')
-                            ui.label('WiFi').classes('text-body1 font-bold mb-1').style('color: #aaa;')
-
-                            wifi_status_label = ui.label('Press Scan to find networks.').classes('text-caption').style('color: #888;')
-                            wifi_select = ui.select(options={}, label='Available networks').style('min-width: 260px;')
-
-                            def _parse_wifi_networks():
-                                """Return (networks_list, raw_output) using multiline nmcli mode."""
-                                import collections, time
-                                # Force a fresh scan; goodpigeon has NOPASSWD sudo
-                                try:
-                                    subprocess.run(
-                                        ['sudo', 'nmcli', 'device', 'wifi', 'rescan'],
-                                        capture_output=True, text=True, timeout=10
-                                    )
-                                    time.sleep(4)
-                                except Exception:
-                                    pass
-                                result = subprocess.run(
-                                    ['nmcli', '--mode', 'multiline', '-f',
-                                     'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list'],
-                                    capture_output=True, text=True, timeout=15
-                                )
-                                raw = result.stdout
-                                # multiline format: indexed "FIELD[N]: value" or non-indexed "FIELD: value"
-                                # Non-indexed: nmcli omits [N] on all records on some versions/configs;
-                                # detect record boundaries by watching for IN-USE repeating.
-                                entries = collections.defaultdict(dict)
-                                current_idx = 0
-                                for line in raw.splitlines():
-                                    # indexed form: FIELD[N]: value
-                                    m = re.match(r'^([A-Z_-]+)\[(\d+)\]:\s*(.*)', line)
-                                    if m:
-                                        field, idx, val = m.group(1), m.group(2), m.group(3).strip()
-                                        entries[idx][field.lower().replace('-', '_')] = val
-                                        continue
-                                    # non-indexed form: FIELD: value
-                                    m2 = re.match(r'^([A-Z_-]+):\s*(.*)', line)
-                                    if m2:
-                                        field, val = m2.group(1), m2.group(2).strip()
-                                        field_key = field.lower().replace('-', '_')
-                                        # IN-USE marks the start of each record
-                                        if field_key == 'in_use' and 'in_use' in entries[str(current_idx)]:
-                                            current_idx += 1
-                                        entries[str(current_idx)][field_key] = val
-                                networks = []
-                                seen = set()
-                                for idx in sorted(entries, key=lambda x: int(x)):
-                                    e = entries[idx]
-                                    ssid = e.get('ssid', '').strip()
-                                    if not ssid or ssid in seen:
-                                        continue
-                                    seen.add(ssid)
-                                    networks.append({
-                                        'ssid': ssid,
-                                        'signal': e.get('signal', '?'),
-                                        'security': e.get('security', ''),
-                                        'in_use': e.get('in_use', '') == '*',
-                                    })
-                                networks.sort(
-                                    key=lambda x: int(x['signal']) if x['signal'].isdigit() else 0,
-                                    reverse=True
-                                )
-                                return networks, raw
-
-                            async def scan_wifi():
-                                wifi_status_label.set_text('Scanning…')
-                                wifi_select.set_options({})
-                                loop = asyncio.get_event_loop()
-                                try:
-                                    networks, raw = await loop.run_in_executor(None, _parse_wifi_networks)
-                                except Exception as exc:
-                                    wifi_status_label.set_text(f'Scan failed: {exc}')
-                                    return
-                                if not networks:
-                                    # show raw output to help diagnose
-                                    wifi_status_label.set_text(f'No networks parsed. Raw: {raw[:200]!r}')
-                                    return
-                                options = {}
-                                for n in networks:
-                                    label = f"{'★ ' if n['in_use'] else ''}{n['ssid']}  ({n['signal']}%{', ' + n['security'] if n['security'] else ''})"
-                                    options[n['ssid']] = label
-                                wifi_select.set_options(options)
-                                wifi_status_label.set_text(f"Found {len(networks)} network(s).")
-
-                            def open_connect_dialog():
-                                ssid = wifi_select.value
-                                if not ssid:
-                                    ui.notify('Select a network first.', type='warning')
-                                    return
-                                with ui.dialog() as conn_dlg, ui.card().style('min-width: 320px;'):
-                                    ui.label(f'Connect to "{ssid}"').classes('text-h6')
-                                    pwd_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
-                                    conn_status = ui.label('').classes('text-caption').style('color: #f88;')
-                                    with ui.row().classes('gap-2 justify-end w-full mt-2'):
-                                        ui.button('Cancel', on_click=conn_dlg.close).props('flat dense')
-                                        async def do_connect():
-                                            conn_status.set_text('Connecting…')
-                                            pwd = pwd_input.value
-                                            loop = asyncio.get_event_loop()
-                                            def run_connect():
-                                                # Delete any stale/incomplete profile for this SSID
-                                                # (avoids "key-mgmt: property is missing" from old profiles)
-                                                subprocess.run(
-                                                    ['sudo', 'nmcli', 'connection', 'delete', ssid],
-                                                    capture_output=True, text=True, timeout=10
-                                                )
-                                                cmd = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
-                                                if pwd:
-                                                    cmd += ['password', pwd]
-                                                return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                                            result = await loop.run_in_executor(None, run_connect)
-                                            if result.returncode == 0:
-                                                conn_dlg.close()
-                                                ui.notify(f'Connected to {ssid}', type='positive')
-                                                wifi_status_label.set_text(f'Connected to {ssid}')
-                                            else:
-                                                err = result.stderr.strip() or result.stdout.strip()
-                                                conn_status.set_text(err or 'Connection failed.')
-                                        ui.button('Connect', on_click=do_connect).props('color=primary dense')
-                                conn_dlg.open()
-
-                            def confirm_forget_wifi():
-                                with ui.dialog() as dlg, ui.card():
-                                    ui.label('Forget all WiFi networks?').classes('text-h6')
-                                    ui.label(
-                                        'This will delete all saved WiFi connections and reboot the Pi. '
-                                        'On next boot it will create a "fabCNC Setup" hotspot.'
-                                    ).classes('text-body2').style('color: #aaa; max-width: 340px;')
-                                    with ui.row().classes('gap-2 justify-end w-full mt-4'):
-                                        ui.button('Cancel', on_click=dlg.close).props('flat dense')
-                                        def do_forget():
-                                            dlg.close()
-                                            ui.notify('Removing WiFi connections and rebooting…', type='warning')
-                                            subprocess.Popen(
-                                                'bash -c \''
-                                                'nmcli -t -f NAME,TYPE connection show'
-                                                ' | grep ":802-11-wireless$"'
-                                                ' | cut -d: -f1'
-                                                ' | while IFS= read -r n; do nmcli connection delete "$n"; done'
-                                                '; sudo reboot\'',
-                                                shell=True,
-                                                stdout=subprocess.DEVNULL,
-                                                stderr=subprocess.DEVNULL,
-                                            )
-                                        ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
-                                dlg.open()
-
-                            with ui.row().classes('gap-2 items-center'):
-                                ui.button('Scan', icon='wifi_find', on_click=scan_wifi).props('dense outline').style('font-size: 13px;')
-                                ui.button('Connect', icon='wifi', on_click=open_connect_dialog).props('color=primary dense').style('font-size: 13px;')
-                                ui.button('Forget All & Reboot', icon='wifi_off', on_click=confirm_forget_wifi).props('color=negative dense').style('font-size: 13px;')
 
                             ui.separator().classes('my-3')
 
