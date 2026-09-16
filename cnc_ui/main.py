@@ -1920,19 +1920,6 @@ def retry_controller_connection():
     ui.notify('Retrying controller connection…', type='info')
 
 
-async def reset_controller_after_estop():
-    """Send M999 after the hardware E-stop has been released."""
-    log_event('system', 'controller_reset_clicked')
-    ui.notify('Sending M999 to Marlin…', type='info')
-    loop = asyncio.get_event_loop()
-    recovered = await loop.run_in_executor(None, cnc_controller.reset_controller_after_estop)
-    if recovered:
-        ui.notify('Controller reset. Home all axes before moving or resuming.', type='positive', timeout=8000)
-        return
-    details = cnc_controller.last_controller_error or 'Release the E-stop, then power-cycle the controller and retry.'
-    ui.notify(f'Reset failed: {details}', type='negative', timeout=10000)
-
-
 # Track previous status for change detection
 _previous_status = {'text': None}
 
@@ -2761,7 +2748,6 @@ def main_page():
                         ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Firmware')
                         ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Position')
                         ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Settings')
-                        ui.button('M999', on_click=lambda: [gcode_input.set_value('M999'), send_gcode()]).props('dense outline color=orange').style('font-size: 11px;').tooltip('Reset')
                     
                     # Response log
                     ui.label('Response Log:').classes('text-body2 mb-1').style('color: #888;')
@@ -3210,14 +3196,8 @@ def main_page():
                 'white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;'
             )
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
-                ui.button('Open System Tab', on_click=lambda: tabs.set_value(wifi_tab)).props('flat dense') \
-                    .style('color: #aaa;')
                 retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
                     .props('dense outline color=warning').style('font-size: 12px;')
-                reset_controller_button = ui.button('Send M999', on_click=reset_controller_after_estop) \
-                    .props('dense color=orange').style('font-size: 12px; color: #111;')
-                home_all_button = ui.button('Home All', on_click=home_all) \
-                    .props('dense color=primary').style('font-size: 12px;')
         connection_alert.set_visibility(False)
 
         update_alert = ui.card().style(
@@ -3253,8 +3233,6 @@ def main_page():
                     connection_alert_subtitle.set_text('Release the E-Stop switch.')
                 connection_alert_steps.set_text('Release the E-Stop switch.')
                 retry_connection_button.set_visibility(True)
-                reset_controller_button.set_visibility(False)
-                home_all_button.set_visibility(False)
                 connection_alert.set_visibility(True)
                 return
 
@@ -3265,8 +3243,6 @@ def main_page():
                 connection_alert_subtitle.set_text('Release the E-Stop switch.')
                 connection_alert_steps.set_text('Release the E-Stop switch.')
                 retry_connection_button.set_visibility(True)
-                reset_controller_button.set_visibility(True)
-                home_all_button.set_visibility(True)
                 connection_alert.set_visibility(True)
                 return
 
