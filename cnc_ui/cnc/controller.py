@@ -123,21 +123,12 @@ class CNCController:
                         port=port.device,
                         baudrate=self.baudrate,
                         timeout=2.0,
-                        write_timeout=2.0
+                        write_timeout=2.0,
+                        xonxoff=False,
+                        rtscts=False,
+                        dsrdtr=False,
                     )
-                    
-                    # Wait for Marlin to initialize
-                    time.sleep(2.0)
-                    
-                    # Clear any startup messages
-                    while self.serial_port.in_waiting:
-                        self.serial_port.readline()
-                    
-                    # Test connection with M115 (get firmware info)
-                    self._send_command("M115")
-                    response = self._read_response(timeout=3.0)
-                    
-                    if response and "FIRMWARE_NAME" in response:
+                    if self._probe_marlin_on_open_port(port.device):
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
                         self.last_serial_device = str(port.device)
@@ -170,6 +161,43 @@ class CNCController:
         except Exception as e:
             logger.error(f"Error during auto-connect: {e}")
             return False
+
+    def _probe_marlin_on_open_port(self, port_device: str) -> bool:
+        """Try to elicit a Marlin banner/version reply on an already-open serial port."""
+        if not self.serial_port or not self.serial_port.is_open:
+            return False
+
+        # Some boards need a brief DTR pulse after USB re-enumeration to clear
+        # a stuck CDC endpoint and make writes reliable again.
+        try:
+            self.serial_port.reset_input_buffer()
+            self.serial_port.reset_output_buffer()
+            self.serial_port.dtr = False
+            time.sleep(0.15)
+            self.serial_port.dtr = True
+        except Exception:
+            pass
+
+        # Probe twice: immediate and delayed, to tolerate slow boot after E-stop.
+        for idx, boot_wait in enumerate((1.0, 3.0), start=1):
+            try:
+                time.sleep(boot_wait)
+                self._send_command("M115")
+                response = self._read_response(timeout=4.0)
+                if response and "FIRMWARE_NAME" in response:
+                    return True
+                logger.warning(
+                    f"Marlin probe attempt {idx} on {port_device} did not return firmware banner"
+                )
+            except Exception as e:
+                logger.warning(f"Marlin probe attempt {idx} on {port_device} failed: {e}")
+                try:
+                    self.serial_port.close()
+                except Exception:
+                    pass
+                return False
+
+        return False
 
     @staticmethod
     def _is_candidate_marlin_port(port) -> bool:
