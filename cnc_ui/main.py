@@ -2397,42 +2397,20 @@ def main_page():
         update_btn.disable()
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            fetch_result = await loop.run_in_executor(
+            await loop.run_in_executor(
                 executor,
                 lambda: subprocess.run(
                     ['git', '-C', str(REPO_DIR), 'fetch', 'origin', 'main'],
-                    capture_output=True, text=True, timeout=60
+                    capture_output=True, timeout=60
                 )
             )
-            if fetch_result.returncode != 0:
-                msg = (fetch_result.stderr or fetch_result.stdout or '').strip()
-                log_event('system', 'update_fetch_failed', returncode=fetch_result.returncode, output=msg[:1000])
-                ui.notify(f'Update failed: git fetch error — {msg[:200]}', type='negative', timeout=12000)
-                update_btn.set_text('Update Software')
-                update_btn.props('dense flat no-caps icon=system_update_alt color=green-5')
-                update_btn.style('font-size: 11px; min-width: 140px; background: #2d4a2d; border: 1px solid #3d5a3d; border-radius: 9999px;')
-                update_btn.enable()
-                return
-
-            reset_result = await loop.run_in_executor(
+            await loop.run_in_executor(
                 executor,
                 lambda: subprocess.run(
                     ['git', '-C', str(REPO_DIR), 'reset', '--hard', 'origin/main'],
-                    capture_output=True, text=True, timeout=30
+                    capture_output=True, timeout=30
                 )
             )
-            if reset_result.returncode != 0:
-                msg = (reset_result.stderr or reset_result.stdout or '').strip()
-                log_event('system', 'update_reset_failed', returncode=reset_result.returncode, output=msg[:1000])
-                ui.notify(f'Update failed: git reset error — {msg[:200]}', type='negative', timeout=12000)
-                update_btn.set_text('Update Software')
-                update_btn.props('dense flat no-caps icon=system_update_alt color=green-5')
-                update_btn.style('font-size: 11px; min-width: 140px; background: #2d4a2d; border: 1px solid #3d5a3d; border-radius: 9999px;')
-                update_btn.enable()
-                return
-
-            log_event('system', 'update_reset_ok', new_head=reset_result.stdout.strip())
-
             setup_result = await loop.run_in_executor(
                 executor,
                 lambda: subprocess.run(
@@ -2768,7 +2746,7 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
-                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=100).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
                                 
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)
