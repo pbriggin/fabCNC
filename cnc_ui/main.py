@@ -2004,6 +2004,19 @@ def retry_controller_connection():
     ui.notify('Retrying controller connection…', type='info')
 
 
+def _parse_homing_sensitivity_value(raw_value, axis: str) -> int:
+    """Parse a UI numeric input into an integer sensorless sensitivity value."""
+    if raw_value is None or str(raw_value).strip() == '':
+        raise ValueError(f'{axis} sensitivity is required')
+    try:
+        value = int(float(raw_value))
+    except (TypeError, ValueError):
+        raise ValueError(f'{axis} sensitivity must be a whole number')
+    if value < -255 or value > 255:
+        raise ValueError(f'{axis} sensitivity must be between -255 and 255')
+    return value
+
+
 # Track previous status for change detection
 _previous_status = {'text': None}
 
@@ -3133,6 +3146,106 @@ def main_page():
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
                                     .props('color=negative dense').style('font-size: 13px;')
+
+                            ui.separator().classes('my-3')
+
+                            ui.label('Homing Sensitivity').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+                            ui.label('Sensorless stall sensitivity (M914). Higher values trip sooner.').classes('text-caption').style('color: #666;')
+
+                            with ui.row().classes('w-full gap-2 items-end'):
+                                homing_x_input = ui.number('X Stall', value=None, format='%.0f') \
+                                    .props('outlined dense') \
+                                    .style('width: 110px;')
+                                homing_y_input = ui.number('Y Stall', value=None, format='%.0f') \
+                                    .props('outlined dense') \
+                                    .style('width: 110px;')
+                            ui.label('Applied values are automatically saved to EEPROM (M500).').classes('text-caption').style('color: #666;')
+
+                            homing_response_log = ui.log().classes('w-full').style(
+                                'height: 96px; font-family: monospace; font-size: 12px; '
+                                'background: #111; color: #d4d4d4; border-radius: 6px; padding: 6px;'
+                            )
+
+                            async def read_homing_sensitivity():
+                                if not _require_controller_connected():
+                                    ui.notify('Controller not connected', type='warning')
+                                    return
+                                ui.notify('Reading homing sensitivity…', type='info')
+                                loop = asyncio.get_event_loop()
+                                response = await loop.run_in_executor(None, cnc_controller.read_homing_sensitivity)
+                                homing_response_log.push('>>> M914')
+                                for line in response.split('\n'):
+                                    if line.strip():
+                                        homing_response_log.push(f'<<< {line}')
+                                m_x = re.search(r'\bX\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
+                                m_y = re.search(r'\bY\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
+                                if m_x:
+                                    homing_x_input.set_value(int(m_x.group(1)))
+                                if m_y:
+                                    homing_y_input.set_value(int(m_y.group(1)))
+                                log_event('system', 'homing_sensitivity_read', response=response[:800])
+
+                            async def apply_homing_sensitivity():
+                                if not _require_controller_connected():
+                                    ui.notify('Controller not connected', type='warning')
+                                    return
+                                try:
+                                    x_val = _parse_homing_sensitivity_value(homing_x_input.value, 'X')
+                                    y_val = _parse_homing_sensitivity_value(homing_y_input.value, 'Y')
+                                except ValueError as e:
+                                    ui.notify(str(e), type='warning')
+                                    return
+
+                                persist = True
+                                log_event(
+                                    'system',
+                                    'homing_sensitivity_apply_clicked',
+                                    x=x_val,
+                                    y=y_val,
+                                    persist=persist,
+                                )
+                                ui.notify('Applying homing sensitivity…', type='info')
+                                loop = asyncio.get_event_loop()
+                                ok, response = await loop.run_in_executor(
+                                    None,
+                                    lambda: cnc_controller.set_homing_sensitivity(
+                                        x=x_val,
+                                        y=y_val,
+                                        persist_to_eeprom=persist,
+                                    ),
+                                )
+                                homing_response_log.push(f'>>> M914 X{x_val} Y{y_val}')
+                                if persist:
+                                    homing_response_log.push('>>> M500')
+                                for line in response.split('\n'):
+                                    if line.strip():
+                                        homing_response_log.push(f'<<< {line}')
+
+                                if ok:
+                                    ui.notify('Homing sensitivity applied', type='positive')
+                                    log_event(
+                                        'system',
+                                        'homing_sensitivity_applied',
+                                        x=x_val,
+                                        y=y_val,
+                                        persist=persist,
+                                    )
+                                else:
+                                    ui.notify('Failed to apply homing sensitivity', type='negative')
+                                    log_event(
+                                        'system',
+                                        'homing_sensitivity_apply_failed',
+                                        x=x_val,
+                                        y=y_val,
+                                        persist=persist,
+                                        response=response[:800],
+                                    )
+
+                            with ui.row().classes('gap-2'):
+                                ui.button('Read Current', icon='manage_search', on_click=read_homing_sensitivity) \
+                                    .props('dense outline').style('font-size: 12px;')
+                                ui.button('Apply', icon='tune', on_click=apply_homing_sensitivity) \
+                                    .props('dense color=warning').style('font-size: 12px; color: #111;')
 
                             ui.separator().classes('my-3')
 

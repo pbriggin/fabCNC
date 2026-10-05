@@ -1127,6 +1127,61 @@ class CNCController:
             finally:
                 # Resume the background read loop
                 self.read_loop_paused = False
+
+    def read_homing_sensitivity(self) -> str:
+        """Read current sensorless homing sensitivity values from firmware."""
+        return self.send_command_with_response("M914", timeout=6.0)
+
+    def set_homing_sensitivity(
+        self,
+        *,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        persist_to_eeprom: bool = False,
+    ) -> tuple[bool, str]:
+        """Set sensorless homing sensitivity via Marlin M914.
+
+        Returns:
+            (ok, response): ok indicates whether firmware accepted the command(s).
+            response includes firmware text for operator/debug visibility.
+        """
+        if not self.connected:
+            return False, "ERROR: Not connected to controller"
+        if x is None and y is None:
+            return False, "ERROR: Provide at least one axis value"
+
+        parts = ["M914"]
+        if x is not None:
+            parts.append(f"X{int(x)}")
+        if y is not None:
+            parts.append(f"Y{int(y)}")
+        cmd = " ".join(parts)
+
+        response = self.send_command_with_response(cmd, timeout=8.0)
+        normalized = response.strip().lower()
+        failed = (
+            not normalized
+            or "error" in normalized
+            or "unknown command" in normalized
+            or "not connected" in normalized
+        )
+        if failed:
+            return False, response or "No response"
+
+        if persist_to_eeprom:
+            save_resp = self.send_command_with_response("M500", timeout=10.0)
+            save_norm = save_resp.strip().lower()
+            save_failed = (
+                not save_norm
+                or "error" in save_norm
+                or "not connected" in save_norm
+            )
+            combined = f"{response}\n{save_resp}".strip()
+            if save_failed:
+                return False, combined
+            return True, combined
+
+        return True, response
     
     def _quiesce_before_stream(self, timeout: float = 15.0) -> None:
         """Wait for any in-flight commands to finish before a streaming job begins.
