@@ -1862,6 +1862,10 @@ async def outline_job():
         ui.notify('No shapes loaded', type='warning')
         return
 
+    if not cnc_controller.homed:
+        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
+        return
+
     if not await safety_confirm():
         return
 
@@ -1924,6 +1928,10 @@ async def start_job():
     
     if not current_gcode:
         ui.notify('No toolpath generated', type='warning')
+        return
+
+    if not cnc_controller.homed:
+        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
         return
 
     if not await safety_confirm():
