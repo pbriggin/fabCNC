@@ -56,7 +56,7 @@ class CNCController:
     Provides jogging, homing, and job execution capabilities.
     """
     
-    def __init__(self, baudrate: int = 115200):
+    def __init__(self, baudrate: int = 250000):
         self.baudrate = baudrate
         self.serial_port: Optional[serial.Serial] = None
         self.stop_requested = False
