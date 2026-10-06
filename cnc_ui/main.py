@@ -3150,7 +3150,7 @@ def main_page():
                             ui.separator().classes('my-3')
 
                             ui.label('Homing Sensitivity').classes('text-body1 font-bold mb-1').style('color: #aaa;')
-                            ui.label('Sensorless stall sensitivity (M914). Higher values trip sooner.').classes('text-caption').style('color: #666;')
+                            ui.label('Sensorless stall sensitivity (M914, TMC5160): negative = more sensitive, positive = less sensitive.').classes('text-caption').style('color: #666;')
 
                             with ui.row().classes('w-full gap-2 items-end'):
                                 homing_x_input = ui.number('X Stall', value=None, format='%.0f') \
