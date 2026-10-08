@@ -2759,9 +2759,9 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 # Pattern tools
-                                grid_x = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
                                 ui.label('×').classes('text-body2')
-                                grid_y = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
                                 ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
