@@ -677,7 +677,7 @@ def create_header():
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
                 .props('dense flat no-caps color=grey-6') \
-                .style('font-size: 11px; min-width: 140px;').classes('remote-control-lock')
+                .style('font-size: 11px; min-width: 140px;')
             
             with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
@@ -2493,8 +2493,6 @@ def main_page():
     
     # Update button click handler
     async def do_software_update():
-        if _deny_cloudflare_control():
-            return
         import asyncio
         import concurrent.futures
         update_btn.set_text('Updating...')
@@ -3546,7 +3544,7 @@ def main_page():
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 acknowledge_update_button = ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
                     .style('color: #aaa;')
-                update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;').classes('remote-control-lock')
+                update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;')
 
                 async def _do_update_now():
                     update_now_button.set_text('Updating...')
