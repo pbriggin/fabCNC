@@ -273,7 +273,6 @@ function initCanvas(elementId) {
         zoom = Math.min(Math.max(zoom, 0.5), 20);
         canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
         viewZoom = zoom;
-        updateNotchNodeScreenSize();
         opt.e.preventDefault();
         opt.e.stopPropagation();
     });
@@ -3687,10 +3686,10 @@ function showNotchNodes() {
                 top: cy,
                 originX: 'center',
                 originY: 'center',
-                radius: 8 / viewZoom,
+                radius: 8,
                 fill: isActive ? 'rgba(255, 107, 53, 0.85)' : 'rgba(255,255,255,0.12)',
                 stroke: isActive ? '#FF6B35' : '#aaaaaa',
-                strokeWidth: 2 / viewZoom,
+                strokeWidth: 2,
                 selectable: false,
                 evented: true,
                 hoverCursor: 'pointer',
@@ -3710,17 +3709,6 @@ function showNotchNodes() {
     });
 
     canvas.renderAll();
-}
-
-// Keep clickable node markers a consistent screen size as the canvas zooms.
-function updateNotchNodeScreenSize() {
-    const radius = 8 / viewZoom;
-    const strokeWidth = 2 / viewZoom;
-    notchNodeObjects.forEach(node => {
-        node.set({ radius, strokeWidth });
-        node.setCoords();
-    });
-    canvas.requestRenderAll();
 }
 
 // Remove all node circles from canvas
@@ -3953,7 +3941,6 @@ function getNotches() {
 function resetZoom() {
     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
     viewZoom = 1;
-    updateNotchNodeScreenSize();
     canvas.requestRenderAll();
 }
 
