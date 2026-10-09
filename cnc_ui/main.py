@@ -3491,7 +3491,7 @@ def main_page():
         # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
         # instead of blending into the dark theme.
         alert_backdrop = ui.element('div').style(
-            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9996; '
+            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 5000; '
             'display: none; pointer-events: none;'
         )
 
@@ -3499,7 +3499,7 @@ def main_page():
             alert_backdrop.style(f'display: {"block" if visible else "none"};')
 
         connection_alert = ui.card().style(
-            'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 9999; '
+            'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 430px; z-index: 5001; '
             'background: #3a1414; border: 2px solid #e05252; color: #fff; '
             'padding: 16px 18px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.65);'
         )
