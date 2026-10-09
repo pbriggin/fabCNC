@@ -1992,7 +1992,7 @@ async def outline_job():
 
 
 async def start_job():
-    """Handle start job button click - streams generated gcode via serial."""
+    """Handle start job button click - uploads generated G-code to controller SD."""
     global current_gcode
 
     if not _require_controller_connected():
@@ -2031,9 +2031,15 @@ def pause_job():
     """Handle pause job button click."""
     if not _require_controller_connected():
         return
+    if cnc_controller.sd_uploading:
+        ui.notify('Wait for the SD-card upload to finish before pausing.', type='warning')
+        return
     log_event('job', 'pause_clicked')
     cnc_controller.pause_job()
-    ui.notify('Job paused', type='warning')
+    if machine_state.paused:
+        ui.notify('Job paused', type='warning')
+    else:
+        ui.notify('Pause command was not accepted.', type='negative')
 
 
 def resume_job():
@@ -2042,7 +2048,10 @@ def resume_job():
         return
     log_event('job', 'resume_clicked')
     cnc_controller.resume_job()
-    ui.notify('Job resumed', type='positive')
+    if machine_state.is_running():
+        ui.notify('Job resumed', type='positive')
+    else:
+        ui.notify('Resume command was not accepted.', type='negative')
 
 
 def stop_job():
@@ -2050,8 +2059,10 @@ def stop_job():
     if not _require_controller_connected():
         return
     log_event('job', 'stop_clicked')
-    cnc_controller.stop_job()
-    ui.notify('Job stopped', type='negative')
+    if cnc_controller.stop_job():
+        ui.notify('Job stopped', type='negative')
+    else:
+        ui.notify('SD stop failed — use the physical E-stop.', type='negative', timeout=8000)
 
 
 async def resume_disconnect_job():
@@ -3592,12 +3603,19 @@ def main_page():
             connection_alert.style('background: #3a1414; border: 2px solid #e05252;')
             connection_alert_icon.props('name=usb_off color=red-4')
             connection_alert_title.set_text('Controller disconnected')
-            connection_alert_subtitle.set_text('Follow these steps to reconnect:')
-            connection_alert_steps.set_text(
-                '1. Disengage E-Stop.\n'
-                '2. Power cycle the fabCNC control box (red switch).\n'
-                '3. Click "Retry Connection".'
-            )
+            if cnc_controller.sd_job_disconnected:
+                connection_alert_subtitle.set_text('The SD-card job may still be running:')
+                connection_alert_steps.set_text(
+                    'Do not power-cycle the controller while the cutter may be moving.\n'
+                    'Check the machine, restore the USB connection when safe, then verify the job state.'
+                )
+            else:
+                connection_alert_subtitle.set_text('Follow these steps to reconnect:')
+                connection_alert_steps.set_text(
+                    '1. Disengage E-Stop.\n'
+                    '2. Power cycle the fabCNC control box (red switch).\n'
+                    '3. Click "Retry Connection".'
+                )
             retry_connection_button.set_visibility(True)
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas

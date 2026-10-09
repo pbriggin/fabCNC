@@ -42,6 +42,7 @@ cnc_ui/uploads/*.dxf
 cnc_ui/uploads/*.gcode
 *.log
 cnc_ui/.nicegui/
+cnc_ui/sd_job_state.json
 
 # fabCNC logging
 cnc_ui/logs/

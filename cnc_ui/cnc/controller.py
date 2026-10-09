@@ -17,6 +17,7 @@ import logging
 
 # Persisted between runs — written on disconnect, deleted on successful resume
 _RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
+_SD_JOB_STATE_FILE = Path(__file__).parent.parent / 'sd_job_state.json'
 
 # Marlin line-number protocol parsing. Used while a job is streaming so we can
 # recover from corrupted bytes on the serial link (under-voltage hiccups, USB
@@ -24,6 +25,44 @@ _RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
 _OK_N_RE = re.compile(r"^ok\s+N(\d+)", re.IGNORECASE)
 _RESEND_RE = re.compile(r"Resend\s*:\s*(\d+)", re.IGNORECASE)
 _LAST_LINE_RE = re.compile(r"Last\s*Line\s*:\s*(\d+)", re.IGNORECASE)
+_SD_PROGRESS_RE = re.compile(r"SD printing byte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+_SD_FILENAME = "FABJOB.GCO"  # Short 8.3-compatible name supported by Marlin SD builds.
+
+
+def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
+    """Return executable G-code lines in the same form as the serial streamer."""
+    commands = []
+    for raw_line in gcode_lines:
+        command = raw_line.split(";", 1)[0].strip()
+        if not command or command.startswith("#"):
+            continue
+        if command.split(maxsplit=1)[0].upper() == "M29":
+            raise ValueError("G-code contains M29, which would terminate the SD upload")
+        try:
+            encoded = command.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("G-code contains non-ASCII command text") from exc
+        # Marlin's default MAX_CMD_SIZE is 96 bytes, including the terminator.
+        if len(encoded) > 95:
+            raise ValueError(f"G-code command exceeds Marlin's 95-byte line limit: {command[:40]}")
+        commands.append(command)
+    return commands
+
+
+def _sd_response_ok(response: str) -> bool:
+    """Return whether a Marlin response contains an acknowledgement and no error."""
+    lines = [line.strip().lower() for line in response.splitlines()]
+    return any(line.startswith("ok") for line in lines) and not any(
+        line.startswith("error") or "unknown command" in line for line in lines
+    )
+
+
+def _parse_sd_progress(response: str) -> tuple[int, int] | None:
+    """Parse Marlin's M27 `SD printing byte <position>/<size>` response."""
+    match = _SD_PROGRESS_RE.search(response)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _marlin_checksum(payload: str) -> int:
@@ -61,6 +100,9 @@ class CNCController:
         self.serial_port: Optional[serial.Serial] = None
         self.stop_requested = False
         self.pause_requested = False
+        self.sd_uploading = False
+        self.sd_job_active = False
+        self.sd_job_disconnected = False
         self.job_thread: Optional[threading.Thread] = None
         self.read_thread: Optional[threading.Thread] = None
         self.connected = False
@@ -102,7 +144,22 @@ class CNCController:
         self.homed = False              # True only after a successful home_all()
         self._current_job_gcode: list = []  # Copy of last started job's gcode
         self._current_job_piece_count = 0
+        if _SD_JOB_STATE_FILE.exists():
+            # A prior process may have exited while the controller continued
+            # an SD print. Preserve this marker before opening the serial port.
+            self.sd_job_active = True
+            self.sd_job_disconnected = True
+            try:
+                saved_sd_state = json.loads(_SD_JOB_STATE_FILE.read_text())
+                self._current_job_piece_count = max(0, int(saved_sd_state.get("piece_count", 0)))
+                source_filename = saved_sd_state.get("source_filename")
+                if source_filename:
+                    machine_state.set_job_loaded(True, source_filename)
+            except Exception as exc:
+                logger.warning(f"Could not read saved SD job state: {exc}")
         self._auto_connect()
+        if self.connected and self.sd_job_disconnected:
+            self._reconcile_sd_job_after_reconnect()
     
     def _auto_connect(self, strict_candidates: bool = False) -> bool:
         """Auto-detect and connect to the first available serial port."""
@@ -124,7 +181,7 @@ class CNCController:
                     # even if handshake fails before a full connection is established.
                     self.last_serial_device = str(port.device)
                     self.serial_port = serial.Serial(
-                        port=port.device,
+                        port=None,
                         baudrate=self.baudrate,
                         timeout=2.0,
                         write_timeout=2.0,
@@ -132,6 +189,12 @@ class CNCController:
                         rtscts=False,
                         dsrdtr=False,
                     )
+                    if self.sd_job_disconnected:
+                        # Opening a serial port can toggle DTR and reset Marlin.
+                        # Avoid an intentional reset when an SD print may be live.
+                        self.serial_port.dtr = False
+                    self.serial_port.port = port.device
+                    self.serial_port.open()
                     if self._probe_marlin_on_open_port(port.device):
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
@@ -143,11 +206,11 @@ class CNCController:
                         self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
                         self.read_thread.start()
                         
-                        # Enable position reporting
-                        self._send_command("M114")  # Get current position
-                        
-                        # Set faster XY acceleration (firmware supports up to 3000)
-                        self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
+                        if not self.sd_job_disconnected:
+                            # Enable position reporting and restore the normal
+                            # acceleration only when no SD print may be active.
+                            self._send_command("M114")
+                            self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
                         
                         return True
                     else:
@@ -176,9 +239,10 @@ class CNCController:
         try:
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-            self.serial_port.dtr = False
-            time.sleep(0.15)
-            self.serial_port.dtr = True
+            if not self.sd_job_disconnected:
+                self.serial_port.dtr = False
+                time.sleep(0.15)
+                self.serial_port.dtr = True
         except Exception:
             pass
 
@@ -229,7 +293,13 @@ class CNCController:
         self.ok_event.set()   # Unblock any flow-control waits in _execute_job
         machine_state.set_status("Disconnected", busy=False)
         log_controller_event("serial_disconnect")
-        self._save_resume_state()
+        if self.sd_job_active:
+            # An SD print may continue without the Pi's USB link. Do not offer
+            # the serial-stream resume flow, which uses line acknowledgements.
+            self.sd_job_disconnected = True
+            log_controller_event("sd_job_host_disconnected", filename=_SD_FILENAME)
+        elif not self.sd_uploading:
+            self._save_resume_state()
         if _log_uploader:
             _log_uploader.log_system_snapshot(trigger="serial_disconnect")
             threading.Thread(
@@ -270,8 +340,11 @@ class CNCController:
                     if self._auto_connect(strict_candidates=True):
                         logger.info(f"Reconnected on attempt {attempt}")
                         self.stop_requested = False
-                        machine_state.set_status("Idle", busy=False)
                         log_controller_event("serial_reconnect", attempt=attempt)
+                        if self.sd_job_disconnected:
+                            self._reconcile_sd_job_after_reconnect()
+                        else:
+                            machine_state.set_status("Idle", busy=False)
                         return
 
                     if self.last_candidate_count == 0:
@@ -1046,7 +1119,7 @@ class CNCController:
 
     def start_job(self, gcode_lines: list[str], piece_count: int = 0) -> None:
         """
-        Start executing a G-code job via serial streaming.
+        Upload a G-code job to the controller SD card and run it from there.
         
         Args:
             gcode_lines: List of G-code commands to execute
@@ -1065,6 +1138,11 @@ class CNCController:
         self.pause_requested = False
         self._current_job_gcode = list(gcode_lines)
         self._current_job_piece_count = max(0, int(piece_count or 0))
+        self.sd_job_active = False
+        self.sd_job_disconnected = False
+        _SD_JOB_STATE_FILE.unlink(missing_ok=True)
+        self.clear_resume_state()
+        self.sd_uploading = True
         log_controller_event(
             "job_start",
             command_count=len(gcode_lines),
@@ -1074,41 +1152,78 @@ class CNCController:
         if _log_uploader:
             _log_uploader.notify_job_run()
 
-        # Stream via serial
-        self.job_thread = threading.Thread(target=self._execute_job, args=(gcode_lines,), daemon=True)
+        machine_state.set_status("Uploading to SD card...", busy=True, paused=False)
+        self.job_thread = threading.Thread(
+            target=self._execute_sd_job,
+            args=(gcode_lines,),
+            daemon=True,
+            name="sd-job-upload-and-monitor",
+        )
         self.job_thread.start()
     
     def pause_job(self) -> None:
-        """Pause the currently running job."""
+        """Pause a running SD print, or pause host streaming for utility moves."""
         if machine_state.is_running():
+            if self.sd_uploading:
+                logger.warning("Cannot pause while the G-code file is being uploaded")
+                return
+            if self.sd_job_active:
+                response = self.send_command_with_response("M25", timeout=8.0)
+                if not _sd_response_ok(response):
+                    logger.error(f"Failed to pause SD print: {response}")
+                    return
             self.pause_requested = True
             machine_state.set_status("Paused", busy=True, paused=True)
             log_controller_event("job_pause")
     
     def resume_job(self) -> None:
-        """Resume a paused job."""
+        """Resume a paused SD print or host-streamed utility sequence."""
         if machine_state.paused:
+            if self.sd_job_active:
+                response = self.send_command_with_response("M24", timeout=8.0)
+                if not _sd_response_ok(response):
+                    logger.error(f"Failed to resume SD print: {response}")
+                    return
             self.pause_requested = False
             machine_state.set_status("Running", busy=True, paused=False)
             log_controller_event("job_resume")
     
-    def stop_job(self) -> None:
-        """Stop the currently running job immediately."""
-        self.stop_requested = True
+    def stop_job(self) -> bool:
+        """Stop the current job; SD playback must acknowledge Marlin M524."""
         self.pause_requested = False
+
+        if self.connected and self.sd_uploading:
+            # M28 treats all incoming commands as file contents. The upload
+            # thread observes stop_requested and closes the file with M29.
+            self.stop_requested = True
+        elif self.connected and self.sd_job_active:
+            # Never call M410 alone for an SD job: the SD file could continue
+            # feeding new moves after the planner is quick-stopped.
+            response = self.send_command_with_response("M524", timeout=8.0)
+            if not _sd_response_ok(response):
+                machine_state.set_status("SD stop failed — use physical E-stop", busy=True)
+                log_controller_event("sd_stop_failed", response=response[:300])
+                return False
+            self.stop_requested = True
+            # M524 cancels SD playback; M410 also clears queued motion.
+            self._send_command("M410")
+        elif self.connected:
+            self.stop_requested = True
+            self._send_command("M410")  # Marlin quick stop for utility streaming
+        else:
+            self.stop_requested = True
+
         log_controller_event("job_stop_requested")
-        
-        # Send emergency stop
-        if self.connected:
-            self._send_command("M410")  # Marlin quick stop
-        
-        # Wait for job thread to finish
         if self.job_thread and self.job_thread.is_alive():
             self.job_thread.join(timeout=2.0)
-        
+            if self.job_thread.is_alive() and self.sd_uploading:
+                machine_state.set_status("Cancelling SD upload...", busy=True)
+                return True
+
         machine_state.reset_job()
         machine_state.set_status("Stopped", busy=False)
         log_controller_event("job_stopped")
+        return True
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:
         """Send a G-code command and return the response."""
@@ -1222,6 +1337,315 @@ class CNCController:
                         time.sleep(0.01)
             finally:
                 self.read_loop_paused = False
+
+    def _upload_gcode_to_sd(self, gcode_lines: list[str]) -> tuple[bool, int, str]:
+        """Upload, verify, select, and start a file using Marlin's SD commands."""
+        try:
+            commands = _prepare_sd_commands(gcode_lines)
+        except ValueError as exc:
+            return False, 0, str(exc)
+        if not commands:
+            return False, 0, "The generated G-code contains no executable commands"
+
+        total_bytes = sum(len((command + "\n").encode("ascii")) for command in commands)
+        self.sd_uploading = True
+        self.streaming_mode = False
+
+        def exchange(command: str, timeout: float = 8.0) -> str:
+            if not self._send_command(command):
+                return ""
+            return self._read_response(timeout=timeout)
+
+        # Own the serial receive stream for the complete upload transaction.
+        # M28 makes every incoming line file content until M29, so no unrelated
+        # command may be interleaved during this critical section.
+        with self.read_lock:
+            self.read_loop_paused = True
+            time.sleep(0.05)
+            write_open = False
+            try:
+                if self.stop_requested:
+                    return False, 0, "SD upload cancelled by operator"
+
+                response = exchange("M21")
+                if not _sd_response_ok(response):
+                    return False, 0, f"SD card initialization failed: {response or 'No response'}"
+
+                response = exchange(f"M28 {_SD_FILENAME}")
+                if not _sd_response_ok(response):
+                    return False, 0, f"Could not open SD file for writing: {response or 'No response'}"
+                write_open = True
+
+                for index, command in enumerate(commands, start=1):
+                    if self.stop_requested:
+                        return False, 0, "SD upload cancelled by operator"
+                    if not self._write_serial_payload(command):
+                        return False, 0, f"Serial write failed at G-code line {index}"
+                    log_serial_tx(command, sd_upload=True, line_number=index)
+                    response = self._read_response(timeout=8.0)
+                    if not _sd_response_ok(response):
+                        return False, 0, f"SD write failed at G-code line {index}: {response or 'No acknowledgement'}"
+
+                response = exchange("M29", timeout=10.0)
+                write_open = False
+                if not _sd_response_ok(response):
+                    return False, 0, f"Could not close SD file: {response or 'No response'}"
+
+                listing = exchange("M20", timeout=15.0)
+                if not _sd_response_ok(listing) or _SD_FILENAME.casefold() not in listing.casefold():
+                    return False, 0, f"Uploaded file was not confirmed in the SD listing: {listing or 'No response'}"
+
+                if self.stop_requested:
+                    return False, 0, "SD job cancelled before start"
+
+                response = exchange(f"M23 {_SD_FILENAME}")
+                if not _sd_response_ok(response):
+                    return False, 0, f"Could not select SD file: {response or 'No response'}"
+                if self.stop_requested:
+                    return False, 0, "SD job cancelled before start"
+
+                sd_state = {
+                    "filename": _SD_FILENAME,
+                    "source_filename": machine_state.loaded_filename,
+                    "piece_count": self._current_job_piece_count,
+                    "total_bytes": total_bytes,
+                    "started_at": time.time(),
+                }
+                try:
+                    _SD_JOB_STATE_FILE.write_text(json.dumps(sd_state))
+                except OSError as exc:
+                    return False, 0, f"Could not persist SD job recovery state: {exc}"
+
+                # From this point a lost serial acknowledgement cannot prove
+                # that playback did not start, so disconnect handling must
+                # treat the SD job as potentially active.
+                self.sd_job_active = True
+                response = exchange("M24")
+                if not _sd_response_ok(response):
+                    if self.connected:
+                        self.sd_job_active = False
+                        _SD_JOB_STATE_FILE.unlink(missing_ok=True)
+                    return False, 0, f"Could not start SD print: {response or 'No response'}"
+                return True, total_bytes, ""
+            except Exception as exc:
+                logger.exception("SD upload transaction failed")
+                return False, 0, str(exc)
+            finally:
+                if write_open and self.serial_port and self.serial_port.is_open:
+                    # Always leave Marlin out of SD-write mode after a failed or
+                    # cancelled transfer. Never start the partial file.
+                    exchange("M29", timeout=5.0)
+                self.read_loop_paused = False
+                self.sd_uploading = False
+
+    def _execute_sd_job(self, gcode_lines: list[str]) -> None:
+        """Upload a job to the controller SD card, then monitor Marlin's M27 status."""
+        if not self.connected:
+            logger.error("Cannot upload SD job: not connected to controller")
+            machine_state.set_status("Error", busy=False)
+            return
+
+        machine_state.set_status("Uploading to SD card...", busy=True, paused=False)
+        started_at = time.time()
+        log_controller_event(
+            "sd_upload_start",
+            filename=_SD_FILENAME,
+            command_count=len(gcode_lines),
+        )
+        # Drain old acknowledgements before the SD-write protocol takes over.
+        try:
+            self._quiesce_before_stream()
+            uploaded, total_bytes, error = self._upload_gcode_to_sd(gcode_lines)
+        except Exception as exc:
+            logger.exception("Failed while preparing the SD upload")
+            uploaded, total_bytes, error = False, 0, str(exc)
+        finally:
+            self.sd_uploading = False
+        if not uploaded:
+            if not self.connected:
+                machine_state.set_status("Disconnected", busy=False)
+                if self.sd_job_disconnected:
+                    return
+            elif self.stop_requested:
+                machine_state.reset_job()
+                machine_state.set_status("Stopped", busy=False)
+                log_controller_event("sd_upload_cancelled", filename=_SD_FILENAME)
+            else:
+                logger.error(f"SD upload failed: {error}")
+                machine_state.set_status("SD upload failed", busy=False)
+                log_controller_event("sd_upload_failed", filename=_SD_FILENAME, error=error)
+            self._current_job_piece_count = 0
+            return
+
+        if not self.connected and self.sd_job_disconnected:
+            # Preserve the reconnect marker: SD playback may still be running.
+            return
+
+        if self.stop_requested:
+            if self.connected and self.sd_job_active:
+                response = self.send_command_with_response("M524", timeout=8.0)
+                if not _sd_response_ok(response):
+                    self.stop_requested = False
+                    machine_state.set_status("SD stop failed — use physical E-stop", busy=True)
+                    log_controller_event("sd_stop_failed", response=response[:300])
+                    self._monitor_sd_job(total_bytes=total_bytes)
+                    return
+                self._send_command("M410")
+            machine_state.reset_job()
+            machine_state.set_status("Stopped", busy=False)
+            self._clear_sd_job_state()
+            return
+
+        self.sd_job_active = True
+        self.sd_job_disconnected = False
+        machine_state.set_status("Running", busy=True, paused=False)
+        log_controller_event(
+            "sd_job_started",
+            filename=_SD_FILENAME,
+            total_bytes=total_bytes,
+            upload_elapsed_s=round(time.time() - started_at, 2),
+        )
+        self._monitor_sd_job(total_bytes=total_bytes)
+
+    def _monitor_sd_job(
+        self,
+        *,
+        total_bytes: int = 0,
+        initially_active: bool = False,
+        reconnected: bool = False,
+    ) -> None:
+        """Poll M27 while Marlin runs from SD; retain state if USB disconnects."""
+        active_seen = initially_active
+        idle_reports = 0
+        missed_reports = 0
+        last_position_poll = 0.0
+
+        while self.connected and not self.stop_requested:
+            response = self.send_command_with_response("M27", timeout=4.0)
+            if not self.connected:
+                return
+
+            progress = _parse_sd_progress(response)
+            if progress:
+                position, reported_total = progress
+                active_seen = True
+                idle_reports = 0
+                total_bytes = reported_total or total_bytes
+                if total_bytes > 0:
+                    machine_state.update_job_progress(position / total_bytes)
+                missed_reports = 0
+            elif "not sd printing" in response.lower():
+                idle_reports += 1
+                if active_seen and idle_reports >= 2:
+                    self._finish_sd_job()
+                    return
+                if not active_seen and idle_reports >= 4:
+                    if reconnected:
+                        machine_state.set_status(
+                            "SD job ended while disconnected — verify machine",
+                            busy=False,
+                        )
+                        log_controller_event("sd_job_ended_while_disconnected", filename=_SD_FILENAME)
+                        self._clear_sd_job_state()
+                    else:
+                        # A successfully acknowledged M24 followed by repeated
+                        # idle reports is a short completed file, not a stream.
+                        self._finish_sd_job()
+                    return
+            elif not response or response == "No response":
+                missed_reports += 1
+                if missed_reports >= 3:
+                    machine_state.set_status("Running (SD status unavailable)", busy=True)
+            else:
+                missed_reports += 1
+
+            now = time.monotonic()
+            if now - last_position_poll >= 2.0:
+                position_response = self.send_command_with_response("M114", timeout=4.0)
+                for line in position_response.splitlines():
+                    if line.lstrip().startswith("X:"):
+                        self._parse_position(line.strip())
+                last_position_poll = now
+            time.sleep(0.5)
+
+        if not self.connected and self.sd_job_disconnected:
+            # USB loss must not clear the marker needed to query M27 on reconnect.
+            return
+
+        if self.stop_requested:
+            machine_state.reset_job()
+            if self.connected:
+                machine_state.set_status("Stopped", busy=False)
+            else:
+                machine_state.set_status("Disconnected", busy=False)
+            log_controller_event("sd_job_aborted", filename=_SD_FILENAME)
+            self._clear_sd_job_state()
+
+    def _finish_sd_job(self) -> None:
+        """Mark a fully completed SD print and run existing completion hooks."""
+        machine_state.update_job_progress(1.0)
+        machine_state.set_status("Complete", busy=False)
+        log_controller_event("job_complete", source="sd_card", filename=_SD_FILENAME)
+        if _log_uploader:
+            if self._current_job_piece_count > 0:
+                threading.Thread(
+                    target=_log_uploader.send_piece_count,
+                    args=(self._current_job_piece_count,),
+                    daemon=True,
+                    name="piece-count-on-complete",
+                ).start()
+            threading.Thread(
+                target=_log_uploader.upload_now,
+                args=(False, "job_complete"),
+                daemon=True,
+                name="log-upload-on-complete",
+            ).start()
+        self._clear_sd_job_state()
+
+    def _clear_sd_job_state(self) -> None:
+        self.sd_job_active = False
+        self.sd_job_disconnected = False
+        self._current_job_piece_count = 0
+        try:
+            _SD_JOB_STATE_FILE.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"Could not remove saved SD job state: {exc}")
+
+    def _reconcile_sd_job_after_reconnect(self) -> None:
+        response = self.send_command_with_response("M27", timeout=5.0)
+        progress = _parse_sd_progress(response)
+        if not progress:
+            self._clear_sd_job_state()
+            machine_state.set_status(
+                "SD job ended while disconnected — verify machine",
+                busy=False,
+            )
+            log_controller_event(
+                "sd_job_reconnect_requires_verification",
+                filename=_SD_FILENAME,
+                response=response[:300],
+            )
+            return
+
+        position, total_bytes = progress
+        self.sd_job_active = True
+        self.sd_job_disconnected = False
+        self.stop_requested = False
+        machine_state.update_job_progress(position / total_bytes if total_bytes else 0.0)
+        machine_state.set_status("Running", busy=True, paused=False)
+        log_controller_event(
+            "sd_job_reconnected",
+            filename=_SD_FILENAME,
+            position=position,
+            total_bytes=total_bytes,
+        )
+        self.job_thread = threading.Thread(
+            target=self._monitor_sd_job,
+            kwargs={"total_bytes": total_bytes, "initially_active": True, "reconnected": True},
+            daemon=True,
+            name="sd-job-monitor-reconnected",
+        )
+        self.job_thread.start()
 
     def _execute_job(self, gcode_lines: list[str], is_job: bool = True) -> None:
         """
