@@ -1090,6 +1090,7 @@ function onShapeMoved(e) {
     
     // Redraw notch marks so they follow the shape
     drawNotchMarksForShape(name);
+    syncNotchesForShape(name);
     if (notchMode) showNotchNodes();
 
     // Send update to Python backend
@@ -3052,6 +3053,7 @@ function redrawShapeFromData(shapeName) {
 
     // Redraw notch marks for this shape (they move with the shape)
     drawNotchMarksForShape(shapeName);
+    syncNotchesForShape(shapeName);
     // If in notch mode, refresh the node circles
     if (notchMode) showNotchNodes();
     
@@ -3792,6 +3794,15 @@ function emitNotchesChanged(shapeName) {
     } catch (e) {
         console.warn('emitNotchesChanged failed:', e);
     }
+}
+
+// Keep durable snapshots in sync when a shape transform moves its notches.
+// Notch toggles persist themselves, but transforms update the anchors too.
+function syncNotchesForShape(shapeName) {
+    const notches = shapeNotches[shapeName];
+    if (!notches || notches.size === 0) return;
+    persistNotchesToLocalStorage();
+    emitNotchesChanged(shapeName);
 }
 
 // Rehydrate shapeNotches from a server-side snapshot. Used by
