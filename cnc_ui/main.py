@@ -2756,22 +2756,31 @@ def main_page():
                         ).classes('text-body2').style('color: #aaa; max-width: 340px;')
                         with ui.row().classes('gap-2 justify-end w-full mt-4'):
                             ui.button('Cancel', on_click=dlg.close).props('flat dense')
-                            def do_forget():
+                            async def do_forget():
                                 if _deny_cloudflare_control():
                                     return
                                 dlg.close()
                                 ui.notify('Removing WiFi connections and rebooting…', type='warning')
-                                subprocess.Popen(
-                                    'bash -c \''
-                                    'nmcli -t -f NAME,TYPE connection show'
-                                    ' | grep ":802-11-wireless$"'
-                                    ' | cut -d: -f1'
-                                    ' | while IFS= read -r n; do nmcli connection delete "$n"; done'
-                                    '; sudo reboot\'',
-                                    shell=True,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                )
+                                loop = asyncio.get_running_loop()
+                                try:
+                                    result = await loop.run_in_executor(
+                                        None,
+                                        lambda: subprocess.run(
+                                            ['sudo', '/usr/local/sbin/fabcnc-forget-wifi'],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=30,
+                                        ),
+                                    )
+                                except (OSError, subprocess.TimeoutExpired) as exc:
+                                    ui.notify(f'WiFi reset failed: {exc}', type='negative')
+                                    return
+                                if result.returncode != 0:
+                                    error = result.stderr.strip() or result.stdout.strip()
+                                    ui.notify(
+                                        f'WiFi reset failed: {error or "helper exited with an error"}',
+                                        type='negative',
+                                    )
                             ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
                     dlg.open()
 
