@@ -3481,16 +3481,13 @@ function computeNotchGeometry(points, nodeKey) {
     const ei = isJunction ? Math.round(nodeKey.edgeIdx) : Math.floor(nodeKey.edgeIdx);
     const safeEi = Math.min(Math.max(ei, 0), n - 1);
 
-    // Outgoing edge tangent (edge leaving ei → ei+1)
-    const bOut = points[(safeEi + 1) % n];
-    const outDx = bOut[0] - points[safeEi][0], outDy = bOut[1] - points[safeEi][1];
-    const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
-    let tx = outLen > 1e-9 ? outDx/outLen : 1;
-    let ty = outLen > 1e-9 ? outDy/outLen : 0;
-
-    // For junction nodes, average with the incoming tangent so the V-mark is
-    // symmetric about the join and doesn't appear rotated to one side.
+    let tx = 1, ty = 0;
     if (isJunction) {
+        // At a true join, average the incoming/outgoing directions.
+        const bOut = points[(safeEi + 1) % n];
+        const outDx = bOut[0] - points[safeEi][0], outDy = bOut[1] - points[safeEi][1];
+        const outLen = Math.sqrt(outDx*outDx + outDy*outDy);
+        if (outLen > 1e-9) { tx = outDx/outLen; ty = outDy/outLen; }
         const prevIdx = (safeEi - 1 + n) % n;
         const inDx = points[safeEi][0] - points[prevIdx][0];
         const inDy = points[safeEi][1] - points[prevIdx][1];
@@ -3501,6 +3498,28 @@ function computeNotchGeometry(points, nodeKey) {
             let avgY = ty + inDy/inLen;
             const avgLen = Math.sqrt(avgX*avgX + avgY*avgY);
             if (avgLen > 1e-9) { tx = avgX/avgLen; ty = avgY/avgLen; }
+        }
+    } else {
+        // Midpoint nodes lie at an arc-length midpoint, which generally does
+        // NOT correspond to the arithmetic midpoint of the sampled point
+        // indices. Find the actual polyline edge nearest the anchor and use
+        // its tangent; using floor(edgeIdx) can point the notch the wrong way
+        // on strongly curved or unevenly sampled splines.
+        let bestDistSq = Infinity;
+        for (let i = 0; i < n - 1; i++) {
+            const a = points[i], b = points[i + 1];
+            const dx = b[0] - a[0], dy = b[1] - a[1];
+            const lenSq = dx*dx + dy*dy;
+            if (lenSq < 1e-18) continue;
+            const t = Math.max(0, Math.min(1, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / lenSq));
+            const qx = a[0] + t*dx, qy = a[1] + t*dy;
+            const distSq = (p[0]-qx)*(p[0]-qx) + (p[1]-qy)*(p[1]-qy);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                const len = Math.sqrt(lenSq);
+                tx = dx / len;
+                ty = dy / len;
+            }
         }
     }
 
