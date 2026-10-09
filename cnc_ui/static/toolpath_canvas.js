@@ -3141,7 +3141,10 @@ function undo() {
     // Restore notch edge keys and redraw marks
     Object.keys(notchState).forEach(name => {
         if (notchState[name] && notchState[name].length > 0) {
-            shapeNotches[name] = new Map(notchState[name].map(k => [k.edgeIdx, k]));
+            shapeNotches[name] = new Map(notchState[name].map(k => {
+                const node = normalizeNotchNode(name, k);
+                return [node.edgeIdx, node];
+            }));
             drawNotchMarksForShape(name);
         }
     });
@@ -3392,7 +3395,10 @@ function loadCanvasState(jsonString) {
         if (state.notches) {
             Object.keys(state.notches).forEach(name => {
                 if (state.notches[name] && state.notches[name].length > 0) {
-                    shapeNotches[name] = new Map(state.notches[name].map(k => [k.edgeIdx, k]));
+                    shapeNotches[name] = new Map(state.notches[name].map(k => {
+                        const node = normalizeNotchNode(name, k);
+                        return [node.edgeIdx, node];
+                    }));
                     drawNotchMarksForShape(name);
                 }
             });
@@ -3468,8 +3474,10 @@ function getShapeTangentAndNormal(points, nodeIdx) {
 function computeNotchGeometry(points, nodeKey) {
     const p = [nodeKey.x, nodeKey.y];
     const n = points.length;
-    // edgeIdx may be fractional (junction nodes use breaks[k]-0.5); round to get real index
-    const ei = Math.round(nodeKey.edgeIdx);
+    // Midpoint indices can also be fractional (e.g. start + 0.5 for a two-point
+    // LINE), so the explicit node kind—not fractional edgeIdx—identifies joins.
+    const isJunction = nodeKey.isJunction === true;
+    const ei = isJunction ? Math.round(nodeKey.edgeIdx) : Math.floor(nodeKey.edgeIdx);
     const safeEi = Math.min(Math.max(ei, 0), n - 1);
 
     // Outgoing edge tangent (edge leaving ei → ei+1)
@@ -3479,9 +3487,9 @@ function computeNotchGeometry(points, nodeKey) {
     let tx = outLen > 1e-9 ? outDx/outLen : 1;
     let ty = outLen > 1e-9 ? outDy/outLen : 0;
 
-    // For junction nodes (fractional edgeIdx), average with the incoming tangent so the
-    // V-mark is symmetric about the join and doesn't appear rotated to one side.
-    if (nodeKey.edgeIdx !== Math.floor(nodeKey.edgeIdx)) {
+    // For junction nodes, average with the incoming tangent so the V-mark is
+    // symmetric about the join and doesn't appear rotated to one side.
+    if (isJunction) {
         const prevIdx = (safeEi - 1 + n) % n;
         const inDx = points[safeEi][0] - points[prevIdx][0];
         const inDy = points[safeEi][1] - points[prevIdx][1];
@@ -3563,7 +3571,7 @@ function computeCardinalNodes(shapeName) {
             }
             walked += sl;
         }
-        nodes.push({ edgeIdx: start + (end - start) / 2, x: mx, y: my });
+        nodes.push({ edgeIdx: start + (end - start) / 2, x: mx, y: my, isJunction: false });
     }
 
     // --- Junction node at segment boundaries ONLY between two curved entities ---
@@ -3583,7 +3591,7 @@ function computeCardinalNodes(shapeName) {
 
         const dot = (inDx/inLen)*(outDx/outLen) + (inDy/inLen)*(outDy/outLen);
         if (dot >= CORNER_COS) {
-            nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1] });
+            nodes.push({ edgeIdx: jIdx - 0.5, x: pts[jIdx][0], y: pts[jIdx][1], isJunction: true });
         }
     }
 
@@ -3600,7 +3608,7 @@ function computeCardinalNodes(shapeName) {
                 if (inLen > 1e-9 && outLen > 1e-9) {
                     const dot = (inDx/inLen)*(outDx/outLen)+(inDy/inLen)*(outDy/outLen);
                     if (dot >= CORNER_COS) {
-                        nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1] });
+                        nodes.push({ edgeIdx: -0.5, x: pts[0][0], y: pts[0][1], isJunction: true });
                     }
                 }
             }
@@ -3608,6 +3616,15 @@ function computeCardinalNodes(shapeName) {
     }
 
     return nodes;
+}
+
+// Older saved notch snapshots only contain edgeIdx/x/y. Recover the node kind
+// from the current shape so fractional midpoint indices are not mistaken for
+// junctions when restoring those snapshots.
+function normalizeNotchNode(shapeName, savedNode) {
+    if (savedNode.isJunction !== undefined) return savedNode;
+    const freshNode = computeCardinalNodes(shapeName).find(n => n.edgeIdx === savedNode.edgeIdx);
+    return { ...savedNode, isJunction: freshNode ? freshNode.isJunction : false };
 }
 
 // Recompute the (x,y) anchor of every active notch on a shape from the current
@@ -3732,7 +3749,7 @@ function persistNotchesToLocalStorage() {
             const notches = shapeNotches[name];
             if (notches && notches.size > 0) {
                 snapshot[name] = [...notches.values()].map(nk => ({
-                    edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y
+                    edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y, isJunction: nk.isJunction === true
                 }));
             }
         });
@@ -3760,9 +3777,10 @@ function restoreNotchesFromLocalStorage() {
             if (!shapeData[name]) return;  // shape no longer exists
             const arr = snapshot[name];
             if (!Array.isArray(arr) || arr.length === 0) return;
-            shapeNotches[name] = new Map(
-                arr.map(k => [k.edgeIdx, { edgeIdx: k.edgeIdx, x: k.x, y: k.y }])
-            );
+            shapeNotches[name] = new Map(arr.map(k => {
+                const node = normalizeNotchNode(name, k);
+                return [node.edgeIdx, node];
+            }));
             drawNotchMarksForShape(name);
             restored += arr.length;
         });
@@ -3787,7 +3805,9 @@ function emitNotchesChanged(shapeName) {
     if (!window.emitEvent) return;
     const notches = shapeNotches[shapeName];
     const payload = notches && notches.size > 0
-        ? [...notches.values()].map(nk => ({ edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y }))
+        ? [...notches.values()].map(nk => ({
+            edgeIdx: nk.edgeIdx, x: nk.x, y: nk.y, isJunction: nk.isJunction === true
+        }))
         : [];
     try {
         window.emitEvent('notches_changed', { shapeName: shapeName, notches: payload });
@@ -3812,9 +3832,10 @@ function restoreNotches(notchesDict) {
     Object.keys(notchesDict).forEach(name => {
         const arr = notchesDict[name];
         if (!Array.isArray(arr) || arr.length === 0) return;
-        shapeNotches[name] = new Map(
-            arr.map(k => [k.edgeIdx, { edgeIdx: k.edgeIdx, x: k.x, y: k.y }])
-        );
+        shapeNotches[name] = new Map(arr.map(k => {
+            const node = normalizeNotchNode(name, k);
+            return [node.edgeIdx, node];
+        }));
         drawNotchMarksForShape(name);
     });
     if (notchMode) showNotchNodes();
