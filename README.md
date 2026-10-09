@@ -116,7 +116,7 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 
 ### Marlin SD-card job execution
 
-`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, confirms it appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress and `M114` for position. Short utility sequences continue to use the existing serial streamer.
+`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, and sends numbered/checksummed lines so Marlin can request retransmission if needed. It confirms the file appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress and `M114` for position. Short utility sequences continue to use the existing serial streamer.
 
 Pause and resume use Marlin `M25`/`M24`; stop uses `M524` plus `M410`. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. USB loss can leave an SD print running; do not power-cycle the controller until the machine has been checked. Controller power loss is not automatically resumable by fabCNC.
 

@@ -42,9 +42,12 @@ def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
             encoded = command.encode("ascii")
         except UnicodeEncodeError as exc:
             raise ValueError("G-code contains non-ASCII command text") from exc
-        # Marlin's default MAX_CMD_SIZE is 96 bytes, including the terminator.
-        if len(encoded) > 95:
-            raise ValueError(f"G-code command exceeds Marlin's 95-byte line limit: {command[:40]}")
+        # SD upload still uses Marlin's line-number/checksum protocol once a
+        # streamed job has enabled it. Include that wire overhead in the limit.
+        next_line = len(commands) + 1
+        wire = f"N{next_line} {command}*255".encode("ascii")
+        if len(wire) > 95:  # MAX_CMD_SIZE is 96 bytes including the terminator.
+            raise ValueError(f"Numbered G-code line exceeds Marlin's 95-byte limit: {command[:40]}")
         commands.append(command)
     return commands
 
@@ -1347,7 +1350,10 @@ class CNCController:
         if not commands:
             return False, 0, "The generated G-code contains no executable commands"
 
-        total_bytes = sum(len((command + "\n").encode("ascii")) for command in commands)
+        total_bytes = sum(
+            len((self._wrap_with_line_number(index, command) + "\n").encode("ascii"))
+            for index, command in enumerate(commands, start=1)
+        )
         self.sd_uploading = True
         self.streaming_mode = False
 
@@ -1367,6 +1373,17 @@ class CNCController:
                 if self.stop_requested:
                     return False, 0, "SD upload cancelled by operator"
 
+                # A prior serial-streamed job leaves Marlin expecting the next
+                # N value. Reset the protocol before each SD transfer so its
+                # first numbered payload line is always N1.
+                reset_payload = self._wrap_with_line_number(0, "M110 N0")
+                if not self._write_serial_payload(reset_payload):
+                    return False, 0, "Could not reset Marlin's serial line counter"
+                log_serial_tx("M110 N0", sd_upload=True, line_number=0, wire=reset_payload)
+                response = self._read_response(timeout=8.0)
+                if not _sd_response_ok(response):
+                    return False, 0, f"Could not reset Marlin's serial line counter: {response or 'No response'}"
+
                 response = exchange("M21")
                 if not _sd_response_ok(response):
                     return False, 0, f"SD card initialization failed: {response or 'No response'}"
@@ -1379,12 +1396,32 @@ class CNCController:
                 for index, command in enumerate(commands, start=1):
                     if self.stop_requested:
                         return False, 0, "SD upload cancelled by operator"
-                    if not self._write_serial_payload(command):
-                        return False, 0, f"Serial write failed at G-code line {index}"
-                    log_serial_tx(command, sd_upload=True, line_number=index)
-                    response = self._read_response(timeout=8.0)
-                    if not _sd_response_ok(response):
-                        return False, 0, f"SD write failed at G-code line {index}: {response or 'No acknowledgement'}"
+                    payload = self._wrap_with_line_number(index, command)
+                    attempts = 0
+                    while True:
+                        if not self._write_serial_payload(payload):
+                            return False, 0, f"Serial write failed at G-code line {index}"
+                        log_serial_tx(
+                            command,
+                            sd_upload=True,
+                            line_number=index,
+                            wire=payload,
+                            resend=attempts > 0,
+                        )
+                        response = self._read_response(timeout=8.0)
+                        resend = _RESEND_RE.search(response)
+                        if resend:
+                            requested = int(resend.group(1))
+                            if requested != index or attempts >= 2:
+                                return False, 0, (
+                                    f"SD write could not recover line N{index}; "
+                                    f"Marlin requested N{requested}: {response}"
+                                )
+                            attempts += 1
+                            continue
+                        if not _sd_response_ok(response):
+                            return False, 0, f"SD write failed at G-code line {index}: {response or 'No acknowledgement'}"
+                        break
 
                 response = exchange("M29", timeout=10.0)
                 write_open = False
