@@ -1126,7 +1126,7 @@ def create_job_controls():
         # Generate Toolpath / Clear Toolpath toggle button
         toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
             .props('dense flat') \
-            .classes('w-full') \
+            .classes('w-full remote-control-lock') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
 
         ui.button('Outline Job', icon='crop_free', on_click=outline_job) \
@@ -1731,6 +1731,9 @@ async def toggle_toolpath(button):
         ui.notify('Toolpath cleared - shapes are now editable', type='info')
     else:
         # Generate toolpath mode
+        if _deny_cloudflare_control():
+            return
+
         if not current_toolpath_shapes:
             ui.notify('No shapes loaded', type='warning')
             return
