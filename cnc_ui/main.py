@@ -66,8 +66,46 @@ update_state = {'available': False, 'acknowledged': False}
 disconnect_alert_state = {'requested': False}
 
 
+def _cloudflare_request_details(headers) -> dict:
+    """Return trusted Cloudflare request markers from an incoming header mapping."""
+    normalized = {str(key).lower(): str(value).strip() for key, value in headers.items()}
+    cf_ip = normalized.get('cf-connecting-ip', '')
+    cf_ray = normalized.get('cf-ray', '')
+    access_email = normalized.get('cf-access-authenticated-user-email', '')
+    return {
+        'via_cloudflare': bool(cf_ip or cf_ray or access_email),
+        'cloudflare_ip': cf_ip,
+        'cloudflare_ray': cf_ray,
+        'access_email': access_email,
+    }
+
+
+def _current_cloudflare_request_details() -> dict:
+    """Inspect the original HTTP request associated with the current NiceGUI client."""
+    try:
+        return _cloudflare_request_details(ui.context.client.request.headers)
+    except (AttributeError, RuntimeError):
+        return _cloudflare_request_details({})
+
+
+def _deny_cloudflare_control() -> bool:
+    """Block machine/system actions from Cloudflare-proxied browser sessions."""
+    details = _current_cloudflare_request_details()
+    if not details['via_cloudflare']:
+        return False
+    log_event(
+        'security', 'cloudflare_control_blocked',
+        cloudflare_ip=details['cloudflare_ip'],
+        access_email=details['access_email'],
+    )
+    ui.notify('Controls are disabled for Cloudflare remote sessions.', type='warning')
+    return True
+
+
 def _require_controller_connected() -> bool:
     """Return True if the controller is connected; otherwise flag the disconnect alert."""
+    if _deny_cloudflare_control():
+        return False
     if cnc_controller.connected:
         return True
     disconnect_alert_state['requested'] = True
@@ -85,16 +123,24 @@ app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), na
 def _on_client_connect(client):
     try:
         cid = getattr(client, 'id', '?')
-        logger.info(f"[WS] client connect id={cid}")
-        log_event('system', 'ws_connect', client_id=str(cid))
+        details = _cloudflare_request_details(client.request.headers)
+        logger.info(
+            "[WS] client connect id=%s via_cloudflare=%s access_email=%s cf_ip=%s",
+            cid, details['via_cloudflare'], details['access_email'], details['cloudflare_ip'],
+        )
+        log_event('system', 'ws_connect', client_id=str(cid), **details)
     except Exception as exc:
         logger.warning(f"[WS] connect logging failed: {exc}")
 
 def _on_client_disconnect(client):
     try:
         cid = getattr(client, 'id', '?')
-        logger.warning(f"[WS] client DISCONNECT id={cid}")
-        log_event('system', 'ws_disconnect', client_id=str(cid))
+        details = _cloudflare_request_details(client.request.headers)
+        logger.warning(
+            "[WS] client DISCONNECT id=%s via_cloudflare=%s access_email=%s cf_ip=%s",
+            cid, details['via_cloudflare'], details['access_email'], details['cloudflare_ip'],
+        )
+        log_event('system', 'ws_disconnect', client_id=str(cid), **details)
     except Exception as exc:
         logger.warning(f"[WS] disconnect logging failed: {exc}")
 
@@ -288,6 +334,17 @@ toolpath_canvas = None  # Reference to the canvas element
 @app.post('/jog')
 async def jog_endpoint(request: Request):
     """Handle jog requests."""
+    details = _cloudflare_request_details(request.headers)
+    if details['via_cloudflare']:
+        log_event(
+            'security', 'cloudflare_control_blocked',
+            control='jog_api', cloudflare_ip=details['cloudflare_ip'],
+            access_email=details['access_email'],
+        )
+        return JSONResponse(
+            {'status': 'error', 'message': 'CNC controls are disabled for remote sessions.'},
+            status_code=403,
+        )
     data = await request.json()
     axis = data['axis']
     direction = data['direction']
@@ -620,7 +677,7 @@ def create_header():
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
                 .props('dense flat no-caps color=grey-6') \
-                .style('font-size: 11px; min-width: 140px;')
+                .style('font-size: 11px; min-width: 140px;').classes('remote-control-lock')
             
             with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
@@ -963,7 +1020,7 @@ def create_jog_controls():
 
 def create_homing_controls():
     """Create the compact homing control panel."""
-    with ui.column().classes('gap-3'):
+    with ui.column().classes('gap-3 remote-control-lock'):
         ui.label('Homing').classes('text-h5 font-bold')
         
         with ui.row().classes('gap-2'):
@@ -1862,10 +1919,6 @@ async def outline_job():
         ui.notify('No shapes loaded', type='warning')
         return
 
-    if not cnc_controller.homed:
-        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
-        return
-
     if not await safety_confirm():
         return
 
@@ -1930,10 +1983,6 @@ async def start_job():
         ui.notify('No toolpath generated', type='warning')
         return
 
-    if not cnc_controller.homed:
-        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
-        return
-
     if not await safety_confirm():
         return
 
@@ -1984,6 +2033,8 @@ def stop_job():
 
 async def resume_disconnect_job():
     """Home the machine then resume a job interrupted by a controller disconnect."""
+    if not _require_controller_connected():
+        return
     log_event('job', 'resume_disconnect_clicked')
     ui.notify('Homing before resume…', type='info')
     loop = asyncio.get_event_loop()
@@ -1999,22 +2050,11 @@ async def resume_disconnect_job():
 
 def retry_controller_connection():
     """Retry Marlin controller discovery after power or USB is restored."""
+    if _deny_cloudflare_control():
+        return
     log_event('system', 'controller_reconnect_clicked')
     cnc_controller.attempt_reconnect()
     ui.notify('Retrying controller connection…', type='info')
-
-
-def _parse_homing_sensitivity_value(raw_value, axis: str) -> int:
-    """Parse a UI numeric input into an integer sensorless sensitivity value."""
-    if raw_value is None or str(raw_value).strip() == '':
-        raise ValueError(f'{axis} sensitivity is required')
-    try:
-        value = int(float(raw_value))
-    except (TypeError, ValueError):
-        raise ValueError(f'{axis} sensitivity must be a whole number')
-    if value < -255 or value > 255:
-        raise ValueError(f'{axis} sensitivity must be between -255 and 255')
-    return value
 
 
 # Track previous status for change detection
@@ -2125,6 +2165,44 @@ def main_page():
     if not app.storage.user.get('authenticated') or app.storage.user.get('boot_token') != _BOOT_TOKEN:
         ui.navigate.to('/login')
         return
+
+    remote_details = _current_cloudflare_request_details()
+    if remote_details['via_cloudflare']:
+        log_event(
+            'security', 'cloudflare_remote_access',
+            client_id=str(ui.context.client.id),
+            cloudflare_ip=remote_details['cloudflare_ip'],
+            cloudflare_ray=remote_details['cloudflare_ray'],
+            access_email=remote_details['access_email'],
+        )
+        ui.add_head_html('''
+            <style>
+                body.cloudflare-remote .motion-controls,
+                body.cloudflare-remote .remote-control-lock {
+                    pointer-events: none !important;
+                    opacity: 0.45 !important;
+                }
+            </style>
+            <script>
+                (() => {
+                    const lockRemoteControls = () => {
+                        document.body?.classList.add('cloudflare-remote');
+                        document.querySelectorAll(
+                            '.motion-controls button, .motion-controls input, '
+                            + '.remote-control-lock button, .remote-control-lock input, '
+                            + '.remote-control-lock select, .remote-control-lock textarea, '
+                            + 'button.remote-control-lock, input.remote-control-lock'
+                        ).forEach((element) => { element.disabled = true; });
+                    };
+                    lockRemoteControls();
+                    new MutationObserver(lockRemoteControls).observe(
+                        document.documentElement,
+                        {childList: true, subtree: true}
+                    );
+                })();
+            </script>
+        ''')
+        ui.notify('Remote Cloudflare session: CNC and system controls are disabled.', type='warning')
 
     # Enforce dark mode
     ui.dark_mode().enable()
@@ -2410,6 +2488,8 @@ def main_page():
     
     # Update button click handler
     async def do_software_update():
+        if _deny_cloudflare_control():
+            return
         import asyncio
         import concurrent.futures
         update_btn.set_text('Updating...')
@@ -2599,6 +2679,8 @@ def main_page():
                     wifi_status_label.set_text(f"Found {len(networks)} network(s).")
 
                 def open_connect_dialog():
+                    if _deny_cloudflare_control():
+                        return
                     ssid = wifi_select.value
                     if not ssid:
                         ui.notify('Select a network first.', type='warning')
@@ -2610,6 +2692,8 @@ def main_page():
                         with ui.row().classes('gap-2 justify-end w-full mt-2'):
                             ui.button('Cancel', on_click=conn_dlg.close).props('flat dense')
                             async def do_connect():
+                                if _deny_cloudflare_control():
+                                    return
                                 conn_status.set_text('Connecting…')
                                 pwd = pwd_input.value
                                 loop = asyncio.get_event_loop()
@@ -2636,6 +2720,8 @@ def main_page():
                     conn_dlg.open()
 
                 def confirm_forget_wifi():
+                    if _deny_cloudflare_control():
+                        return
                     with ui.dialog() as dlg, ui.card():
                         ui.label('Forget all WiFi networks?').classes('text-h6')
                         ui.label(
@@ -2645,6 +2731,8 @@ def main_page():
                         with ui.row().classes('gap-2 justify-end w-full mt-4'):
                             ui.button('Cancel', on_click=dlg.close).props('flat dense')
                             def do_forget():
+                                if _deny_cloudflare_control():
+                                    return
                                 dlg.close()
                                 ui.notify('Removing WiFi connections and rebooting…', type='warning')
                                 subprocess.Popen(
@@ -2662,6 +2750,8 @@ def main_page():
                     dlg.open()
 
                 def confirm_forget_wifi_except_current():
+                    if _deny_cloudflare_control():
+                        return
                     with ui.dialog() as dlg, ui.card():
                         ui.label('Forget all other WiFi networks?').classes('text-h6')
                         ui.label(
@@ -2671,6 +2761,8 @@ def main_page():
                         with ui.row().classes('gap-2 justify-end w-full mt-4'):
                             ui.button('Cancel', on_click=dlg.close).props('flat dense')
                             def do_forget_others():
+                                if _deny_cloudflare_control():
+                                    return
                                 dlg.close()
                                 ui.notify('Removing other saved WiFi networks…', type='warning')
                                 subprocess.Popen(
@@ -2689,11 +2781,11 @@ def main_page():
                             ui.button('Forget Others', on_click=do_forget_others).props('color=warning dense')
                     dlg.open()
 
-                with ui.row().classes('gap-2 items-center'):
+                with ui.row().classes('gap-2 items-center remote-control-lock'):
                     ui.button('Rescan', icon='wifi_find', on_click=scan_wifi).props('dense outline').style('font-size: 12px;')
                     ui.button('Connect', icon='wifi', on_click=open_connect_dialog).props('color=primary dense').style('font-size: 12px;')
                 ui.separator()
-                with ui.row().classes('gap-2 items-center'):
+                with ui.row().classes('gap-2 items-center remote-control-lock'):
                     ui.button('Forget Others', icon='wifi_off', on_click=confirm_forget_wifi_except_current) \
                         .props('color=warning dense').style('font-size: 12px;')
                     ui.button('Forget All & Reboot', icon='wifi_off', on_click=confirm_forget_wifi) \
@@ -2759,15 +2851,15 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 # Pattern tools
-                                grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_x = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
                                 ui.label('×').classes('text-body2')
-                                grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_y = ui.number(value=2, format='%.0f', min=1, max=10).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
                                 ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
-                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=100).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=20).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
                                 
                                 async def do_nest():
                                     offset_val = int(nest_offset.value)
@@ -3059,7 +3151,7 @@ def main_page():
                             create_jog_controls()
             
             # GCODE tab - Manual G-code command interface
-            with ui.tab_panel(gcode_tab).classes('tab-content'):
+            with ui.tab_panel(gcode_tab).classes('tab-content remote-control-lock'):
                 with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
                     ui.label('Manual G-code Commands').classes('text-body1 font-bold mb-2').style('color: #aaa;')
                     
@@ -3068,6 +3160,8 @@ def main_page():
                         gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined dense')
                         
                         async def send_gcode():
+                            if _deny_cloudflare_control():
+                                return
                             cmd = gcode_input.value.strip()
                             if cmd:
                                 response_log.push(f'>>> {cmd}')
@@ -3131,121 +3225,25 @@ def main_page():
                             
                             with ui.row().classes('gap-2'):
                                 async def restart_service():
+                                    if _deny_cloudflare_control():
+                                        return
                                     ui.notify('Restarting service...', type='warning')
                                     await ui.run_javascript('setTimeout(() => window.location.reload(), 5000)')
                                     import sys
                                     sys.exit(0)
                                 
                                 ui.button('Restart Service', icon='refresh', on_click=restart_service) \
-                                    .props('color=warning dense').style('font-size: 13px;')
+                                    .props('color=warning dense').style('font-size: 13px;').classes('remote-control-lock')
                                 
                                 def reboot_system():
+                                    if _deny_cloudflare_control():
+                                        return
                                     ui.notify('Rebooting system...', type='warning')
                                     subprocess.Popen(['sudo', 'reboot'], 
                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
-                                    .props('color=negative dense').style('font-size: 13px;')
-
-                            ui.separator().classes('my-3')
-
-                            ui.label('Homing Sensitivity').classes('text-body1 font-bold mb-1').style('color: #aaa;')
-                            ui.label('Sensorless stall sensitivity (M914, TMC5160): negative = more sensitive, positive = less sensitive.').classes('text-caption').style('color: #666;')
-
-                            with ui.row().classes('w-full gap-2 items-end'):
-                                homing_x_input = ui.number('X Stall', value=None, format='%.0f') \
-                                    .props('outlined dense') \
-                                    .style('width: 110px;')
-                                homing_y_input = ui.number('Y Stall', value=None, format='%.0f') \
-                                    .props('outlined dense') \
-                                    .style('width: 110px;')
-                            ui.label('Applied values are automatically saved to EEPROM (M500).').classes('text-caption').style('color: #666;')
-
-                            homing_response_log = ui.log().classes('w-full').style(
-                                'height: 96px; font-family: monospace; font-size: 12px; '
-                                'background: #111; color: #d4d4d4; border-radius: 6px; padding: 6px;'
-                            )
-
-                            async def read_homing_sensitivity():
-                                if not _require_controller_connected():
-                                    ui.notify('Controller not connected', type='warning')
-                                    return
-                                ui.notify('Reading homing sensitivity…', type='info')
-                                loop = asyncio.get_event_loop()
-                                response = await loop.run_in_executor(None, cnc_controller.read_homing_sensitivity)
-                                homing_response_log.push('>>> M914')
-                                for line in response.split('\n'):
-                                    if line.strip():
-                                        homing_response_log.push(f'<<< {line}')
-                                m_x = re.search(r'\bX\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
-                                m_y = re.search(r'\bY\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
-                                if m_x:
-                                    homing_x_input.set_value(int(m_x.group(1)))
-                                if m_y:
-                                    homing_y_input.set_value(int(m_y.group(1)))
-                                log_event('system', 'homing_sensitivity_read', response=response[:800])
-
-                            async def apply_homing_sensitivity():
-                                if not _require_controller_connected():
-                                    ui.notify('Controller not connected', type='warning')
-                                    return
-                                try:
-                                    x_val = _parse_homing_sensitivity_value(homing_x_input.value, 'X')
-                                    y_val = _parse_homing_sensitivity_value(homing_y_input.value, 'Y')
-                                except ValueError as e:
-                                    ui.notify(str(e), type='warning')
-                                    return
-
-                                persist = True
-                                log_event(
-                                    'system',
-                                    'homing_sensitivity_apply_clicked',
-                                    x=x_val,
-                                    y=y_val,
-                                    persist=persist,
-                                )
-                                ui.notify('Applying homing sensitivity…', type='info')
-                                loop = asyncio.get_event_loop()
-                                ok, response = await loop.run_in_executor(
-                                    None,
-                                    lambda: cnc_controller.set_homing_sensitivity(
-                                        x=x_val,
-                                        y=y_val,
-                                        persist_to_eeprom=persist,
-                                    ),
-                                )
-                                homing_response_log.push(f'>>> M914 X{x_val} Y{y_val}')
-                                if persist:
-                                    homing_response_log.push('>>> M500')
-                                for line in response.split('\n'):
-                                    if line.strip():
-                                        homing_response_log.push(f'<<< {line}')
-
-                                if ok:
-                                    ui.notify('Homing sensitivity applied', type='positive')
-                                    log_event(
-                                        'system',
-                                        'homing_sensitivity_applied',
-                                        x=x_val,
-                                        y=y_val,
-                                        persist=persist,
-                                    )
-                                else:
-                                    ui.notify('Failed to apply homing sensitivity', type='negative')
-                                    log_event(
-                                        'system',
-                                        'homing_sensitivity_apply_failed',
-                                        x=x_val,
-                                        y=y_val,
-                                        persist=persist,
-                                        response=response[:800],
-                                    )
-
-                            with ui.row().classes('gap-2'):
-                                ui.button('Read Current', icon='manage_search', on_click=read_homing_sensitivity) \
-                                    .props('dense outline').style('font-size: 12px;')
-                                ui.button('Apply', icon='tune', on_click=apply_homing_sensitivity) \
-                                    .props('dense color=warning').style('font-size: 12px; color: #111;')
+                                    .props('color=negative dense').style('font-size: 13px;').classes('remote-control-lock')
 
                             ui.separator().classes('my-3')
 
@@ -3273,7 +3271,7 @@ def main_page():
                             ui.label(f"Log dir: {log_cfg['log_dir']}").classes('text-caption').style('color: #666; margin-top: 6px;')
 
                         # Right column: live Pi terminal
-                        with ui.column().classes('gap-2').style('flex: 1;'):
+                        with ui.column().classes('gap-2 remote-control-lock').style('flex: 1;'):
                             ui.label('Terminal').classes('text-body1 font-bold mb-1').style('color: #aaa;')
                             ui.label('Runs shell commands directly on the Pi.').classes('text-caption').style('color: #666;')
 
@@ -3411,6 +3409,8 @@ def main_page():
                                     _start_shell()
 
                             async def run_terminal_command():
+                                if _deny_cloudflare_control():
+                                    return
                                 cmd = term_input.value.rstrip('\n')
                                 _ensure_shell()
 
@@ -3519,7 +3519,7 @@ def main_page():
             )
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
-                    .props('dense outline color=warning').style('font-size: 12px;')
+                    .props('dense outline color=warning').style('font-size: 12px;').classes('remote-control-lock')
         connection_alert.set_visibility(False)
 
         update_alert = ui.card().style(
@@ -3540,7 +3540,7 @@ def main_page():
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 acknowledge_update_button = ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
                     .style('color: #aaa;')
-                update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;')
+                update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;').classes('remote-control-lock')
 
                 async def _do_update_now():
                     update_now_button.set_text('Updating...')
@@ -3602,7 +3602,7 @@ def main_page():
                     ui.button(
                         'Resume Job', icon='settings_backup_restore',
                         on_click=_do_resume,
-                    ).style('background:#FFA726; color:#000;')
+                    ).style('background:#FFA726; color:#000;').classes('remote-control-lock')
             dlg.open()
 
         # Start periodic UI update timer (10 Hz = 100ms)

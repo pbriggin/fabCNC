@@ -19,7 +19,7 @@ A web-based controller for a 4-axis fabric CNC cutting machine, built with Pytho
 
 - Python 3.10 or higher
 - Raspberry Pi 5 (or any Linux/macOS for development)
-- Marlin-based CNC controller connected via USB serial (auto-detected at 250000 baud)
+- Marlin-based CNC controller connected via USB serial (auto-detected at 115200 baud)
 - Network connection
 
 ## Installation
