@@ -4073,10 +4073,19 @@ function clearToolpath() {
 // Used instead of passing the (potentially large) viz JSON as inline JS.
 async function fetchAndShowToolpath() {
     try {
+        // Generation can finish while the Fabric canvas is still initializing
+        // (especially on a remote/slow page load). Wait briefly rather than
+        // silently failing and relying on a full browser refresh to render it.
+        const readyDeadline = Date.now() + 10000;
+        while (!canvas && Date.now() < readyDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!canvas) throw new Error('Canvas is not initialized');
+
         const response = await fetch('/toolpath-preview');
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const toolpathData = await response.json();
-        showToolpath(toolpathData);
+        if (!showToolpath(toolpathData)) throw new Error('Toolpath renderer rejected the preview data');
         return true;
     } catch (err) {
         console.error('fetchAndShowToolpath error:', err);

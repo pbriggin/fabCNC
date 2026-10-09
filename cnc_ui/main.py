@@ -1813,10 +1813,30 @@ async def toggle_toolpath(button):
         # avoid embedding (potentially megabytes of) JSON inline in the WebSocket message.
         _pending_viz_data.clear()
         _pending_viz_data.update(viz_data)
-        try:
-            await ui.run_javascript('window.toolpathCanvas.fetchAndShowToolpath()', timeout=15.0)
-        except TimeoutError:
-            pass  # Visualization renders via fetch regardless of the JS ack
+        preview_rendered = False
+        for attempt in range(2):
+            try:
+                preview_rendered = await ui.run_javascript(
+                    'window.toolpathCanvas.fetchAndShowToolpath()', timeout=20.0
+                )
+            except TimeoutError:
+                logger.warning('Toolpath preview render timed out (attempt %d/2)', attempt + 1)
+            if preview_rendered:
+                break
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+
+        if not preview_rendered:
+            log_event(
+                'toolpath', 'toolpath_preview_render_failed',
+                shape_count=len(current_toolpath_shapes),
+                visualization_shape_count=len(viz_data.get('shapes', {})),
+            )
+            ui.notify(
+                'Toolpath generated, but the preview did not render. Refresh the GUI and try again.',
+                type='negative', timeout=10000,
+            )
+            return
 
         
         # Count corners and segments for info
