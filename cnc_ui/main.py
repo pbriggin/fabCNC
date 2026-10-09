@@ -1094,7 +1094,7 @@ def create_file_controls():
 
 def create_job_controls():
     """Create the compact job execution control panel."""
-    with ui.column().classes('w-full gap-1 motion-controls'):
+    with ui.column().classes('w-full gap-1'):
         ui.label('Job Control').classes('text-body1 font-bold w-full text-center').style('color: #aaa; background-color: #2a2a2a; padding: 6px 10px; border-radius: 4px; height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;')
         
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
@@ -1131,14 +1131,14 @@ def create_job_controls():
 
         ui.button('Outline Job', icon='crop_free', on_click=outline_job) \
             .props('dense flat') \
-            .classes('w-full') \
+            .classes('w-full motion-action') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #FFB300;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.job_loaded and machine_state.is_idle())
 
         ui.button('Start', icon='play_arrow', on_click=start_job) \
             .props('dense flat') \
-            .classes('w-full') \
+            .classes('w-full motion-action') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.toolpath_generated and machine_state.is_idle())
@@ -1146,21 +1146,21 @@ def create_job_controls():
         with ui.row().classes('w-full gap-1'):
             ui.button('Pause', icon='pause', on_click=pause_job) \
                 .props('dense flat no-wrap') \
-                .classes('flex-1') \
+                .classes('flex-1 motion-action') \
                 .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.is_running())
             
             ui.button('Resume', icon='play_arrow', on_click=resume_job) \
                 .props('dense flat no-wrap') \
-                .classes('flex-1') \
+                .classes('flex-1 motion-action') \
                 .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
                                  backward=lambda _: machine_state.paused)
         
         ui.button('Stop', icon='stop', on_click=stop_job) \
             .props('dense flat') \
-            .classes('w-full') \
+            .classes('w-full motion-action') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
                              backward=lambda _: machine_state.busy)
@@ -2178,6 +2178,7 @@ def main_page():
         ui.add_head_html('''
             <style>
                 body.cloudflare-remote .motion-controls,
+                body.cloudflare-remote .motion-action,
                 body.cloudflare-remote .remote-control-lock {
                     pointer-events: none !important;
                     opacity: 0.45 !important;
@@ -2189,6 +2190,10 @@ def main_page():
                         document.body?.classList.add('cloudflare-remote');
                         document.querySelectorAll(
                             '.motion-controls button, .motion-controls input, '
+                            + '.motion-action button, .motion-action input, '
+                            + '.motion-action select, .motion-action textarea, '
+                            + 'button.motion-action, input.motion-action, '
+                            + 'select.motion-action, textarea.motion-action, '
                             + '.remote-control-lock button, .remote-control-lock input, '
                             + '.remote-control-lock select, .remote-control-lock textarea, '
                             + 'button.remote-control-lock, input.remote-control-lock'
@@ -3486,7 +3491,8 @@ def main_page():
         # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
         # instead of blending into the dark theme.
         alert_backdrop = ui.element('div').style(
-            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9996; display: none;'
+            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9996; '
+            'display: none; pointer-events: none;'
         )
 
         def _set_alert_backdrop(visible: bool) -> None:
@@ -3564,6 +3570,8 @@ def main_page():
             )
             retry_connection_button.set_visibility(True)
             connection_alert.set_visibility(True)
+            # Keep the dimming backdrop visible, but click-through so the canvas
+            # and file controls remain usable until the alert is dismissed.
             _set_alert_backdrop(True)
 
         def _reopen_connection_alert():
