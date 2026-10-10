@@ -301,7 +301,7 @@ class CNCController:
             # the serial-stream resume flow, which uses line acknowledgements.
             self.sd_job_disconnected = True
             log_controller_event("sd_job_host_disconnected", filename=_SD_FILENAME)
-        elif not self.sd_uploading:
+        elif not self.sd_uploading and not self.reset_required:
             self._save_resume_state()
         if _log_uploader:
             _log_uploader.log_system_snapshot(trigger="serial_disconnect")
@@ -851,7 +851,13 @@ class CNCController:
                             'printer halted' in lower
                             or 'stopped due to errors' in lower
                             or 'kill() called' in lower
+                            or 'kill caused by' in lower
                         ):
+                            had_sd_job = (
+                                self.sd_job_active
+                                or self.sd_job_disconnected
+                                or _SD_JOB_STATE_FILE.exists()
+                            )
                             if not self.reset_required:
                                 log_controller_event("controller_reset_required", response=line[:500])
                             self.reset_required = True
@@ -862,6 +868,13 @@ class CNCController:
                             self.ok_event.set()
                             machine_state.reset_job()
                             machine_state.set_status("E-Stop Reset Required", busy=False)
+                            if had_sd_job:
+                                self._clear_sd_job_state()
+                                log_controller_event(
+                                    "sd_job_cleared_after_controller_kill",
+                                    filename=_SD_FILENAME,
+                                    response=line[:500],
+                                )
                         
                 time.sleep(0.005)  # 5ms polling rate
             except OSError as e:
