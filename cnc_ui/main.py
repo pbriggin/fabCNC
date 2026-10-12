@@ -2091,6 +2091,29 @@ def retry_controller_connection():
     ui.notify('Retrying controller connection…', type='info')
 
 
+def force_controller_recovery():
+    """Recover a stopped machine using M999 or one deliberate USB DTR reset."""
+    if _deny_cloudflare_control():
+        return
+    if cnc_controller.connected:
+        if not cnc_controller.reset_required:
+            ui.notify('Controller is already connected.', type='info')
+            return
+        if cnc_controller.reset_controller_after_estop():
+            ui.notify('Controller reset. Re-home before the next job.', type='positive')
+        else:
+            ui.notify(
+                f'Controller reset failed: {cnc_controller.last_controller_error or "No M999 response"}',
+                type='negative',
+                timeout=8000,
+            )
+        return
+
+    log_event('system', 'controller_force_recovery_clicked')
+    cnc_controller.attempt_reconnect(force_dtr_reset=True)
+    ui.notify('Trying one USB reset, then reconnecting…', type='warning', timeout=6000)
+
+
 # Track previous status for change detection
 _previous_status = {'text': None}
 
@@ -3567,6 +3590,39 @@ def main_page():
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
                     .props('dense outline color=warning').style('font-size: 12px;').classes('remote-control-lock')
+
+                def _confirm_force_controller_recovery():
+                    with ui.dialog().props('persistent') as recovery_dialog, \
+                         ui.card().style('background:#1e1e1e; min-width:360px; padding:20px;'):
+                        ui.label('Force controller recovery?') \
+                            .classes('text-h6').style('color:#fff; margin-bottom:6px;')
+                        ui.label(
+                            'Confirm the cutter is fully stopped and the physical E-stop is released. '
+                            'This may reset Marlin and abort any SD-card job still in progress.'
+                        ).classes('text-body2').style('color:#ccc; white-space:normal;')
+                        with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
+                            ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
+                                .style('color:#aaa;')
+
+                            def _run_forced_recovery():
+                                recovery_dialog.close()
+                                force_recovery_button.disable()
+                                force_controller_recovery()
+                                force_recovery_button.enable()
+
+                            ui.button(
+                                'Cutter stopped — recover',
+                                icon='restart_alt',
+                                on_click=_run_forced_recovery,
+                            ).props('color=negative dense')
+                    recovery_dialog.open()
+
+                force_recovery_button = ui.button(
+                    'Force Recovery',
+                    icon='restart_alt',
+                    on_click=_confirm_force_controller_recovery,
+                ).props('dense color=negative').style('font-size: 12px;').classes('remote-control-lock')
+                force_recovery_button.set_visibility(False)
         connection_alert.set_visibility(False)
 
         update_alert = ui.card().style(
@@ -3617,6 +3673,7 @@ def main_page():
                     '3. Click "Retry Connection".'
                 )
             retry_connection_button.set_visibility(True)
+            force_recovery_button.set_visibility(True)
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
             # and file controls remain usable until the alert is dismissed.

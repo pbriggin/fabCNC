@@ -120,6 +120,8 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 
 Pause and resume use Marlin `M25`/`M24`; stop uses `M524` plus `M410`. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. USB loss can leave an SD print running; do not power-cycle the controller until the machine has been checked. Controller power loss is not automatically resumable by fabCNC.
 
+If reconnect probing fails after a controller power cycle, **Force Recovery** in the disconnect alert requires an explicit stopped-machine confirmation before trying one USB DTR reset. If Marlin is connected but halted, it sends `M999` instead. This can abort an SD job; verify the cutter is stopped first.
+
 ### Thread-Safe State
 
 `MachineState` uses a `threading.Lock` to guard all reads and writes. Background threads handle serial I/O, SD-card uploads, and print monitoring; the NiceGUI UI reads state at ~10 Hz via timers without blocking the event loop.

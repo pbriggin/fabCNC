@@ -110,6 +110,8 @@ class CNCController:
         self.read_thread: Optional[threading.Thread] = None
         self.connected = False
         self.reconnect_thread_active = False
+        self._reconnect_force_lock = threading.Lock()
+        self._force_reconnect_requested = False
         self.reset_required = False
         self.last_controller_error = ""
         self.last_serial_device = ""
@@ -164,7 +166,11 @@ class CNCController:
         if self.connected and self.sd_job_disconnected:
             self._reconcile_sd_job_after_reconnect()
     
-    def _auto_connect(self, strict_candidates: bool = False) -> bool:
+    def _auto_connect(
+        self,
+        strict_candidates: bool = False,
+        force_dtr_reset: bool = False,
+    ) -> bool:
         """Auto-detect and connect to the first available serial port."""
         try:
             # List all available serial ports
@@ -198,7 +204,10 @@ class CNCController:
                         self.serial_port.dtr = False
                     self.serial_port.port = port.device
                     self.serial_port.open()
-                    if self._probe_marlin_on_open_port(port.device):
+                    if self._probe_marlin_on_open_port(
+                        port.device,
+                        force_dtr_reset=force_dtr_reset,
+                    ):
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
                         self.last_serial_device = str(port.device)
@@ -232,7 +241,11 @@ class CNCController:
             logger.error(f"Error during auto-connect: {e}")
             return False
 
-    def _probe_marlin_on_open_port(self, port_device: str) -> bool:
+    def _probe_marlin_on_open_port(
+        self,
+        port_device: str,
+        force_dtr_reset: bool = False,
+    ) -> bool:
         """Try to elicit a Marlin banner/version reply on an already-open serial port."""
         if not self.serial_port or not self.serial_port.is_open:
             return False
@@ -242,7 +255,7 @@ class CNCController:
         try:
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-            if not self.sd_job_disconnected:
+            if not self.sd_job_disconnected or force_dtr_reset:
                 self.serial_port.dtr = False
                 time.sleep(0.15)
                 self.serial_port.dtr = True
@@ -314,8 +327,11 @@ class CNCController:
         # Stay in Disconnected until the operator explicitly clicks Retry.
         # This keeps the UI state deterministic and avoids implicit USB recovery.
 
-    def _start_reconnect_loop(self) -> None:
+    def _start_reconnect_loop(self, force_dtr_reset: bool = False) -> None:
         """Background thread: retries reconnect until the controller reappears."""
+        if force_dtr_reset:
+            with self._reconnect_force_lock:
+                self._force_reconnect_requested = True
         if self.reconnect_thread_active:
             return
 
@@ -340,7 +356,21 @@ class CNCController:
                     attempt += 1
                     machine_state.set_status("Retrying connection...", busy=False)
                     logger.info(f"Reconnection attempt {attempt}...")
-                    if self._auto_connect(strict_candidates=True):
+                    with self._reconnect_force_lock:
+                        force_this_attempt = self._force_reconnect_requested
+                        self._force_reconnect_requested = False
+                    if force_this_attempt:
+                        log_controller_event(
+                            "serial_force_dtr_reset_attempt",
+                            attempt=attempt,
+                        )
+                    # A forced DTR pulse is only attempted on the first
+                    # operator-requested try (including an already-running
+                    # retry loop); never repeatedly reset a board on failure.
+                    if self._auto_connect(
+                        strict_candidates=True,
+                        force_dtr_reset=force_this_attempt,
+                    ):
                         logger.info(f"Reconnected on attempt {attempt}")
                         self.stop_requested = False
                         log_controller_event("serial_reconnect", attempt=attempt)
@@ -375,13 +405,16 @@ class CNCController:
 
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
 
-    def attempt_reconnect(self) -> None:
-        """Kick off a reconnect attempt when the controller is offline."""
+    def attempt_reconnect(self, *, force_dtr_reset: bool = False) -> None:
+        """Retry Marlin discovery, optionally pulsing DTR once on operator request."""
         if self.connected:
             return
         machine_state.set_status("Retrying connection...", busy=False)
-        log_controller_event("serial_reconnect_requested")
-        self._start_reconnect_loop()
+        log_controller_event(
+            "serial_reconnect_requested",
+            force_dtr_reset=force_dtr_reset,
+        )
+        self._start_reconnect_loop(force_dtr_reset=force_dtr_reset)
 
     def reset_controller_after_estop(self) -> bool:
         """Clear a Marlin halt state after the physical E-stop has been released."""
