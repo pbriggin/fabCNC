@@ -2136,7 +2136,10 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     # Update status
     current_status = machine_state.status_text
     display_status = current_status
-    if current_status == 'Retrying connection...':
+    sd_verification_status = 'SD job ended while disconnected — verify machine'
+    if current_status == sd_verification_status:
+        display_status = 'Verify SD job'
+    elif current_status == 'Retrying connection...':
         display_status = 'Retrying connection...'
     elif (
         not cnc_controller.connected
@@ -2145,6 +2148,8 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     ):
         display_status = 'Disconnected'
     status_label.set_text(display_status)
+    if _previous_status['text'] != current_status:
+        status_label.tooltip(current_status if display_status != current_status else '')
 
     # Update status pill appearance
     if status_pill and status_icon:
@@ -2152,6 +2157,10 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
+        elif current_status == sd_verification_status:
+            status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
+            status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
+            status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
         elif machine_state.busy:
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
             status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
@@ -3682,6 +3691,9 @@ def main_page():
         def _reopen_connection_alert():
             """Let the operator bring back a dismissed disconnect popup via the status pill."""
             current_status = machine_state.status_text
+            if current_status == 'SD job ended while disconnected — verify machine':
+                ui.notify(current_status, type='warning', timeout=8000)
+                return
             if (
                 not cnc_controller.connected
                 or current_status in ('Disconnected', 'Retrying connection...')
