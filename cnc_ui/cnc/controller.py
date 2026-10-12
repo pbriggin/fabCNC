@@ -27,6 +27,7 @@ _RESEND_RE = re.compile(r"Resend\s*:\s*(\d+)", re.IGNORECASE)
 _LAST_LINE_RE = re.compile(r"Last\s*Line\s*:\s*(\d+)", re.IGNORECASE)
 _SD_PROGRESS_RE = re.compile(r"SD printing byte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _SD_FILENAME = "FABJOB.GCO"  # Short 8.3-compatible name supported by Marlin SD builds.
+_SD_UPLOAD_POLL_INTERVAL = 0.001  # 1 ms; don't wait the normal 10 ms between SD-write acks.
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -821,7 +822,7 @@ class CNCController:
                 self.pause_requested = True
                 return emitted
     
-    def _read_response(self, timeout: float = 1.0) -> str:
+    def _read_response(self, timeout: float = 1.0, poll_interval: float = 0.01) -> str:
         """Read response from Marlin until 'ok' is received."""
         if not self.serial_port or not self.serial_port.is_open:
             return ""
@@ -840,7 +841,7 @@ class CNCController:
                     if line.startswith("ok"):
                         break
                 else:
-                    time.sleep(0.01)
+                    time.sleep(poll_interval)
             except Exception as e:
                 logger.error(f"Error reading response: {e}")
                 break
@@ -1406,7 +1407,10 @@ class CNCController:
         def exchange(command: str, timeout: float = 8.0) -> str:
             if not self._send_command(command):
                 return ""
-            return self._read_response(timeout=timeout)
+            return self._read_response(
+                timeout=timeout,
+                poll_interval=_SD_UPLOAD_POLL_INTERVAL,
+            )
 
         # Own the serial receive stream for the complete upload transaction.
         # M28 makes every incoming line file content until M29, so no unrelated
@@ -1426,7 +1430,10 @@ class CNCController:
                 if not self._write_serial_payload(reset_payload):
                     return False, 0, "Could not reset Marlin's serial line counter"
                 log_serial_tx("M110 N0", sd_upload=True, line_number=0, wire=reset_payload)
-                response = self._read_response(timeout=8.0)
+                response = self._read_response(
+                    timeout=8.0,
+                    poll_interval=_SD_UPLOAD_POLL_INTERVAL,
+                )
                 if not _sd_response_ok(response):
                     return False, 0, f"Could not reset Marlin's serial line counter: {response or 'No response'}"
 
@@ -1454,7 +1461,10 @@ class CNCController:
                             wire=payload,
                             resend=attempts > 0,
                         )
-                        response = self._read_response(timeout=8.0)
+                        response = self._read_response(
+                            timeout=8.0,
+                            poll_interval=_SD_UPLOAD_POLL_INTERVAL,
+                        )
                         resend = _RESEND_RE.search(response)
                         if resend:
                             requested = int(resend.group(1))
