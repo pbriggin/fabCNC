@@ -1615,7 +1615,7 @@ async def load_canvas_state():
         with ui.column().classes('w-full gap-0').style(
             'max-height: 400px; overflow-y: auto; border: 1px solid #333; border-radius: 4px;'
         ):
-            for filepath in files[:50]:
+            for filepath in files:
                 filename = os.path.basename(filepath)
                 stem = filename[:-5] if filename.endswith('.json') else filename
                 try:
