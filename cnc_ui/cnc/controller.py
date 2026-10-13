@@ -119,9 +119,14 @@ class CNCController:
         self.last_controller_error = ""
         self.last_serial_device = ""
         self.last_candidate_count = 0
+        self.emergency_parser_supported: Optional[bool] = None
         self.read_loop_paused = False
         self.reader_paused = threading.Event()
         self.read_lock = threading.Lock()
+        # Protect bytes on the wire independently from response ownership.
+        # Safety commands may bypass operation_lock, but must never interleave
+        # their bytes with another serial write.
+        self.serial_write_lock = threading.Lock()
         # Serial operations are transactions, not individual writes.  This
         # re-entrant lock prevents jog/home/console/monitor operations from
         # interleaving modal commands or stealing one another's responses.
@@ -286,6 +291,21 @@ class CNCController:
                 self._send_command("M115")
                 response = self._read_response(timeout=4.0)
                 if response and "FIRMWARE_NAME" in response:
+                    capability = re.search(
+                        r"Cap:EMERGENCY_PARSER:(\d+)", response, re.IGNORECASE
+                    )
+                    self.emergency_parser_supported = (
+                        bool(int(capability.group(1))) if capability else None
+                    )
+                    log_controller_event(
+                        "firmware_stop_capability",
+                        emergency_parser=self.emergency_parser_supported,
+                    )
+                    if self.emergency_parser_supported is not True:
+                        logger.warning(
+                            "Firmware does not confirm EMERGENCY_PARSER support; "
+                            "GUI Stop is not an emergency stop"
+                        )
                     return True
                 logger.warning(
                     f"Marlin probe attempt {idx} on {port_device} did not return firmware banner"
@@ -735,8 +755,9 @@ class CNCController:
         try:
             cmd = command.strip() + "\n"
             wire_bytes = cmd.encode('utf-8')
-            self.serial_port.write(wire_bytes)
-            self.serial_port.flush()  # Ensure data is sent immediately
+            with self.serial_write_lock:
+                self.serial_port.write(wire_bytes)
+                self.serial_port.flush()  # Ensure data is sent immediately
             log_serial_tx(
                 command,
                 streaming=self.streaming_mode,
@@ -753,6 +774,38 @@ class CNCController:
         except Exception as e:
             logger.error(f"Error sending command '{command}': {e}")
             log_serial_tx(command, error=str(e), streaming=self.streaming_mode)
+            return False
+
+    def _send_priority_stop(self, *, sd_job: bool) -> bool:
+        """Put stop commands on the wire without waiting for operation_lock.
+
+        Stop is the one operation allowed to bypass the normal response-ordering
+        lock. serial_write_lock still guarantees complete, non-interleaved lines.
+        Responses are reconciled later through the normal locked path.
+        """
+        if not self.serial_port or not self.serial_port.is_open:
+            return False
+        commands = ("M524", "M410") if sd_job else ("M410",)
+        try:
+            with self.serial_write_lock:
+                for command in commands:
+                    wire = (command + "\n").encode("ascii")
+                    self.serial_port.write(wire)
+                    log_serial_tx(
+                        command, streaming=False, priority_stop=True,
+                        wire=command, byte_count=len(wire),
+                        job_id=self.current_job_id or None,
+                    )
+                self.serial_port.flush()
+            return True
+        except (serial.SerialException, OSError) as exc:
+            logger.error("Priority stop write failed: %s", exc)
+            log_controller_event("priority_stop_write_failed", error=str(exc))
+            self._handle_disconnect()
+            return False
+        except Exception as exc:
+            logger.error("Priority stop write failed: %s", exc)
+            log_controller_event("priority_stop_write_failed", error=str(exc))
             return False
 
     def _pause_reader(self, timeout: float = 3.0) -> bool:
@@ -793,8 +846,9 @@ class CNCController:
             logger.error("Serial port not connected")
             return False
         try:
-            self.serial_port.write((payload + "\n").encode('utf-8'))
-            self.serial_port.flush()
+            with self.serial_write_lock:
+                self.serial_port.write((payload + "\n").encode('utf-8'))
+                self.serial_port.flush()
             return True
         except (serial.SerialException, OSError) as e:
             logger.error(f"Error writing serial payload '{payload}': {e}")
@@ -1185,7 +1239,7 @@ class CNCController:
                 return False
         return True
     
-    def home_axis(self, axis: str) -> None:
+    def home_axis(self, axis: str) -> bool:
         """
         Home a single axis.
         
@@ -1195,14 +1249,18 @@ class CNCController:
         axis = str(axis).upper()
         if axis not in {"X", "Y", "Z", "A"}:
             logger.warning("Rejected home for invalid axis %r", axis)
-            return
+            log_controller_event("home_rejected", axis=axis, reason="invalid_axis")
+            return False
         with self.operation_lock:
             if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
-                return
+                reason = self._homing_rejection_reason()
+                logger.warning("Rejected home %s: %s", axis, reason)
+                log_controller_event("home_rejected", axis=axis, reason=reason)
+                return False
             self.homed = False
             machine_state.set_status(f"Homing {axis}...", busy=True)
             if not self._quiesce_before_stream():
-                return
+                return False
             commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
                         ("M204 P1000 T1000", 10.0), (f"G28 {axis.upper()}", 180.0),
                         ("M400", 180.0), ("M114", 10.0),
@@ -1211,18 +1269,31 @@ class CNCController:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
                     self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
-                    return
+                    return False
             machine_state.set_status("Idle", busy=False)
+            return True
     
-    def home_all(self) -> None:
+    def _homing_rejection_reason(self) -> str:
+        if not self.connected:
+            return "controller disconnected"
+        if self.serial_uncertain:
+            return "controller state uncertain; confirm motion stopped and run recovery"
+        if not machine_state.is_idle():
+            return f"machine is {machine_state.snapshot().status_text}"
+        return "controller is not ready"
+
+    def home_all(self) -> bool:
         """Home all axes sequentially."""
         with self.operation_lock:
             if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
-                return
+                reason = self._homing_rejection_reason()
+                logger.warning("Rejected home all: %s", reason)
+                log_controller_event("home_rejected", axis="ALL", reason=reason)
+                return False
             self.homed = False
             machine_state.set_status("Homing all axes...", busy=True)
             if not self._quiesce_before_stream():
-                return
+                return False
             commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
                         ("M204 P1000 T1000", 10.0), ("G28", 180.0),
                         ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
@@ -1231,10 +1302,11 @@ class CNCController:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
                     self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
-                    return
+                    return False
             machine_state.set_status("Idle", busy=False)
             self.homed = True
             self.rehome_required = False
+            return True
 
     # ==================== Job Execution ====================
     
@@ -1360,39 +1432,41 @@ class CNCController:
             log_controller_event("job_resume")
     
     def stop_job(self) -> bool:
-        """Stop the current job; SD playback must acknowledge Marlin M524."""
+        """Request an immediate stop, then prove the controller is quiescent."""
         self.pause_requested = False
+        self.stop_requested = True
+        self.homed = False
+        self.rehome_required = True
+        log_controller_event("job_stop_requested", priority=True)
 
         if self.connected and self.sd_uploading:
             # M28 treats all incoming commands as file contents. The upload
             # thread observes stop_requested and closes the file with M29.
-            self.stop_requested = True
+            pass
         elif self.connected and self.sd_job_active:
-            # Never call M410 alone for an SD job: the SD file could continue
-            # feeding new moves after the planner is quick-stopped.
-            response = self.send_command_with_response("M524", timeout=8.0)
-            if not _sd_response_ok(response):
-                machine_state.set_status("SD stop failed — use physical E-stop", busy=True)
-                self.serial_uncertain = True
-                self.rehome_required = True
-                log_controller_event("sd_stop_failed", response=response[:300])
+            if not self._send_priority_stop(sd_job=True):
+                self._mark_serial_uncertain("Could not transmit priority SD stop")
                 return False
-            self.stop_requested = True
-            # M524 cancels SD playback; M410 also clears queued motion.
-            quick_stop = self.send_command_with_response("M410", timeout=8.0)
-            if not _sd_response_ok(quick_stop):
-                self._mark_serial_uncertain("M410 was not acknowledged after SD stop", quick_stop)
-                return False
+            with self.operation_lock:
+                if not self._quiesce_before_stream(timeout=30.0):
+                    return False
+                status = self._exchange_locked("M27", 8.0)
+                if "not sd printing" not in status.lower():
+                    self._mark_serial_uncertain("Could not confirm SD playback stopped", status)
+                    return False
+                self._clear_sd_job_state()
         elif self.connected:
-            self.stop_requested = True
-            quick_stop = self.send_command_with_response("M410", timeout=8.0)
-            if not _sd_response_ok(quick_stop):
-                self._mark_serial_uncertain("M410 was not acknowledged", quick_stop)
+            if not self._send_priority_stop(sd_job=False):
+                self._mark_serial_uncertain("Could not transmit priority quick stop")
                 return False
+            with self.operation_lock:
+                if not self._quiesce_before_stream(timeout=30.0):
+                    return False
         else:
-            self.stop_requested = True
+            self.serial_uncertain = True
+            machine_state.set_status("Stop unconfirmed — use physical E-stop", busy=True)
+            return False
 
-        log_controller_event("job_stop_requested")
         if self.job_thread and self.job_thread.is_alive():
             self.job_thread.join(timeout=2.0)
             if self.job_thread.is_alive() and self.sd_uploading:
@@ -1400,8 +1474,8 @@ class CNCController:
                 return True
 
         machine_state.reset_job()
-        machine_state.set_status("Stopped", busy=False)
-        log_controller_event("job_stopped")
+        machine_state.set_status("Stopped — re-home required", busy=False)
+        log_controller_event("job_stopped", rehome_required=True)
         return True
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:
@@ -1845,13 +1919,8 @@ class CNCController:
             else:
                 missed_reports += 1
 
-            now = time.monotonic()
-            if now - last_position_poll >= 2.0:
-                position_response = self.send_command_with_response("M114", timeout=4.0)
-                for line in position_response.splitlines():
-                    if line.lstrip().startswith("X:"):
-                        self._parse_position(line.strip())
-                last_position_poll = now
+            # M114 may block behind motion and delay Stop. M27 provides all
+            # progress information needed while Marlin owns SD playback.
             time.sleep(0.5)
 
         if not self.connected and self.sd_job_disconnected:
@@ -1859,13 +1928,9 @@ class CNCController:
             return
 
         if self.stop_requested:
-            machine_state.reset_job()
-            if self.connected:
-                machine_state.set_status("Stopped", busy=False)
-            else:
-                machine_state.set_status("Disconnected", busy=False)
-            log_controller_event("sd_job_aborted", filename=_SD_FILENAME)
-            self._clear_sd_job_state()
+            # stop_job owns reconciliation and preserves the recovery marker
+            # until serial ordering and SD-idle state are both proven.
+            return
 
     def _finish_sd_job(self) -> None:
         """Mark a fully completed SD print and run existing completion hooks."""

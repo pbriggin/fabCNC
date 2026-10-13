@@ -1317,7 +1317,12 @@ def home_axis(axis: str):
     if not _require_controller_connected():
         return
     log_event('home', 'home_axis', axis=axis)
-    cnc_controller.home_axis(axis)
+    if not cnc_controller.home_axis(axis):
+        ui.notify(
+            'Homing blocked or failed. If Stop was used, confirm motion has stopped, '
+            'run Controller Recovery, then home again.',
+            type='negative', timeout=8000,
+        )
 
 
 def home_all():
@@ -1325,7 +1330,12 @@ def home_all():
     if not _require_controller_connected():
         return
     log_event('home', 'home_all')
-    cnc_controller.home_all()
+    if not cnc_controller.home_all():
+        ui.notify(
+            'Homing blocked or failed. If Stop was used, confirm motion has stopped, '
+            'run Controller Recovery, then home again.',
+            type='negative', timeout=8000,
+        )
 
 
 async def tape_fabric():
@@ -2214,7 +2224,7 @@ def stop_job():
         return
     log_event('job', 'stop_clicked')
     if cnc_controller.stop_job():
-        ui.notify('Job stopped', type='negative')
+        ui.notify('Job stopped — full re-home required before motion.', type='warning', timeout=8000)
     else:
         ui.notify('SD stop failed — use the physical E-stop.', type='negative', timeout=8000)
 

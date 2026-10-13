@@ -253,15 +253,84 @@ class ControllerSafetyTests(unittest.TestCase):
     def test_stop_ack_loss_preserves_possible_sd_job(self):
         controller = connected_controller()
         controller.sd_job_active = True
-        controller.send_command_with_response = lambda *args, **kwargs: "No response"
+        controller._quiesce_before_stream = lambda timeout=180.0: False
         machine_state.set_status("Running", busy=True)
 
         stopped = controller.stop_job()
 
         self.assertFalse(stopped)
         self.assertTrue(controller.sd_job_active)
-        self.assertTrue(controller.serial_uncertain)
+        self.assertEqual(["M524", "M410"], controller.serial_port.writes)
+        self.assertFalse(controller.homed)
+        self.assertTrue(controller.rehome_required)
         self.assertTrue(machine_state.snapshot().busy)
+
+    def test_stop_writes_priority_commands_before_operation_lock_is_available(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.homed = True
+        controller._quiesce_before_stream = lambda timeout=180.0: False
+        machine_state.set_status("Running", busy=True)
+
+        controller.operation_lock.acquire()
+        try:
+            worker = threading.Thread(target=controller.stop_job)
+            worker.start()
+            deadline = time.monotonic() + 0.5
+            while len(controller.serial_port.writes) < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+            self.assertEqual(["M524", "M410"], controller.serial_port.writes)
+            self.assertTrue(controller.stop_requested)
+            self.assertFalse(controller.homed)
+            self.assertTrue(controller.rehome_required)
+            self.assertTrue(worker.is_alive())
+        finally:
+            controller.operation_lock.release()
+        worker.join(timeout=1)
+
+    def test_confirmed_sd_stop_requires_rehome(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.homed = True
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        controller._exchange_locked = lambda command, timeout: "Not SD printing\nok"
+        controller._clear_sd_job_state = lambda: setattr(controller, "sd_job_active", False)
+        machine_state.set_status("Running", busy=True)
+
+        stopped = controller.stop_job()
+
+        self.assertTrue(stopped)
+        self.assertEqual(["M524", "M410"], controller.serial_port.writes)
+        self.assertFalse(controller.homed)
+        self.assertTrue(controller.rehome_required)
+        self.assertEqual("Stopped — re-home required", machine_state.snapshot().status_text)
+
+    def test_uncertain_state_home_is_rejected_without_g28(self):
+        controller = connected_controller()
+        controller.serial_uncertain = True
+        machine_state.set_status("Idle", busy=False)
+
+        homed = controller.home_all()
+
+        self.assertFalse(homed)
+        self.assertNotIn("G28", controller.serial_port.writes)
+
+    def test_sd_monitor_does_not_issue_position_poll(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        calls = []
+
+        def respond(command, timeout=5.0):
+            calls.append(command)
+            controller.stop_requested = True
+            return "SD printing byte 10/100\nok"
+
+        controller.send_command_with_response = respond
+        controller._monitor_sd_job(total_bytes=100)
+
+        self.assertEqual(["M27"], calls)
+        self.assertNotIn("M114", calls)
 
 
 if __name__ == "__main__":
