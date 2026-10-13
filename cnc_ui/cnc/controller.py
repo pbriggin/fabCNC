@@ -498,10 +498,30 @@ class CNCController:
     def recover_uncertain_state(self) -> bool:
         """Re-establish serial ordering after the operator confirms motion stopped."""
         with self.operation_lock:
-            if not self.connected or self.reset_required or self.sd_job_active or self.sd_uploading:
+            if not self.connected or self.reset_required or self.sd_uploading:
                 return False
             if not self._quiesce_before_stream():
                 return False
+            if (
+                self.sd_job_active
+                or self.sd_job_disconnected
+                or _SD_JOB_STATE_FILE.exists()
+            ):
+                sd_status = self._exchange_locked("M27", 8.0)
+                if "not sd printing" not in sd_status.lower():
+                    logger.error(
+                        "Recovery refused because SD playback is not confirmed stopped: %s",
+                        sd_status,
+                    )
+                    log_controller_event(
+                        "uncertain_state_recovery_sd_not_idle",
+                        response=sd_status[:500],
+                    )
+                    machine_state.set_status(
+                        "SD stop unconfirmed — use physical E-stop", busy=True
+                    )
+                    return False
+                self._clear_sd_job_state()
             self.serial_uncertain = False
             self.stop_requested = False
             self.pause_requested = False
@@ -509,7 +529,10 @@ class CNCController:
             self.rehome_required = True
             machine_state.reset_job()
             machine_state.set_status("Idle — re-home required", busy=False)
-            log_controller_event("uncertain_state_recovered_rehome_required")
+            log_controller_event(
+                "uncertain_state_recovered_rehome_required",
+                sd_idle_confirmed=True,
+            )
             return True
 
     # ==================== Resume After Disconnect ====================

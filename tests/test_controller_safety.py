@@ -249,6 +249,45 @@ class ControllerSafetyTests(unittest.TestCase):
         finally:
             controller_module._SD_JOB_STATE_FILE.unlink(missing_ok=True)
 
+    def test_uncertain_recovery_clears_sd_marker_only_after_idle_confirmation(self):
+        controller = connected_controller()
+        controller.serial_uncertain = True
+        controller.sd_job_active = True
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        controller._exchange_locked = lambda command, timeout: "Not SD printing\nok"
+        controller_module._SD_JOB_STATE_FILE.write_text("{}")
+
+        try:
+            recovered = controller.recover_uncertain_state()
+
+            self.assertTrue(recovered)
+            self.assertFalse(controller.sd_job_active)
+            self.assertFalse(controller.serial_uncertain)
+            self.assertTrue(controller.rehome_required)
+            self.assertFalse(controller_module._SD_JOB_STATE_FILE.exists())
+        finally:
+            controller_module._SD_JOB_STATE_FILE.unlink(missing_ok=True)
+
+    def test_uncertain_recovery_preserves_active_sd_job(self):
+        controller = connected_controller()
+        controller.serial_uncertain = True
+        controller.sd_job_active = True
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        controller._exchange_locked = lambda command, timeout: (
+            "SD printing byte 120/1000\nok"
+        )
+        controller_module._SD_JOB_STATE_FILE.write_text("{}")
+
+        try:
+            recovered = controller.recover_uncertain_state()
+
+            self.assertFalse(recovered)
+            self.assertTrue(controller.sd_job_active)
+            self.assertTrue(controller.serial_uncertain)
+            self.assertTrue(controller_module._SD_JOB_STATE_FILE.exists())
+        finally:
+            controller_module._SD_JOB_STATE_FILE.unlink(missing_ok=True)
+
     def test_pause_ack_loss_keeps_job_active_and_blocks_motion(self):
         controller = connected_controller()
         controller.sd_job_active = True
