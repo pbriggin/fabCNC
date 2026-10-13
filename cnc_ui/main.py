@@ -4032,22 +4032,35 @@ def main_page():
 
         def _show_connection_alert() -> None:
             connection_alert.style('background: #3a1414; border: 2px solid #e05252;')
-            connection_alert_icon.props('name=usb_off color=red-4')
-            connection_alert_title.set_text('Controller disconnected')
-            if cnc_controller.sd_job_disconnected:
+            if cnc_controller.connected and cnc_controller.serial_uncertain:
+                connection_alert_icon.props('name=warning color=orange-4')
+                connection_alert_title.set_text('Machine state uncertain')
+                connection_alert_subtitle.set_text('Recovery is required before homing or motion:')
+                connection_alert_steps.set_text(
+                    '1. Confirm the cutter is fully stopped.\n'
+                    '2. Click "Force Recovery" below.\n'
+                    '3. After recovery succeeds, run Home All.'
+                )
+                retry_connection_button.set_visibility(False)
+            elif cnc_controller.sd_job_disconnected:
+                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_title.set_text('Controller disconnected')
                 connection_alert_subtitle.set_text('The SD-card job may still be running:')
                 connection_alert_steps.set_text(
                     'Do not power-cycle the controller while the cutter may be moving.\n'
                     'Check the machine, restore the USB connection when safe, then verify the job state.'
                 )
+                retry_connection_button.set_visibility(True)
             else:
+                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_title.set_text('Controller disconnected')
                 connection_alert_subtitle.set_text('Follow these steps to reconnect:')
                 connection_alert_steps.set_text(
                     '1. Disengage E-Stop.\n'
                     '2. Power cycle the fabCNC control box (red switch).\n'
                     '3. Click "Retry Connection".'
                 )
-            retry_connection_button.set_visibility(True)
+                retry_connection_button.set_visibility(True)
             force_recovery_button.set_visibility(True)
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
@@ -4113,6 +4126,7 @@ def main_page():
                 (not cnc_controller.connected)
                 or current_status in ('Disconnected', 'Retrying connection...')
                 or cnc_controller.reset_required
+                or cnc_controller.serial_uncertain
                 or current_status == 'E-Stop Reset Required'
             )
             showing_connection_alert = False
