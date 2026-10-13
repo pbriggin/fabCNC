@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cnc_ui"))
 
 _real_comports = serial.tools.list_ports.comports
 serial.tools.list_ports.comports = lambda: []
+from cnc import controller as controller_module  # noqa: E402
 from cnc.controller import CNCController  # noqa: E402
 from cnc.state import machine_state  # noqa: E402
 serial.tools.list_ports.comports = _real_comports
@@ -66,6 +67,25 @@ class ControllerSafetyTests(unittest.TestCase):
 
         self.assertIn("not safely idle", response)
         self.assertEqual([], controller.serial_port.writes)
+
+    def test_invalid_jog_axis_cannot_reach_serial(self):
+        controller = connected_controller(auto_ok=True)
+
+        controller.jog("X G28", 10, 1000)
+
+        self.assertEqual([], controller.serial_port.writes)
+
+    def test_machine_state_snapshot_is_immutable_and_consistent(self):
+        machine_state.set_status("Paused", busy=True, paused=True)
+        machine_state.update_position(x=12.5, y=7.0)
+
+        snapshot = machine_state.snapshot()
+
+        self.assertEqual((12.5, 7.0), (snapshot.x, snapshot.y))
+        self.assertTrue(snapshot.busy)
+        self.assertTrue(snapshot.paused)
+        with self.assertRaises(Exception):
+            snapshot.busy = False
 
     def test_quiesce_requires_identifiable_boundary_not_stale_ok(self):
         controller = connected_controller(["ok"])
@@ -149,6 +169,99 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertTrue(controller.serial_uncertain)
         self.assertEqual(0, controller.ok_count)
         self.assertNotEqual("Complete", machine_state.status_text)
+
+    def test_estop_reset_requires_explicit_acknowledgement(self):
+        controller = connected_controller()
+        controller.reset_required = True
+
+        result = controller.reset_controller_after_estop()
+
+        self.assertFalse(result)
+        self.assertTrue(controller.reset_required)
+        self.assertEqual("No response", controller.last_controller_error)
+
+    def test_missing_sd_start_ack_preserves_recovery_marker(self):
+        controller = connected_controller()
+        controller._current_job_piece_count = 1
+        machine_state.set_job_loaded(True, "test.dxf")
+        responses = iter([
+            "ok",                 # M110
+            "ok",                 # M21
+            "ok",                 # M28
+            "ok",                 # numbered G-code line
+            "ok",                 # M29
+            "FABJOB.GCO\nok",    # M20
+            "ok",                 # M23
+            "",                   # M24 acknowledgement lost
+        ])
+        controller._read_response = lambda **kwargs: next(responses)
+
+        try:
+            uploaded, _, _ = controller._upload_gcode_to_sd(["G90"])
+
+            self.assertFalse(uploaded)
+            self.assertTrue(controller.sd_job_active)
+            self.assertTrue(controller.serial_uncertain)
+            self.assertTrue(controller_module._SD_JOB_STATE_FILE.exists())
+        finally:
+            controller_module._SD_JOB_STATE_FILE.unlink(missing_ok=True)
+
+    def test_reconnect_timeout_keeps_possible_sd_job_marker(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.sd_job_disconnected = True
+        controller.send_command_with_response = lambda *args, **kwargs: "No response"
+        controller_module._SD_JOB_STATE_FILE.write_text("{}")
+
+        try:
+            controller._reconcile_sd_job_after_reconnect()
+
+            self.assertTrue(controller.sd_job_active)
+            self.assertTrue(controller.sd_job_disconnected)
+            self.assertTrue(controller.serial_uncertain)
+            self.assertTrue(controller_module._SD_JOB_STATE_FILE.exists())
+            self.assertTrue(machine_state.busy)
+        finally:
+            controller_module._SD_JOB_STATE_FILE.unlink(missing_ok=True)
+
+    def test_pause_ack_loss_keeps_job_active_and_blocks_motion(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.send_command_with_response = lambda *args, **kwargs: "No response"
+        machine_state.set_status("Running", busy=True)
+
+        controller.pause_job()
+
+        self.assertTrue(controller.sd_job_active)
+        self.assertTrue(controller.serial_uncertain)
+        self.assertFalse(machine_state.snapshot().paused)
+        self.assertTrue(machine_state.snapshot().busy)
+
+    def test_resume_ack_loss_does_not_claim_running(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.send_command_with_response = lambda *args, **kwargs: "No response"
+        machine_state.set_status("Paused", busy=True, paused=True)
+
+        controller.resume_job()
+
+        self.assertTrue(controller.serial_uncertain)
+        self.assertNotEqual("Running", machine_state.snapshot().status_text)
+        self.assertTrue(machine_state.snapshot().busy)
+        self.assertTrue(controller.sd_job_active)
+
+    def test_stop_ack_loss_preserves_possible_sd_job(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller.send_command_with_response = lambda *args, **kwargs: "No response"
+        machine_state.set_status("Running", busy=True)
+
+        stopped = controller.stop_job()
+
+        self.assertFalse(stopped)
+        self.assertTrue(controller.sd_job_active)
+        self.assertTrue(controller.serial_uncertain)
+        self.assertTrue(machine_state.snapshot().busy)
 
 
 if __name__ == "__main__":

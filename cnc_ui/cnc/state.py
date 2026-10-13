@@ -9,6 +9,21 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+@dataclass(frozen=True)
+class MachineSnapshot:
+    x: float
+    y: float
+    z: float
+    a: float
+    busy: bool
+    paused: bool
+    job_loaded: bool
+    job_progress: float
+    status_text: str
+    toolpath_generated: bool
+    loaded_filename: Optional[str]
+
+
 @dataclass
 class MachineState:
     """
@@ -80,6 +95,23 @@ class MachineState:
         """Get current position (thread-safe)."""
         with self._lock:
             return (self.x, self.y, self.z, self.a)
+
+    def snapshot(self) -> MachineSnapshot:
+        """Return one internally consistent immutable view of machine state."""
+        with self._lock:
+            return MachineSnapshot(
+                x=self.x,
+                y=self.y,
+                z=self.z,
+                a=self.a,
+                busy=self.busy,
+                paused=self.paused,
+                job_loaded=self.job_loaded,
+                job_progress=self.job_progress,
+                status_text=self.status_text,
+                toolpath_generated=self.toolpath_generated,
+                loaded_filename=self.loaded_filename,
+            )
     
     def is_idle(self) -> bool:
         """Check if machine is idle and ready for new commands (thread-safe)."""

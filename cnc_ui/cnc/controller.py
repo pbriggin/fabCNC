@@ -5,6 +5,7 @@ This implementation communicates with Marlin firmware via serial.
 """
 
 import json
+import math
 import re
 import time
 import threading
@@ -161,6 +162,7 @@ class CNCController:
         self.homed = False              # True only after a successful home_all()
         self._current_job_gcode: list = []  # Copy of last started job's gcode
         self._current_job_piece_count = 0
+        self._current_source_filename: Optional[str] = None
         self.current_job_id = ""
         if _SD_JOB_STATE_FILE.exists():
             # A prior process may have exited while the controller continued
@@ -439,15 +441,7 @@ class CNCController:
             return False
 
         response = self.send_command_with_response("M999", timeout=5.0)
-        normalized = response.strip().lower()
-        failed = (
-            not normalized
-            or "error: not connected" in normalized
-            or "printer halted" in normalized
-            or "stopped due to errors" in normalized
-            or "kill() called" in normalized
-        )
-        if failed:
+        if not _sd_response_ok(response):
             self.last_controller_error = response.strip() or "No response from M999"
             log_controller_event(
                 "controller_reset_failed",
@@ -590,7 +584,7 @@ class CNCController:
         safe_idx = self._find_safe_resume_index(self._current_job_gcode, last_acked)
         pct = last_acked / len(self._current_job_gcode) * 100
         state = {
-            'filename': machine_state.loaded_filename,
+            'filename': machine_state.snapshot().loaded_filename,
             'safe_resume_index': safe_idx,
             'last_acked_index': last_acked,
             'total_commands': len(self._current_job_gcode),
@@ -605,7 +599,7 @@ class CNCController:
             )
             log_controller_event(
                 "resume_state_saved",
-                filename=machine_state.loaded_filename,
+                filename=machine_state.snapshot().loaded_filename,
                 safe_resume_index=safe_idx,
                 last_acked_index=last_acked,
                 total_commands=len(self._current_job_gcode),
@@ -1106,6 +1100,22 @@ class CNCController:
             distance: Distance to jog in mm (or degrees for A)
             feed_rate: Feed rate in mm/min (or deg/min for A)
         """
+        axis = str(axis).upper()
+        if axis not in {"X", "Y", "Z", "A"}:
+            logger.warning("Rejected jog for invalid axis %r", axis)
+            return
+        numeric = (int, float)
+        if (
+            isinstance(distance, bool)
+            or isinstance(feed_rate, bool)
+            or not isinstance(distance, numeric)
+            or not isinstance(feed_rate, numeric)
+            or not math.isfinite(distance)
+            or not math.isfinite(feed_rate)
+            or feed_rate <= 0
+        ):
+            logger.warning("Rejected jog with invalid distance/feed: %r/%r", distance, feed_rate)
+            return
         with self.operation_lock:
             if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
                     or self.rehome_required):
@@ -1182,6 +1192,10 @@ class CNCController:
         Args:
             axis: Axis to home ('X', 'Y', 'Z', or 'A')
         """
+        axis = str(axis).upper()
+        if axis not in {"X", "Y", "Z", "A"}:
+            logger.warning("Rejected home for invalid axis %r", axis)
+            return
         with self.operation_lock:
             if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
                 return
@@ -1248,12 +1262,22 @@ class CNCController:
             )
             self.job_thread.start()
 
-    def start_job(self, gcode_lines: list[str], piece_count: int = 0) -> None:
+    def start_job(
+        self,
+        gcode_lines: list[str],
+        piece_count: int = 0,
+        source_filename: Optional[str] = None,
+    ) -> None:
         """Atomically reserve the machine and start an SD-card job."""
         with self.operation_lock:
-            self._start_job_locked(gcode_lines, piece_count)
+            self._start_job_locked(gcode_lines, piece_count, source_filename)
 
-    def _start_job_locked(self, gcode_lines: list[str], piece_count: int = 0) -> None:
+    def _start_job_locked(
+        self,
+        gcode_lines: list[str],
+        piece_count: int = 0,
+        source_filename: Optional[str] = None,
+    ) -> None:
         """
         Upload a G-code job to the controller SD card and run it from there.
         
@@ -1261,12 +1285,13 @@ class CNCController:
             gcode_lines: List of G-code commands to execute
             piece_count: Number of pieces this job is expected to cut.
         """
-        if (not machine_state.is_idle() or not machine_state.job_loaded or not self.connected
+        state = machine_state.snapshot()
+        if (not machine_state.is_idle() or not gcode_lines or not self.connected
                 or self.serial_uncertain or self.rehome_required):
             log_controller_event(
                 "job_start_rejected",
                 idle=machine_state.is_idle(),
-                job_loaded=machine_state.job_loaded,
+                has_gcode=bool(gcode_lines),
                 connected=self.connected,
             )
             return
@@ -1275,6 +1300,7 @@ class CNCController:
         self.pause_requested = False
         self._current_job_gcode = list(gcode_lines)
         self._current_job_piece_count = max(0, int(piece_count or 0))
+        self._current_source_filename = source_filename or state.loaded_filename
         self.current_job_id = uuid.uuid4().hex
         self.sd_job_active = False
         self.sd_job_disconnected = False
@@ -1284,7 +1310,7 @@ class CNCController:
         log_controller_event(
             "job_start",
             command_count=len(gcode_lines),
-            filename=machine_state.loaded_filename,
+            filename=self._current_source_filename,
             piece_count=self._current_job_piece_count,
             job_id=self.current_job_id,
         )
@@ -1320,7 +1346,7 @@ class CNCController:
     
     def resume_job(self) -> None:
         """Resume a paused SD print or host-streamed utility sequence."""
-        if machine_state.paused:
+        if machine_state.snapshot().paused:
             if self.sd_job_active:
                 response = self.send_command_with_response("M24", timeout=8.0)
                 if not _sd_response_ok(response):
@@ -1463,26 +1489,13 @@ class CNCController:
         cmd = " ".join(parts)
 
         response = self.send_command_with_response(cmd, timeout=8.0)
-        normalized = response.strip().lower()
-        failed = (
-            not normalized
-            or "error" in normalized
-            or "unknown command" in normalized
-            or "not connected" in normalized
-        )
-        if failed:
+        if not _sd_response_ok(response):
             return False, response or "No response"
 
         if persist_to_eeprom:
             save_resp = self.send_command_with_response("M500", timeout=10.0)
-            save_norm = save_resp.strip().lower()
-            save_failed = (
-                not save_norm
-                or "error" in save_norm
-                or "not connected" in save_norm
-            )
             combined = f"{response}\n{save_resp}".strip()
-            if save_failed:
+            if not _sd_response_ok(save_resp):
                 return False, combined
             return True, combined
 
@@ -1656,7 +1669,7 @@ class CNCController:
 
                 sd_state = {
                     "filename": _SD_FILENAME,
-                    "source_filename": machine_state.loaded_filename,
+                    "source_filename": self._current_source_filename,
                     "piece_count": self._current_job_piece_count,
                     "total_bytes": total_bytes,
                     "started_at": time.time(),
@@ -1673,9 +1686,15 @@ class CNCController:
                 self.sd_job_active = True
                 response = exchange("M24")
                 if not _sd_response_ok(response):
-                    if self.connected:
-                        self.sd_job_active = False
-                        _SD_JOB_STATE_FILE.unlink(missing_ok=True)
+                    # Delivery is ambiguous after the write: Marlin may have
+                    # started autonomous SD playback even when its `ok` was
+                    # lost. Preserve the recovery marker and block all further
+                    # motion until the operator verifies the machine.
+                    self._mark_serial_uncertain(
+                        "SD start acknowledgement missing",
+                        response,
+                        stop_motion=False,
+                    )
                     return False, 0, f"Could not start SD print: {response or 'No response'}"
                 return True, total_bytes, ""
             except Exception as exc:
@@ -1717,6 +1736,17 @@ class CNCController:
         finally:
             self.sd_uploading = False
         if not uploaded:
+            if self.sd_job_active and _SD_JOB_STATE_FILE.exists():
+                machine_state.set_status(
+                    "SD start uncertain — use physical E-stop and verify machine",
+                    busy=True,
+                )
+                log_controller_event(
+                    "sd_start_uncertain",
+                    filename=_SD_FILENAME,
+                    error=error,
+                )
+                return
             if not self.connected:
                 machine_state.set_status("Disconnected", busy=False)
                 if self.sd_job_disconnected:
@@ -1868,9 +1898,24 @@ class CNCController:
             logger.warning(f"Could not remove saved SD job state: {exc}")
 
     def _reconcile_sd_job_after_reconnect(self) -> None:
-        response = self.send_command_with_response("M27", timeout=5.0)
-        progress = _parse_sd_progress(response)
-        if not progress:
+        responses: list[str] = []
+        progress = None
+        explicitly_idle = False
+        for _ in range(3):
+            response = self.send_command_with_response("M27", timeout=5.0)
+            responses.append(response)
+            progress = _parse_sd_progress(response)
+            if progress:
+                break
+            if "not sd printing" in response.lower():
+                explicitly_idle = True
+                break
+            if not self.connected:
+                return
+            time.sleep(0.25)
+
+        response_summary = "\n".join(responses)
+        if not progress and explicitly_idle:
             self._clear_sd_job_state()
             machine_state.set_status(
                 "SD job ended while disconnected — verify machine",
@@ -1879,7 +1924,24 @@ class CNCController:
             log_controller_event(
                 "sd_job_reconnect_requires_verification",
                 filename=_SD_FILENAME,
-                response=response[:300],
+                response=response_summary[:500],
+            )
+            return
+        if not progress:
+            # A timeout, malformed reply, or unrelated response is not proof
+            # that autonomous playback stopped. Keep the on-disk marker so a
+            # later recovery attempt can reconcile it safely.
+            self.serial_uncertain = True
+            self.homed = False
+            self.rehome_required = True
+            machine_state.set_status(
+                "SD job status uncertain — use physical E-stop and verify machine",
+                busy=True,
+            )
+            log_controller_event(
+                "sd_job_reconnect_status_uncertain",
+                filename=_SD_FILENAME,
+                response=response_summary[:500],
             )
             return
 

@@ -22,6 +22,7 @@ from logging_setup import (
     load_config as load_logging_config,
 )
 import log_uploader
+from auth import set_password, verify_password, verify_recovery_code
 
 setup_logging()
 
@@ -46,15 +47,102 @@ import math
 import json
 import asyncio
 import hashlib
+import hmac
 import io
 import zipfile
 import re
 import fcntl
 import termios
 import struct
+import secrets
+import time
+from collections import defaultdict, deque
+from collections.abc import MutableMapping
+from copy import deepcopy
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+_APP_PASSWORD = os.environ.get('FABCNC_APP_PASSWORD', '2026')
+_STORAGE_SECRET = os.environ.get('FABCNC_STORAGE_SECRET') or secrets.token_urlsafe(32)
+_BOOT_TOKEN = secrets.token_hex(16)
+_RECOVERY_FAILURES = defaultdict(deque)
+_RECOVERY_LIMIT = 5
+_RECOVERY_WINDOW_SECONDS = 15 * 60
+
+
+def _recovery_client_key() -> str:
+    request = ui.context.client.request
+    return request.client.host if request.client else "unknown"
+
+
+def _recovery_rate_limited(client_key: str) -> bool:
+    now = time.monotonic()
+    failures = _RECOVERY_FAILURES[client_key]
+    while failures and now - failures[0] >= _RECOVERY_WINDOW_SECONDS:
+        failures.popleft()
+    return len(failures) >= _RECOVERY_LIMIT
+
+
+def _request_authenticated(request: Request) -> bool:
+    """Validate an HTTP route against the same signed session as the UI."""
+    session_id = request.session.get('id')
+    if not session_id:
+        return False
+    user_storage = app.storage._users.get(session_id)  # NiceGUI session middleware owns this mapping.
+    return bool(
+        user_storage
+        and user_storage.get('authenticated')
+        and hmac.compare_digest(str(user_storage.get('boot_token', '')), _BOOT_TOKEN)
+    )
+
+
+def _unauthorized() -> JSONResponse:
+    return JSONResponse({'error': 'Authentication required'}, status_code=401)
+
+
+class _ClientDict(MutableMapping):
+    """Dict-compatible view backed by the authenticated user's server storage."""
+
+    def __init__(self, key: str, defaults: dict | None = None):
+        self.key = key
+        self.defaults = defaults or {}
+
+    def _data(self) -> dict:
+        storage = app.storage.user
+        if self.key not in storage:
+            storage[self.key] = deepcopy(self.defaults)
+        return storage[self.key]
+
+    def __getitem__(self, key):
+        return self._data()[key]
+
+    def __setitem__(self, key, value):
+        data = dict(self._data())
+        data[key] = value
+        app.storage.user[self.key] = data
+
+    def __delitem__(self, key):
+        data = dict(self._data())
+        del data[key]
+        app.storage.user[self.key] = data
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __len__(self):
+        return len(self._data())
+
+    def clear(self):
+        app.storage.user[self.key] = {}
+
+    def copy(self):
+        return deepcopy(dict(self._data()))
+
+    def update(self, *args, **kwargs):
+        data = dict(self._data())
+        data.update(*args, **kwargs)
+        app.storage.user[self.key] = data
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
@@ -161,6 +249,8 @@ async def client_log(request: Request):
     calls were lost) and reloads the page. The JS posts whatever it has in
     localStorage on every page load.
     """
+    if not _request_authenticated(request):
+        return _unauthorized()
     try:
         payload = await request.json()
         events = payload.get('events') or []
@@ -181,8 +271,10 @@ async def client_log(request: Request):
 
 
 @app.get('/debug-bundle')
-def debug_bundle():
+def debug_bundle(request: Request):
     """Generate and stream a zip of all uploads, canvas saves, recent gcode AND structured logs."""
+    if not _request_authenticated(request):
+        return _unauthorized()
     upload_dir = file_manager.upload_dir
     gcode_dir = upload_dir / 'gcode_output'
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -215,8 +307,10 @@ def debug_bundle():
 
 
 @app.get('/canvas/download/{filename}')
-def canvas_download(filename: str):
+def canvas_download(filename: str, request: Request):
     """Download a saved canvas JSON file to the browser."""
+    if not _request_authenticated(request):
+        return _unauthorized()
     # Prevent path traversal — only allow plain filenames with .json extension
     safe_name = Path(filename).name
     if not safe_name.endswith('.json') or safe_name != filename or '..' in filename:
@@ -233,15 +327,19 @@ def canvas_download(filename: str):
 
 
 @app.post('/logs/upload-now')
-def logs_upload_now(full: bool = False):
+def logs_upload_now(request: Request, full: bool = False):
     """Trigger an immediate remote log upload using the configured webhook."""
+    if not _request_authenticated(request):
+        return _unauthorized()
     result = log_uploader.upload_now(full=full, trigger="manual")
     return JSONResponse(result, status_code=200 if result.get('ok') else 500)
 
 
 @app.get('/logs/status')
-def logs_status():
+def logs_status(request: Request):
     """Inspect the current logging configuration + last upload state."""
+    if not _request_authenticated(request):
+        return _unauthorized()
     cfg = load_logging_config()
     log_dir = get_log_dir()
     files = []
@@ -277,25 +375,21 @@ def get_local_ip():
 
 
 # Jog parameters (user-adjustable)
-jog_params = {
+jog_params = _ClientDict('jog_params', {
     'xy_step': 10.0,  # mm
     'z_step': 1.0,    # mm
     'a_step': 45.0,   # degrees
     'feed_rate': 4000.0,  # mm/min
-}
+})
 
 # Z cut height parameter (used by toolpath generator)
-z_cut_height = {'value': -35.0}  # Default Z cutting height in mm (Medium pressure)
+z_cut_height = _ClientDict('z_cut_height', {'value': -35.0})
 
 # Cut settings state — persisted with canvas saves
 PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
 SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
-cut_settings = {'pressure': 'Medium', 'speed': 'Medium'}
-home_before_toolpath = {'enabled': True}  # Home all axes before toolpath (OFF = Z and A only)
-# Weak references to the select widgets so load can update them
-_pressure_select_ref = {'el': None}
-_speed_select_ref    = {'el': None}
-
+cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medium'})
+home_before_toolpath = _ClientDict('home_before_toolpath', {'enabled': True})
 def apply_cut_pressure(name: str) -> None:
     """Apply a named pressure setting and record it in cut_settings."""
     z_cut_height.update({'value': PRESSURE_MAP[name]})
@@ -304,9 +398,6 @@ def apply_cut_pressure(name: str) -> None:
 def apply_cut_speed(name: str) -> None:
     """Apply a named speed setting and record it in cut_settings."""
     feed, rapid = SPEED_MAP[name]
-    toolpath_generator.feed_rate = feed
-    toolpath_generator.rapid_rate = rapid
-    toolpath_generator.stealthchop = name in ('Slow', 'Medium')
     cut_settings['speed'] = name
 
 # DXF processing and toolpath generation
@@ -325,16 +416,22 @@ toolpath_generator = ToolpathGenerator(
 # Global storage for current toolpath visualization data.
 # These survive a browser refresh / Socket.IO reconnect — the JS canvas
 # is rebuilt from these dicts in init_canvas_after_load().
-current_toolpath_shapes = {}   # name -> [(x, y), ...]
-current_toolpath_breaks = {}   # name -> [segment break indices]  (per-entity DXF spans)
-current_toolpath_types = {}    # name -> [DXF entity type per segment] ('SPLINE'/'LINE'/'ARC'/...)
-current_toolpath_notches = {}  # name -> [{edgeIdx, x, y}, ...]   (active notch nodeKeys)
+current_toolpath_shapes = _ClientDict('toolpath_shapes')
+current_toolpath_breaks = _ClientDict('toolpath_breaks')
+current_toolpath_types = _ClientDict('toolpath_types')
+current_toolpath_notches = _ClientDict('toolpath_notches')
+client_job_state = _ClientDict(
+    'client_job_state',
+    {'toolpath_generated': False, 'loaded_filename': None},
+)
 toolpath_canvas = None  # Reference to the canvas element
 
 # API endpoint for jog control from JavaScript
 @app.post('/jog')
 async def jog_endpoint(request: Request):
     """Handle jog requests."""
+    if not _request_authenticated(request):
+        return _unauthorized()
     details = _cloudflare_request_details(request.headers)
     if details['via_cloudflare']:
         log_event(
@@ -346,9 +443,20 @@ async def jog_endpoint(request: Request):
             {'status': 'error', 'message': 'CNC controls are disabled for remote sessions.'},
             status_code=403,
         )
-    data = await request.json()
-    axis = data['axis']
-    direction = data['direction']
+    try:
+        data = await request.json()
+        axis = str(data['axis']).upper()
+        direction = data['direction']
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse(
+            {'status': 'error', 'message': 'Malformed jog request'},
+            status_code=400,
+        )
+    if isinstance(direction, bool) or not isinstance(direction, (int, float)) or direction not in (-1, 1):
+        return JSONResponse(
+            {'status': 'error', 'message': 'Direction must be -1 or 1'},
+            status_code=400,
+        )
     
     if axis == 'X' or axis == 'Y':
         distance = jog_params['xy_step'] * direction
@@ -365,12 +473,14 @@ async def jog_endpoint(request: Request):
     return {'status': 'ok'}
 
 # Stores the latest toolpath visualization data for /toolpath-preview
-_pending_viz_data = {}
+_pending_viz_data = _ClientDict('pending_viz_data')
 
 @app.get('/toolpath-preview')
-def toolpath_preview():
+def toolpath_preview(request: Request):
     """Serve latest toolpath visualization data as JSON (avoids embedding in WebSocket message)."""
-    return JSONResponse(_pending_viz_data)
+    if not _request_authenticated(request):
+        return _unauthorized()
+    return JSONResponse(dict(_pending_viz_data))
 
 # API endpoint for Packaide nesting
 @app.post('/nest')
@@ -384,6 +494,8 @@ async def nest_endpoint(request: Request):
     - offset: number (mm) - spacing between shapes
     - rotations: number - how many rotations to try (1=no rotation, 4=90° increments)
     """
+    if not _request_authenticated(request):
+        return _unauthorized()
     import asyncio
     import concurrent.futures
     import time
@@ -1106,14 +1218,14 @@ def create_job_controls():
                 value=cut_settings['pressure'],
                 on_change=lambda e: apply_cut_pressure(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
-            _pressure_select_ref['el'] = _pressure_select
+            ui.context.client.storage['pressure_select'] = _pressure_select
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
             _speed_select = ui.select(
                 options=list(SPEED_MAP.keys()),
                 value=cut_settings['speed'],
                 on_change=lambda e: apply_cut_speed(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;')
-            _speed_select_ref['el'] = _speed_select
+            ui.context.client.storage['speed_select'] = _speed_select
         apply_cut_pressure(cut_settings['pressure'])
         apply_cut_speed(cut_settings['speed'])
         
@@ -1142,7 +1254,7 @@ def create_job_controls():
             .classes('w-full motion-action') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
-                             backward=lambda _: machine_state.toolpath_generated and machine_state.is_idle())
+                             backward=lambda _: machine_state.is_idle())
         
         with ui.row().classes('w-full gap-1'):
             ui.button('Pause', icon='pause', on_click=pause_job) \
@@ -1333,12 +1445,6 @@ async def change_cutting_wheel():
 
 def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None, entity_types: dict = None):
     """Add shapes to canvas without clearing existing ones."""
-    global toolpath_canvas
-    
-    if toolpath_canvas is None:
-        logger.warning("toolpath_canvas is None, cannot add shapes")
-        return
-    
     if shapes:
         for i, (shape_name, points) in enumerate(shapes.items()):
             if points:
@@ -1359,12 +1465,6 @@ def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict 
 
 def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
     """Update the toolpath visualization with new shapes using Fabric.js canvas."""
-    global toolpath_canvas, current_toolpath_shapes
-    
-    if toolpath_canvas is None:
-        logger.warning("toolpath_canvas is None, cannot update")
-        return
-    
     logger.info(f"Updating toolpath canvas with {len(shapes) if shapes else 0} shapes (clear={clear_existing})")
     
     if clear_existing:
@@ -1456,6 +1556,8 @@ async def handle_file_upload(event):
         # Update state - clear any generated toolpath since shapes changed
         machine_state.set_job_loaded(True, filename)
         machine_state.set_toolpath_generated(False)
+        client_job_state['loaded_filename'] = filename
+        client_job_state['toolpath_generated'] = False
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
         log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(shapes),
@@ -1647,10 +1749,10 @@ async def load_canvas_state():
                             f'window.toolpathCanvas.loadCanvasState({repr(canvas_json)})', timeout=15.0
                         )
                         state = json.loads(canvas_json)
-                        current_toolpath_shapes = {}
-                        current_toolpath_breaks = {}
-                        current_toolpath_types = {}
-                        current_toolpath_notches = {}
+                        current_toolpath_shapes.clear()
+                        current_toolpath_breaks.clear()
+                        current_toolpath_types.clear()
+                        current_toolpath_notches.clear()
                         for name, shape_data in state.get('shapes', {}).items():
                             current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
                             current_toolpath_breaks[name] = list(shape_data.get('segmentBreaks', [0]) or [0])
@@ -1661,14 +1763,18 @@ async def load_canvas_state():
                         saved_cut = state.get('cut_settings', {})
                         if saved_cut.get('pressure') in PRESSURE_MAP:
                             apply_cut_pressure(saved_cut['pressure'])
-                            if _pressure_select_ref['el']:
-                                _pressure_select_ref['el'].set_value(saved_cut['pressure'])
+                            pressure_select = ui.context.client.storage.get('pressure_select')
+                            if pressure_select:
+                                pressure_select.set_value(saved_cut['pressure'])
                         if saved_cut.get('speed') in SPEED_MAP:
                             apply_cut_speed(saved_cut['speed'])
-                            if _speed_select_ref['el']:
-                                _speed_select_ref['el'].set_value(saved_cut['speed'])
+                            speed_select = ui.context.client.storage.get('speed_select')
+                            if speed_select:
+                                speed_select.set_value(saved_cut['speed'])
                         machine_state.set_job_loaded(True, os.path.basename(fp))
                         machine_state.set_toolpath_generated(False)
+                        client_job_state['loaded_filename'] = os.path.basename(fp)
+                        client_job_state['toolpath_generated'] = False
                         ui.notify(f'Canvas loaded: {os.path.basename(fp)}', type='positive')
                         log_event('canvas', 'canvas_loaded', filename=os.path.basename(fp),
                                   shape_count=len(current_toolpath_shapes),
@@ -1711,13 +1817,15 @@ def clear_canvas():
     global current_toolpath_shapes, current_toolpath_breaks, current_toolpath_types, current_toolpath_notches
     log_event('canvas', 'canvas_cleared', shape_count=len(current_toolpath_shapes),
               shape_names=list(current_toolpath_shapes.keys()))
-    current_toolpath_shapes = {}
-    current_toolpath_breaks = {}
-    current_toolpath_types = {}
-    current_toolpath_notches = {}
+    current_toolpath_shapes.clear()
+    current_toolpath_breaks.clear()
+    current_toolpath_types.clear()
+    current_toolpath_notches.clear()
     ui.run_javascript('window.toolpathCanvas.clearShapes()')
     machine_state.set_job_loaded(False)
     machine_state.set_toolpath_generated(False)
+    client_job_state['loaded_filename'] = None
+    client_job_state['toolpath_generated'] = False
     ui.notify('Canvas cleared', type='info')
 
 
@@ -1725,16 +1833,17 @@ async def toggle_toolpath(button):
     """Toggle between Generate Toolpath and Clear Toolpath modes."""
     global current_gcode
     
-    if machine_state.toolpath_generated:
+    if client_job_state['toolpath_generated']:
         # Clear toolpath mode
         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
         machine_state.set_toolpath_generated(False)
+        client_job_state['toolpath_generated'] = False
         button.props('icon=route')
         button.set_text('Generate Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
         current_gcode = []
         try:
-            app.storage.client.pop('generated_job', None)
+            app.storage.user.pop('generated_job', None)
         except Exception:
             pass
         log_event('toolpath', 'toolpath_cleared')
@@ -1792,18 +1901,19 @@ async def toggle_toolpath(button):
         # Snapshot every setting into a per-request generator. The shared UI can
         # serve multiple browsers, so a mutable global generator would allow one
         # client's settings/current-A state to alter another client's G-code.
+        selected_feed, selected_rapid = SPEED_MAP[cut_settings['speed']]
         generator = ToolpathGenerator(
             cutting_height=z_cut_height['value'],
             safe_height=toolpath_generator.safe_height,
             corner_angle_threshold=math.degrees(toolpath_generator.corner_angle_threshold_radians),
-            feed_rate=toolpath_generator.feed_rate,
+            feed_rate=selected_feed,
             plunge_rate=toolpath_generator.plunge_rate,
-            rapid_rate=toolpath_generator.rapid_rate,
+            rapid_rate=selected_rapid,
             min_curve_feed_rate=toolpath_generator.min_curve_feed_rate,
             curve_slowdown_radius=toolpath_generator.curve_slowdown_radius,
         )
         generator.home_all = home_before_toolpath['enabled']
-        generator.stealthchop = toolpath_generator.stealthchop
+        generator.stealthchop = cut_settings['speed'] in ('Slow', 'Medium')
         
         # Fetch notch data from canvas (in mm coords, geometry pre-computed)
         notches = {}
@@ -1834,10 +1944,11 @@ async def toggle_toolpath(button):
             )
         current_gcode = gcode_str.split('\n')
         gcode_digest = hashlib.sha256(gcode_str.encode('utf-8')).hexdigest()
-        app.storage.client['generated_job'] = {
+        app.storage.user['generated_job'] = {
             'gcode': list(current_gcode),
             'sha256': gcode_digest,
             'piece_count': len(shapes_snapshot),
+            'source_filename': client_job_state['loaded_filename'],
         }
 
         # Store viz data server-side; JS fetches it via GET /toolpath-preview so we
@@ -1876,6 +1987,7 @@ async def toggle_toolpath(button):
                           for seg in shape['segments'] if seg.get('isCorner'))
         
         machine_state.set_toolpath_generated(True)
+        client_job_state['toolpath_generated'] = True
         button.props('icon=close')
         button.set_text('Clear Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
@@ -1979,7 +2091,10 @@ async def outline_job():
         if positions_json:
             positions = json.loads(positions_json)
             if positions:
-                current_toolpath_shapes = {name: [tuple(p) for p in pts] for name, pts in positions.items()}
+                current_toolpath_shapes.clear()
+                current_toolpath_shapes.update(
+                    {name: [tuple(p) for p in pts] for name, pts in positions.items()}
+                )
     except Exception as e:
         logger.warning(f'Could not fetch canvas positions for outline: {e}')
 
@@ -1995,7 +2110,7 @@ async def outline_job():
 
     trace_z = -15.0  # Fixed trace height for outline (never cuts material)
     safe_z = toolpath_generator.safe_height
-    rapid = toolpath_generator.rapid_rate
+    _, rapid = SPEED_MAP[cut_settings['speed']]
     plunge = toolpath_generator.plunge_rate
 
     outline_gcode = [
@@ -2026,11 +2141,7 @@ async def start_job():
     if not _require_controller_connected():
         return
 
-    if not machine_state.toolpath_generated:
-        ui.notify('Please generate toolpath first', type='warning')
-        return
-    
-    generated_job = app.storage.client.get('generated_job')
+    generated_job = app.storage.user.get('generated_job')
     job_gcode = list(generated_job.get('gcode', [])) if generated_job else []
     if not job_gcode:
         ui.notify('No toolpath generated', type='warning')
@@ -2055,7 +2166,11 @@ async def start_job():
               gcode_sha256=generated_job.get('sha256'))
     
     # Start job without callback - we'll monitor completion via state
-    cnc_controller.start_job(job_gcode, piece_count=int(generated_job.get('piece_count', 0)))
+    cnc_controller.start_job(
+        job_gcode,
+        piece_count=int(generated_job.get('piece_count', 0)),
+        source_filename=generated_job.get('source_filename'),
+    )
 
 
 def pause_job():
@@ -2151,27 +2266,25 @@ def force_controller_recovery():
     ui.notify('Trying one USB reset, then reconnecting…', type='warning', timeout=6000)
 
 
-# Track previous status for change detection
-_previous_status = {'text': None}
-
 async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None):
     """Update UI with current machine state (called periodically)."""
-    # Update position display
-    x, y, z, a = machine_state.get_position()
+    state = machine_state.snapshot()
+    x, y, z, a = state.x, state.y, state.z, state.a
+    previous_status = ui.context.client.storage.get('previous_machine_status')
     pos_labels['X'].set_text(f'{x:.2f} mm')
     pos_labels['Y'].set_text(f'{y:.2f} mm')
     pos_labels['Z'].set_text(f'{z:.2f} mm')
     pos_labels['A'].set_text(f'{a:.2f} °')
     
     # Update toolhead position on canvas only while machine is running (avoid blocking JS thread when idle)
-    if machine_state.busy:
+    if state.busy:
         try:
             await ui.run_javascript(f'if(window.toolpathCanvas) window.toolpathCanvas.updateToolhead({x}, {y})', timeout=0.5)
         except Exception:
             pass
     
     # Update status
-    current_status = machine_state.status_text
+    current_status = state.status_text
     display_status = current_status
     sd_verification_status = 'SD job ended while disconnected — verify machine'
     if current_status == sd_verification_status:
@@ -2185,7 +2298,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     ):
         display_status = 'Disconnected'
     status_label.set_text(display_status)
-    if _previous_status['text'] != current_status:
+    if previous_status != current_status:
         status_label.tooltip(current_status if display_status != current_status else '')
 
     # Update status pill appearance
@@ -2198,7 +2311,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
             status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
             status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
-        elif machine_state.busy:
+        elif state.busy:
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
             status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
             status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5 text-orange-4')
@@ -2209,20 +2322,12 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
 
     # Detect status changes and show notifications (Complete/Error only — 
     # disconnect/reconnect handled per-page in _update_ui_timer)
-    if _previous_status['text'] != current_status:
+    if previous_status != current_status:
         if current_status == 'Complete':
             ui.notify('Job completed successfully!', type='positive')
         elif current_status == 'Error':
             ui.notify('Job error!', type='negative')
-        _previous_status['text'] = current_status
-
-
-_APP_PASSWORD = '2026'
-
-# Generated once per process — all browser sessions authenticated before this
-# boot are considered invalid when the server restarts.
-import secrets as _secrets
-_BOOT_TOKEN = _secrets.token_hex(16)
+        ui.context.client.storage['previous_machine_status'] = current_status
 
 
 @ui.page('/login')
@@ -2236,7 +2341,7 @@ def login_page():
     ''')
 
     async def try_login():
-        if password_input.value == _APP_PASSWORD:
+        if verify_password(password_input.value or '', _APP_PASSWORD):
             app.storage.user['authenticated'] = True
             app.storage.user['boot_token'] = _BOOT_TOKEN
             ui.navigate.to('/')
@@ -2244,6 +2349,55 @@ def login_page():
             ui.notify('Incorrect password', type='negative')
             password_input.value = ''
             password_input.run_method('focus')
+
+    async def forgot_password():
+        with ui.dialog() as recovery_dialog, ui.card().classes('w-96'):
+            ui.label('Recover UI Password').classes('text-h6 font-bold')
+            ui.label(
+                'Enter the recovery code shipped with this machine. '
+                'The password will be restored to 2026.'
+            ).classes('text-body2 text-grey-5')
+            recovery_input = ui.input('Machine recovery code').props(
+                'outlined dense autocomplete=off'
+            ).classes('w-full')
+
+            async def recover():
+                global _BOOT_TOKEN
+                client_key = _recovery_client_key()
+                if _recovery_rate_limited(client_key):
+                    ui.notify('Too many attempts. Try again in 15 minutes.', type='negative')
+                    return
+                supplied_code = recovery_input.value or ''
+                valid = await asyncio.get_event_loop().run_in_executor(
+                    None, verify_recovery_code, supplied_code,
+                )
+                if not valid:
+                    _RECOVERY_FAILURES[client_key].append(time.monotonic())
+                    log_event('security', 'ui_password_recovery_failed', client=client_key)
+                    recovery_input.value = ''
+                    ui.notify('Invalid recovery code.', type='negative')
+                    return
+                try:
+                    await asyncio.get_event_loop().run_in_executor(None, set_password, '2026')
+                except (OSError, ValueError):
+                    logger.exception('Could not persist recovered UI password')
+                    ui.notify('Could not reset the password. Contact service support.', type='negative')
+                    return
+                _RECOVERY_FAILURES.pop(client_key, None)
+                _BOOT_TOKEN = secrets.token_hex(16)
+                app.storage.user['authenticated'] = False
+                app.storage.user['boot_token'] = ''
+                log_event('security', 'ui_password_recovered', client=client_key)
+                recovery_dialog.close()
+                password_input.value = ''
+                ui.notify('Password reset to 2026. Sign in and choose a new password.', type='positive', timeout=8000)
+
+            with ui.row().classes('w-full justify-end gap-2'):
+                ui.button('Cancel', on_click=recovery_dialog.close).props('flat')
+                ui.button('Reset Password', on_click=recover, icon='lock_reset').props('color=primary')
+
+        recovery_dialog.open()
+        await recovery_dialog
 
     with ui.column().classes('items-center justify-center').style('height: 100vh; width: 100%;'):
         with ui.card().style('min-width: 320px; padding: 2rem; background: #1e1e1e; border-radius: 12px;'):
@@ -2258,6 +2412,8 @@ def login_page():
             password_input.on('keydown.enter', try_login)
             ui.button('Unlock', on_click=try_login) \
                 .props('color=primary').style('width: 100%;')
+            ui.button('Forgot password?', on_click=forgot_password) \
+                .props('flat color=grey-5 no-caps').style('width: 100%; margin-top: 0.5rem;')
 
 
 @ui.page('/')
@@ -3138,7 +3294,7 @@ def main_page():
                                         )
                                     except Exception as exc:
                                         logger.warning(f'Could not restore notches from localStorage: {exc}')
-                                    if machine_state.toolpath_generated:
+                                    if client_job_state['toolpath_generated']:
                                         await asyncio.sleep(0.2)
                                         try:
                                             await ui.run_javascript(
@@ -3212,8 +3368,9 @@ def main_page():
                                     logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
                                     log_event('canvas', 'shape_deleted', shape=shape_name)
                                     # Clear toolpath if it was generated since shapes changed
-                                    if machine_state.toolpath_generated:
+                                    if client_job_state['toolpath_generated']:
                                         machine_state.set_toolpath_generated(False)
+                                        client_job_state['toolpath_generated'] = False
                                         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
                                         ui.notify('Toolpath cleared - shape deleted', type='info')
                             
@@ -3359,6 +3516,60 @@ def main_page():
                                 
                                 ui.button('Reboot System', icon='restart_alt', on_click=reboot_system) \
                                     .props('color=negative dense').style('font-size: 13px;').classes('remote-control-lock')
+
+                            ui.separator().classes('my-3')
+
+                            ui.label('Security').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+
+                            async def change_ui_password():
+                                with ui.dialog() as password_dialog, ui.card().classes('w-96'):
+                                    ui.label('Change UI Password').classes('text-h6 font-bold')
+                                    current_input = ui.input(
+                                        'Current password', password=True, password_toggle_button=True,
+                                    ).props('outlined dense').classes('w-full')
+                                    new_input = ui.input(
+                                        'New password', password=True, password_toggle_button=True,
+                                    ).props('outlined dense').classes('w-full')
+                                    confirm_input = ui.input(
+                                        'Confirm new password', password=True, password_toggle_button=True,
+                                    ).props('outlined dense').classes('w-full')
+
+                                    async def save_new_password():
+                                        global _BOOT_TOKEN
+                                        if not verify_password(current_input.value or '', _APP_PASSWORD):
+                                            ui.notify('Current password is incorrect.', type='negative')
+                                            return
+                                        new_password = new_input.value or ''
+                                        if new_password != (confirm_input.value or ''):
+                                            ui.notify('New passwords do not match.', type='negative')
+                                            return
+                                        try:
+                                            await asyncio.get_event_loop().run_in_executor(
+                                                None, set_password, new_password,
+                                            )
+                                        except (OSError, ValueError) as exc:
+                                            ui.notify(str(exc), type='negative')
+                                            return
+
+                                        # Invalidate other signed login sessions. Keep this
+                                        # browser authenticated under the new boot token.
+                                        _BOOT_TOKEN = secrets.token_hex(16)
+                                        app.storage.user['authenticated'] = True
+                                        app.storage.user['boot_token'] = _BOOT_TOKEN
+                                        log_event('security', 'ui_password_changed')
+                                        password_dialog.close()
+                                        ui.notify('UI password changed.', type='positive')
+
+                                    with ui.row().classes('w-full justify-end gap-2'):
+                                        ui.button('Cancel', on_click=password_dialog.close).props('flat')
+                                        ui.button('Change Password', on_click=save_new_password, icon='password') \
+                                            .props('color=primary')
+
+                                password_dialog.open()
+                                await password_dialog
+
+                            ui.button('Change UI Password', icon='password', on_click=change_ui_password) \
+                                .props('color=primary dense outline').style('font-size: 13px;')
 
                             ui.separator().classes('my-3')
 
@@ -3727,7 +3938,7 @@ def main_page():
 
         def _reopen_connection_alert():
             """Let the operator bring back a dismissed disconnect popup via the status pill."""
-            current_status = machine_state.status_text
+            current_status = machine_state.snapshot().status_text
             if current_status == 'SD job ended while disconnected — verify machine':
                 ui.notify(current_status, type='warning', timeout=8000)
                 return
@@ -3851,5 +4062,9 @@ if __name__ in {"__main__", "__mp_main__"}:
         dark=None,  # Auto-detect system preference
         reload=False,
         show=False,  # Don't auto-open browser (for kiosk mode)
-        storage_secret='fabcnc-storage-secret-2026'
+        storage_secret=_STORAGE_SECRET,
+        session_middleware_kwargs={
+            'same_site': 'strict',
+            'https_only': os.environ.get('FABCNC_SECURE_COOKIES', '').lower() in {'1', 'true', 'yes'},
+        },
     )

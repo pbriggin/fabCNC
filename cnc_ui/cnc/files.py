@@ -100,8 +100,11 @@ class FileManager:
         Returns:
             True if successful, False otherwise
         """
+        safe_filename = self._sanitize_filename(filename)
+        if safe_filename != filename or Path(filename).name != filename:
+            return False
         try:
-            filepath = self.upload_dir / filename
+            filepath = self.upload_dir / safe_filename
             if filepath.exists() and filepath.is_file():
                 filepath.unlink()
                 return True

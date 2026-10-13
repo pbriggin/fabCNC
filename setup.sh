@@ -236,6 +236,37 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
     CURRENT_USER="$(whoami)"
     VENV_ABS="${REPO_DIR}/${VENV_DIR}"
 
+    # Provision a permanent, machine-unique recovery credential exactly once.
+    # Only the hash stays on the Pi; setup prints the plaintext once so it can
+    # be put on the machine's recovery label/card during manufacturing.
+    AUTH_PYTHON="${VENV_ABS}/bin/python3"
+    if [ ! -x "$AUTH_PYTHON" ]; then
+        AUTH_PYTHON="$(command -v python3)"
+    fi
+    RECOVERY_CODE=$("$AUTH_PYTHON" "${REPO_DIR}/cnc_ui/auth.py" provision-recovery)
+    if [ -n "$RECOVERY_CODE" ]; then
+        echo ""
+        echo "    ============================================================"
+        echo "    fabCNC FACTORY RECOVERY CODE: ${RECOVERY_CODE}"
+        echo "    Print this on the machine recovery label. It is shown once."
+        echo "    ============================================================"
+    fi
+
+    # Keep the session-signing secret outside the repository and preserve it on
+    # subsequent setup/update runs. The familiar operator password remains the
+    # default, but can be changed in this root-owned environment file.
+    if [ ! -f /etc/fabcnc.env ]; then
+        FABCNC_SESSION_SECRET=$(openssl rand -hex 32)
+        sudo tee /etc/fabcnc.env > /dev/null <<EOF
+FABCNC_APP_PASSWORD=2026
+FABCNC_STORAGE_SECRET=${FABCNC_SESSION_SECRET}
+FABCNC_SECURE_COOKIES=false
+EOF
+        sudo chmod 0600 /etc/fabcnc.env
+        echo "    fabCNC UI password: 2026 (change FABCNC_APP_PASSWORD in /etc/fabcnc.env if desired)."
+        echo "    Session settings saved in /etc/fabcnc.env (root-readable only)."
+    fi
+
     sudo tee /etc/systemd/system/fabcnc.service > /dev/null <<EOF
 [Unit]
 Description=fabCNC Web Controller
@@ -245,6 +276,7 @@ Wants=wifi-provision.service
 [Service]
 Type=simple
 User=${CURRENT_USER}
+EnvironmentFile=-/etc/fabcnc.env
 WorkingDirectory=${REPO_DIR}/cnc_ui
 ExecStart=${VENV_ABS}/bin/python3 ${REPO_DIR}/cnc_ui/main.py
 Restart=always

@@ -51,6 +51,27 @@ The application will be available at:
 - Network access (by hostname): http://fabcnc.local:8080
 - Network access (by IP): http://\<raspberry-pi-ip\>:8080
 
+The default operator password remains `2026`. On Linux, `setup.sh` stores that
+password and a generated session-signing secret in `/etc/fabcnc.env`; existing
+settings are preserved on later setup runs. An authenticated operator can use
+**System → Security → Change UI Password** without backend access. The changed
+password is stored locally as a salted hash and takes precedence over the
+default. `FABCNC_APP_PASSWORD` controls the initial password before the first
+user change.
+When the UI is served only through HTTPS, set `FABCNC_SECURE_COOKIES=true`.
+
+For development without systemd, set `FABCNC_APP_PASSWORD` and
+`FABCNC_STORAGE_SECRET` in the environment before starting `main.py`. The
+password defaults to `2026` when the variable is omitted.
+
+During the first Linux setup, `setup.sh` also prints a unique factory recovery
+code once. Put that code on the machine's recovery label or card. Only a salted
+hash is retained on the Pi. From the login page, **Forgot password?** accepts
+this permanent machine-specific code and restores the password to `2026`; the
+operator should then sign in and choose a new password. Recovery attempts are
+rate-limited, successful recovery invalidates every existing login session, and
+running setup again does not replace the machine's recovery code.
+
 ## Project Structure
 
 ```
@@ -210,6 +231,8 @@ sudo nmcli connection modify "$CON" -802-11-wireless.bssid "" && echo "BSSID loc
 
 - Physical E-stop required; no software E-stop is implemented
 - Job controls are disabled during manual operations and vice versa
+- Run the supervised [hardware validation checklist](docs/HARDWARE_VALIDATION.md)
+  after controller, firmware, wiring, or motion-setting changes.
 
 ## Logging & Remote Diagnostics
 

@@ -43,6 +43,10 @@ cnc_ui/uploads/*.gcode
 *.log
 cnc_ui/.nicegui/
 cnc_ui/sd_job_state.json
+cnc_ui/auth_config.json
+cnc_ui/auth_config.json.tmp
+cnc_ui/recovery_config.json
+cnc_ui/recovery_config.json.tmp
 
 # fabCNC logging
 cnc_ui/logs/
