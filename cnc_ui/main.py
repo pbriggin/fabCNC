@@ -467,7 +467,7 @@ async def jog_endpoint(request: Request):
     else:
         return {'status': 'error', 'message': 'Invalid axis'}
     
-    cnc_controller.jog(axis, distance, jog_params['feed_rate'])
+    await asyncio.to_thread(cnc_controller.jog, axis, distance, jog_params['feed_rate'])
     log_event('jog', 'jog_request', axis=axis, direction=direction, distance=distance,
               feed_rate=jog_params['feed_rate'], source='js_endpoint')
     return {'status': 'ok'}
@@ -1287,7 +1287,7 @@ def create_job_controls():
 
 # Event handlers
 
-def xy_zero():
+async def xy_zero():
     """Handle XY Zero button click."""
     if not _require_controller_connected():
         return
@@ -1295,7 +1295,9 @@ def xy_zero():
         ui.notify('Cannot change XY zero while the machine is active.', type='warning')
         return
     log_event('control', 'xy_zero')
-    response = cnc_controller.send_manual_command("G92 X0 Y0", timeout=10.0)
+    response = await asyncio.to_thread(
+        cnc_controller.send_manual_command, "G92 X0 Y0", timeout=10.0
+    )
     if not any(line.strip().lower().startswith('ok') for line in response.splitlines()):
         ui.notify(f'XY zero was not accepted: {response}', type='negative')
 
@@ -1309,15 +1311,15 @@ async def jog_axis(axis: str, distance: float):
         return
     print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
     log_event('jog', 'jog_button', axis=axis, distance=distance, feed_rate=jog_params['feed_rate'])
-    cnc_controller.jog(axis, distance, jog_params['feed_rate'])
+    await asyncio.to_thread(cnc_controller.jog, axis, distance, jog_params['feed_rate'])
 
 
-def home_axis(axis: str):
+async def home_axis(axis: str):
     """Handle home axis button click."""
     if not _require_controller_connected():
         return
     log_event('home', 'home_axis', axis=axis)
-    if not cnc_controller.home_axis(axis):
+    if not await asyncio.to_thread(cnc_controller.home_axis, axis):
         ui.notify(
             'Homing blocked or failed. If Stop was used, confirm motion has stopped, '
             'run Controller Recovery, then home again.',
@@ -1325,12 +1327,12 @@ def home_axis(axis: str):
         )
 
 
-def home_all():
+async def home_all():
     """Handle home all button click."""
     if not _require_controller_connected():
         return
     log_event('home', 'home_all')
-    if not cnc_controller.home_all():
+    if not await asyncio.to_thread(cnc_controller.home_all):
         ui.notify(
             'Homing blocked or failed. If Stop was used, confirm motion has stopped, '
             'run Controller Recovery, then home again.',
@@ -2191,7 +2193,7 @@ async def start_job():
     )
 
 
-def pause_job():
+async def pause_job():
     """Handle pause job button click."""
     if not _require_controller_connected():
         return
@@ -2199,31 +2201,31 @@ def pause_job():
         ui.notify('Wait for the SD-card upload to finish before pausing.', type='warning')
         return
     log_event('job', 'pause_clicked')
-    cnc_controller.pause_job()
+    await asyncio.to_thread(cnc_controller.pause_job)
     if machine_state.paused:
         ui.notify('Job paused', type='warning')
     else:
         ui.notify('Pause command was not accepted.', type='negative')
 
 
-def resume_job():
+async def resume_job():
     """Handle resume job button click."""
     if not _require_controller_connected():
         return
     log_event('job', 'resume_clicked')
-    cnc_controller.resume_job()
+    await asyncio.to_thread(cnc_controller.resume_job)
     if machine_state.is_running():
         ui.notify('Job resumed', type='positive')
     else:
         ui.notify('Resume command was not accepted.', type='negative')
 
 
-def stop_job():
+async def stop_job():
     """Handle stop job button click."""
     if not _require_controller_connected():
         return
     log_event('job', 'stop_clicked')
-    if cnc_controller.stop_job():
+    if await asyncio.to_thread(cnc_controller.stop_job):
         ui.notify('Job stopped — full re-home required before motion.', type='warning', timeout=8000)
     else:
         ui.notify('SD stop failed — use the physical E-stop.', type='negative', timeout=8000)
@@ -2246,22 +2248,22 @@ async def resume_disconnect_job():
     ui.notify('Resuming from last safe point…', type='positive')
 
 
-def retry_controller_connection():
+async def retry_controller_connection():
     """Retry Marlin controller discovery after power or USB is restored."""
     if _deny_cloudflare_control():
         return
     log_event('system', 'controller_reconnect_clicked')
-    cnc_controller.attempt_reconnect()
+    await asyncio.to_thread(cnc_controller.attempt_reconnect)
     ui.notify('Retrying controller connection…', type='info')
 
 
-def force_controller_recovery():
+async def force_controller_recovery():
     """Recover a stopped machine using M999 or one deliberate USB DTR reset."""
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
         if cnc_controller.serial_uncertain and not cnc_controller.reset_required:
-            if cnc_controller.recover_uncertain_state():
+            if await asyncio.to_thread(cnc_controller.recover_uncertain_state):
                 ui.notify('Communication recovered. Re-home before motion.', type='warning')
             else:
                 ui.notify('Recovery failed. Use the physical E-stop and inspect the controller.', type='negative')
@@ -2269,7 +2271,7 @@ def force_controller_recovery():
         if not cnc_controller.reset_required:
             ui.notify('Controller is already connected.', type='info')
             return
-        if cnc_controller.reset_controller_after_estop():
+        if await asyncio.to_thread(cnc_controller.reset_controller_after_estop):
             ui.notify('Controller reset. Re-home before the next job.', type='positive')
         else:
             ui.notify(
@@ -2280,7 +2282,7 @@ def force_controller_recovery():
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    cnc_controller.attempt_reconnect(force_dtr_reset=True)
+    await asyncio.to_thread(cnc_controller.attempt_reconnect, force_dtr_reset=True)
     ui.notify('Trying one USB reset, then reconnecting…', type='warning', timeout=6000)
 
 
@@ -3979,11 +3981,13 @@ def main_page():
                             ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
                                 .style('color:#aaa;')
 
-                            def _run_forced_recovery():
+                            async def _run_forced_recovery():
                                 recovery_dialog.close()
                                 force_recovery_button.disable()
-                                force_controller_recovery()
-                                force_recovery_button.enable()
+                                try:
+                                    await force_controller_recovery()
+                                finally:
+                                    force_recovery_button.enable()
 
                             ui.button(
                                 'Cutter stopped — recover',
