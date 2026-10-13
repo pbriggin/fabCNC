@@ -287,7 +287,7 @@ jog_params = {
 z_cut_height = {'value': -35.0}  # Default Z cutting height in mm (Medium pressure)
 
 # Cut settings state — persisted with canvas saves
-PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
+PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5, 'Very Hard': -40.0}
 SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
 cut_settings = {'pressure': 'Medium', 'speed': 'Medium'}
 home_before_toolpath = {'enabled': True}  # Home all axes before toolpath (OFF = Z and A only)
