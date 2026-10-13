@@ -1119,21 +1119,47 @@ class CNCController:
         if not machine_state.is_idle() or not self.connected:
             return
         
+        self.homed = False
         machine_state.set_status("Homing all axes...", busy=True)
+
+        def send_and_wait_for_ok(command: str) -> bool:
+            with self.ok_lock:
+                expected_ok_count = self.ok_count + 1
+            if not self._send_command(command):
+                return False
+
+            while self.connected and not self.stop_requested:
+                with self.ok_lock:
+                    if self.ok_count >= expected_ok_count:
+                        return True
+                self.ok_event.wait(timeout=0.1)
+                self.ok_event.clear()
+            return False
+
+        def homing_failed() -> None:
+            if self.connected and not self.reset_required:
+                machine_state.set_status("Homing failed", busy=False)
         
         # Enable all steppers
-        self._send_command("M17")
+        if not send_and_wait_for_ok("M17"):
+            homing_failed()
+            return
         
         # Reset Z speed/accel to safe firmware defaults for homing
-        self._send_command("M203 Z5")  # Max Z speed 5 mm/s
-        self._send_command("M201 Z15")  # Max Z accel 15 mm/s²
-        self._send_command("M204 P1000 T1000")  # Safe acceleration
+        if not send_and_wait_for_ok("M203 Z5"):
+            homing_failed()
+            return
+        if not send_and_wait_for_ok("M201 Z15"):
+            homing_failed()
+            return
+        if not send_and_wait_for_ok("M204 P1000 T1000"):
+            homing_failed()
+            return
         
         # Marlin home all command
-        self._send_command("G28")  # Home X, Y, Z
-        
-        # Wait for homing
-        time.sleep(2.0)
+        if not send_and_wait_for_ok("G28"):  # Home X, Y, Z
+            homing_failed()
+            return
         
         # Zero the A axis (E in Marlin)
         self._send_command("G92 E0")
