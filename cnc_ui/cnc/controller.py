@@ -71,6 +71,20 @@ def _parse_sd_progress(response: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+def parse_homing_sensitivity_response(response: str) -> dict[str, int]:
+    """Parse Marlin M914 output such as ``X homing sensitivity: 2``."""
+    values: dict[str, int] = {}
+    pattern = re.compile(
+        r"^\s*(X|Y)\s+(?:homing\s+)?sensitivity\s*:\s*(-?\d+)\s*$",
+        re.IGNORECASE,
+    )
+    for line in response.splitlines():
+        match = pattern.match(line)
+        if match:
+            values[match.group(1).upper()] = int(match.group(2))
+    return values
+
+
 def _marlin_checksum(payload: str) -> int:
     """XOR-of-bytes checksum used by Marlin for line-numbered commands."""
     cs = 0

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cnc_ui"))
 _real_comports = serial.tools.list_ports.comports
 serial.tools.list_ports.comports = lambda: []
 from cnc import controller as controller_module  # noqa: E402
-from cnc.controller import CNCController  # noqa: E402
+from cnc.controller import CNCController, parse_homing_sensitivity_response  # noqa: E402
 from cnc.state import machine_state  # noqa: E402
 serial.tools.list_ports.comports = _real_comports
 
@@ -67,6 +67,31 @@ class ControllerSafetyTests(unittest.TestCase):
 
         self.assertIn("not safely idle", response)
         self.assertEqual([], controller.serial_port.writes)
+
+    def test_m914_response_parser_accepts_marlin_homing_sensitivity_format(self):
+        response = (
+            "X homing sensitivity: 2\n"
+            "Y homing sensitivity: 1\n"
+            "Y2 homing sensitivity: 1\n"
+            "ok"
+        )
+
+        self.assertEqual(
+            {"X": 2, "Y": 1},
+            parse_homing_sensitivity_response(response),
+        )
+
+    def test_homing_sensitivity_apply_sends_m914_then_m500(self):
+        controller = connected_controller(
+            on_write={"M914 X2 Y1": ["ok"], "M500": ["Settings Stored", "ok"]}
+        )
+
+        ok, response = controller.set_homing_sensitivity(
+            x=2, y=1, persist_to_eeprom=True
+        )
+
+        self.assertTrue(ok, response)
+        self.assertEqual(["M914 X2 Y1", "M500"], controller.serial_port.writes)
 
     def test_invalid_jog_axis_cannot_reach_serial(self):
         controller = connected_controller(auto_ok=True)

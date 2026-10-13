@@ -29,6 +29,7 @@ setup_logging()
 from nicegui import ui, app
 from cnc.state import machine_state
 from cnc.controller import cnc_controller
+from cnc.controller import parse_homing_sensitivity_response
 from cnc.files import file_manager
 from pathlib import Path
 from fastapi import Request
@@ -69,6 +70,22 @@ _BOOT_TOKEN = secrets.token_hex(16)
 _RECOVERY_FAILURES = defaultdict(deque)
 _RECOVERY_LIMIT = 5
 _RECOVERY_WINDOW_SECONDS = 15 * 60
+
+
+def _parse_homing_sensitivity_value(value, axis: str) -> int:
+    """Validate a TMC5160 StallGuard threshold entered in the settings UI."""
+    if value is None or isinstance(value, bool):
+        raise ValueError(f'Enter a homing sensitivity for {axis}.')
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{axis} homing sensitivity must be an integer.') from exc
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(f'{axis} homing sensitivity must be an integer.')
+    parsed = int(numeric)
+    if not -64 <= parsed <= 63:
+        raise ValueError(f'{axis} homing sensitivity must be between -64 and 63.')
+    return parsed
 
 
 def _recovery_client_key() -> str:
@@ -3621,12 +3638,16 @@ def main_page():
                                 for line in response.split('\n'):
                                     if line.strip():
                                         homing_response_log.push(f'<<< {line}')
-                                m_x = re.search(r'\bX\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
-                                m_y = re.search(r'\bY\s*[:=]?\s*(-?\d+)\b', response, flags=re.IGNORECASE)
-                                if m_x:
-                                    homing_x_input.set_value(int(m_x.group(1)))
-                                if m_y:
-                                    homing_y_input.set_value(int(m_y.group(1)))
+                                values = parse_homing_sensitivity_response(response)
+                                if 'X' in values:
+                                    homing_x_input.set_value(values['X'])
+                                if 'Y' in values:
+                                    homing_y_input.set_value(values['Y'])
+                                if not {'X', 'Y'}.issubset(values):
+                                    ui.notify(
+                                        'Controller response did not include both X and Y sensitivity values.',
+                                        type='warning', timeout=8000,
+                                    )
                                 log_event('system', 'homing_sensitivity_read', response=response[:800])
 
                             async def apply_homing_sensitivity():
