@@ -8,6 +8,7 @@ import json
 import re
 import time
 import threading
+import uuid
 from pathlib import Path
 import serial
 import serial.tools.list_ports
@@ -99,7 +100,7 @@ class CNCController:
     Provides jogging, homing, and job execution capabilities.
     """
     
-    def __init__(self, baudrate: int = 250000):
+    def __init__(self, baudrate: int = 250000, *, auto_connect: bool = True):
         self.baudrate = baudrate
         self.serial_port: Optional[serial.Serial] = None
         self.stop_requested = False
@@ -118,7 +119,14 @@ class CNCController:
         self.last_serial_device = ""
         self.last_candidate_count = 0
         self.read_loop_paused = False
+        self.reader_paused = threading.Event()
         self.read_lock = threading.Lock()
+        # Serial operations are transactions, not individual writes.  This
+        # re-entrant lock prevents jog/home/console/monitor operations from
+        # interleaving modal commands or stealing one another's responses.
+        self.operation_lock = threading.RLock()
+        self.serial_uncertain = False
+        self.rehome_required = False
         
         # Flow control for streaming
         self.ok_count = 0  # Number of 'ok' responses received
@@ -127,6 +135,9 @@ class CNCController:
         self.streaming_mode = False  # True when streaming a job
         # Buffer settings for streaming (Marlin typically has 4-16 command buffer)
         self.buffer_size = 8  # Keep this many commands ahead to prevent pauses
+        self.homing_timeout = 180.0
+        self.stream_ack_timeout = 30.0
+        self.stream_final_ack_timeout = 10.0
 
         # Line-number protocol state (active only while streaming_mode is True).
         # Each streamed line is wrapped as "N<n> <cmd>*<xor-cs>". Marlin will
@@ -150,6 +161,7 @@ class CNCController:
         self.homed = False              # True only after a successful home_all()
         self._current_job_gcode: list = []  # Copy of last started job's gcode
         self._current_job_piece_count = 0
+        self.current_job_id = ""
         if _SD_JOB_STATE_FILE.exists():
             # A prior process may have exited while the controller continued
             # an SD print. Preserve this marker before opening the serial port.
@@ -163,9 +175,10 @@ class CNCController:
                     machine_state.set_job_loaded(True, source_filename)
             except Exception as exc:
                 logger.warning(f"Could not read saved SD job state: {exc}")
-        self._auto_connect()
-        if self.connected and self.sd_job_disconnected:
-            self._reconcile_sd_job_after_reconnect()
+        if auto_connect:
+            self._auto_connect()
+            if self.connected and self.sd_job_disconnected:
+                self._reconcile_sd_job_after_reconnect()
     
     def _auto_connect(
         self,
@@ -211,6 +224,7 @@ class CNCController:
                     ):
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
+                        self.serial_uncertain = False
                         self.last_serial_device = str(port.device)
                         self.reset_required = False
                         self.last_controller_error = ""
@@ -305,7 +319,9 @@ class CNCController:
             return  # Already handled — avoid duplicate logging
         logger.error("Serial connection lost — controller disconnected (power loss or USB fault)")
         self.connected = False
+        self.serial_uncertain = True
         self.homed = False
+        self.rehome_required = True
         self.stop_requested = True  # Abort any running job
         self.ok_event.set()   # Unblock any flow-control waits in _execute_job
         machine_state.set_status("Disconnected", busy=False)
@@ -444,11 +460,29 @@ class CNCController:
         self.stop_requested = False
         self.pause_requested = False
         self.homed = False
+        self.rehome_required = True
         machine_state.reset_job()
         machine_state.set_status("Idle", busy=False)
         self._send_command("M114")
         log_controller_event("controller_reset", response=response[:500])
         return True
+
+    def recover_uncertain_state(self) -> bool:
+        """Re-establish serial ordering after the operator confirms motion stopped."""
+        with self.operation_lock:
+            if not self.connected or self.reset_required or self.sd_job_active or self.sd_uploading:
+                return False
+            if not self._quiesce_before_stream():
+                return False
+            self.serial_uncertain = False
+            self.stop_requested = False
+            self.pause_requested = False
+            self.homed = False
+            self.rehome_required = True
+            machine_state.reset_job()
+            machine_state.set_status("Idle — re-home required", busy=False)
+            log_controller_event("uncertain_state_recovered_rehome_required")
+            return True
 
     # ==================== Resume After Disconnect ====================
 
@@ -704,21 +738,52 @@ class CNCController:
         if not self.serial_port or not self.serial_port.is_open:
             logger.error("Serial port not connected")
             return False
-        
         try:
             cmd = command.strip() + "\n"
-            self.serial_port.write(cmd.encode('utf-8'))
+            wire_bytes = cmd.encode('utf-8')
+            self.serial_port.write(wire_bytes)
             self.serial_port.flush()  # Ensure data is sent immediately
-            log_serial_tx(command, streaming=self.streaming_mode)
+            log_serial_tx(
+                command,
+                streaming=self.streaming_mode,
+                wire=cmd.rstrip("\n"),
+                byte_count=len(wire_bytes),
+                job_id=self.current_job_id or None,
+            )
             return True
+        except (serial.SerialException, OSError) as e:
+            logger.error(f"Error sending command '{command}': {e}")
+            log_serial_tx(command, error=str(e), streaming=self.streaming_mode)
+            self._handle_disconnect()
+            return False
         except Exception as e:
             logger.error(f"Error sending command '{command}': {e}")
             log_serial_tx(command, error=str(e), streaming=self.streaming_mode)
             return False
+
+    def _pause_reader(self, timeout: float = 3.0) -> bool:
+        """Hand synchronous response ownership to the current thread."""
+        self.read_loop_paused = True
+        if not self.read_thread or not self.read_thread.is_alive():
+            return True
+        if self.reader_paused.wait(timeout=timeout):
+            return True
+        logger.error("Background serial reader did not pause")
+        self.read_loop_paused = False
+        return False
+
+    def _resume_reader(self) -> None:
+        self.read_loop_paused = False
+        self.reader_paused.clear()
     
     def send_command(self, command: str) -> bool:
-        """Public method to send a G-code command to Marlin."""
-        return self._send_command(command)
+        """Send one operator command only while the controller is idle."""
+        with self.operation_lock:
+            if (not self.connected or not machine_state.is_idle() or self.serial_uncertain
+                    or self.rehome_required):
+                logger.warning("Rejected direct command while controller is not safely idle")
+                return False
+            return self._send_command(command)
 
     # ==================== Line-numbered streaming (Marlin Resend protocol) ====================
 
@@ -737,6 +802,10 @@ class CNCController:
             self.serial_port.write((payload + "\n").encode('utf-8'))
             self.serial_port.flush()
             return True
+        except (serial.SerialException, OSError) as e:
+            logger.error(f"Error writing serial payload '{payload}': {e}")
+            self._handle_disconnect()
+            return False
         except Exception as e:
             logger.error(f"Error writing serial payload '{payload}': {e}")
             return False
@@ -842,6 +911,10 @@ class CNCController:
                         break
                 else:
                     time.sleep(poll_interval)
+            except (serial.SerialException, OSError) as e:
+                logger.error(f"Error reading response: {e}")
+                self._handle_disconnect()
+                break
             except Exception as e:
                 logger.error(f"Error reading response: {e}")
                 break
@@ -854,8 +927,10 @@ class CNCController:
             try:
                 # Pause if manual command is being sent
                 if self.read_loop_paused:
+                    self.reader_paused.set()
                     time.sleep(0.01)
                     continue
+                self.reader_paused.clear()
                 
                 if self.serial_port.in_waiting:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
@@ -863,11 +938,12 @@ class CNCController:
                         log_serial_rx(line, mode="async")
 
                         # --- Line-number protocol bookkeeping (streaming only) ---
+                        credit_stream_ok = True
                         if self.streaming_mode:
-                            self._handle_streaming_response(line)
+                            credit_stream_ok = self._handle_streaming_response(line)
 
                         # Track 'ok' responses for streaming flow control
-                        if line.startswith("ok"):
+                        if line.lower().startswith("ok") and credit_stream_ok:
                             with self.ok_lock:
                                 self.ok_count += 1
                             self.ok_event.set()  # Signal that ok was received
@@ -923,7 +999,7 @@ class CNCController:
                 self._handle_disconnect()
                 break
     
-    def _handle_streaming_response(self, line: str) -> None:
+    def _handle_streaming_response(self, line: str) -> bool:
         """Update line-number / resend bookkeeping from a single Marlin response.
 
         Called from the read loop while a job is streaming. Maintains
@@ -952,7 +1028,7 @@ class CNCController:
                 log_controller_event("resend_requested", line_number=n,
                                      committed_line=self.committed_line,
                                      next_line=self.next_line_number)
-                return
+                return False
 
             if is_error and last_line_m:
                 # Error reports its last good line. The matching Resend:
@@ -964,7 +1040,7 @@ class CNCController:
                         self.committed_line = n
                     self.error_burst_pending = True
                 logger.warning(f"Marlin error during stream: {line}")
-                return
+                return False
 
             if line.startswith("ok") or line.startswith("OK"):
                 m = _OK_N_RE.match(line)
@@ -978,14 +1054,18 @@ class CNCController:
                     elif self.error_burst_pending:
                         # This `ok` is the trailing ack of the error/resend burst.
                         self.error_burst_pending = False
+                        return False
                     else:
                         # Bare `ok` — by FIFO it acks the next uncommitted line.
                         if self.committed_line < self.next_line_number - 1:
                             self.committed_line += 1
+                return True
+            return False
         except Exception as e:
             # Bookkeeping must never break the read loop.
             logger.error(f"Error in _handle_streaming_response for {line!r}: {e}",
                          exc_info=True)
+            return False
 
     def _parse_position(self, line: str):
         """Parse Marlin position response: X:0.00 Y:0.00 Z:0.00 A:0.00"""
@@ -1026,33 +1106,32 @@ class CNCController:
             distance: Distance to jog in mm (or degrees for A)
             feed_rate: Feed rate in mm/min (or deg/min for A)
         """
-        if not machine_state.is_idle() or not self.connected:
-            logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
-            return
-        
-        # Set slower acceleration for jogging (gentler motion)
-        self._send_command("M204 P500 T500")  # Jog accel 500 mm/s²
-        
-        # For A axis, use degrees directly (Marlin handles rotary axes)
+        with self.operation_lock:
+            if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
+                    or self.rehome_required):
+                logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
+                return
+            machine_state.set_status("Jogging...", busy=True)
+            try:
+                self._jog_locked(axis, distance, feed_rate)
+            finally:
+                if self.connected and not self.serial_uncertain:
+                    machine_state.set_status("Idle", busy=False)
+
+    def _jog_locked(self, axis: str, distance: float, feed_rate: float) -> None:
+        """Execute one indivisible jog transaction; operation_lock is held."""
         if axis.upper() == 'A':
-            # Invert A axis direction to match physical motor wiring
             distance = -distance
             logger.info(f"JOG A AXIS: {distance} deg (inverted), feed={feed_rate} deg/min")
-            
-            self._send_command("G91")  # Relative mode
-            self._send_command(f"G1 A{distance} F{feed_rate}")  # Use G1 for controlled acceleration
-            self._send_command("G90")  # Back to absolute mode
+            move = f"G1 A{distance} F{feed_rate}"
         else:
-            # Linear axes (X, Y, Z)
             logger.info(f"JOG {axis.upper()} AXIS: distance={distance} mm, feed={feed_rate} mm/min")
-            
-            self._send_command("G91")  # Relative mode
-            self._send_command(f"G1 {axis}{distance} F{feed_rate}")  # Use G1 for controlled acceleration
-            self._send_command("G90")  # Back to absolute mode
-        
-        self._send_command("M400")  # Wait for move to finish
-        self._send_command("M204 P2000 T3000")  # Restore fast acceleration
-        self._send_command("M114")  # Request position update
+            move = f"G1 {axis}{distance} F{feed_rate}"
+        self._run_acknowledged_sequence_locked([
+            ("M204 P500 T500", 10.0), ("G91", 10.0), (move, 10.0),
+            ("G90", 10.0), ("M400", 180.0),
+            ("M204 P2000 T3000", 10.0), ("M114", 10.0),
+        ], "jog")
     
     def jog_xy(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
         """
@@ -1063,21 +1142,38 @@ class CNCController:
             y_distance: Distance to jog Y axis in mm
             feed_rate: Feed rate in mm/min
         """
-        if not machine_state.is_idle() or not self.connected:
-            logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
-            return
-        
+        with self.operation_lock:
+            if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
+                    or self.rehome_required):
+                logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
+                return
+            machine_state.set_status("Jogging...", busy=True)
+            try:
+                self._jog_xy_locked(x_distance, y_distance, feed_rate)
+            finally:
+                if self.connected and not self.serial_uncertain:
+                    machine_state.set_status("Idle", busy=False)
+
+    def _jog_xy_locked(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
         logger.info(f"JOG XY DIAGONAL: X={x_distance} mm, Y={y_distance} mm, feed={feed_rate} mm/min")
-        
-        # Set slower acceleration for jogging (gentler motion)
-        self._send_command("M204 P500 T500")  # Jog accel 500 mm/s²
-        
-        self._send_command("G91")  # Relative mode
-        self._send_command(f"G1 X{x_distance} Y{y_distance} F{feed_rate}")  # Use G1 for controlled acceleration
-        self._send_command("G90")  # Back to absolute mode
-        self._send_command("M400")  # Wait for move to finish
-        self._send_command("M204 P2000 T3000")  # Restore fast acceleration
-        self._send_command("M114")  # Request position update
+        self._run_acknowledged_sequence_locked([
+            ("M204 P500 T500", 10.0), ("G91", 10.0),
+            (f"G1 X{x_distance} Y{y_distance} F{feed_rate}", 10.0),
+            ("G90", 10.0), ("M400", 180.0),
+            ("M204 P2000 T3000", 10.0), ("M114", 10.0),
+        ], "jog")
+
+    def _run_acknowledged_sequence_locked(
+        self, commands: list[tuple[str, float]], operation: str
+    ) -> bool:
+        for command, timeout in commands:
+            response = self._exchange_locked(command, timeout)
+            if not _sd_response_ok(response):
+                self._mark_serial_uncertain(
+                    f"{operation} failed waiting for {command}", response
+                )
+                return False
+        return True
     
     def home_axis(self, axis: str) -> None:
         """
@@ -1086,93 +1182,45 @@ class CNCController:
         Args:
             axis: Axis to home ('X', 'Y', 'Z', or 'A')
         """
-        if not machine_state.is_idle() or not self.connected:
-            return
-        
-        machine_state.set_status(f"Homing {axis}...", busy=True)
-        
-        # Enable all steppers
-        self._send_command("M17")
-        
-        # Reset Z speed/accel to safe firmware defaults for homing
-        self._send_command("M203 Z5")  # Max Z speed 5 mm/s
-        self._send_command("M201 Z15")  # Max Z accel 15 mm/s²
-        self._send_command("M204 P1000 T1000")  # Safe acceleration
-        
-        # Marlin homing command
-        self._send_command(f"G28 {axis.upper()}")
-        
-        # Wait for homing to complete
-        time.sleep(0.5)
-        self._send_command("M114")  # Request position update
-        
-        # Restore faster XY acceleration (but keep Z safe)
-        self._send_command("M204 P2000 T3000")
-        
-        # Disable steppers after homing
-        self._send_command("M18")
-        
-        machine_state.set_status("Idle", busy=False)
+        with self.operation_lock:
+            if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
+                return
+            self.homed = False
+            machine_state.set_status(f"Homing {axis}...", busy=True)
+            if not self._quiesce_before_stream():
+                return
+            commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+                        ("M204 P1000 T1000", 10.0), (f"G28 {axis.upper()}", 180.0),
+                        ("M400", 180.0), ("M114", 10.0),
+                        ("M204 P2000 T3000", 10.0), ("M18", 10.0))
+            for command, timeout in commands:
+                response = self._exchange_locked(command, timeout)
+                if not _sd_response_ok(response):
+                    self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
+                    return
+            machine_state.set_status("Idle", busy=False)
     
     def home_all(self) -> None:
         """Home all axes sequentially."""
-        if not machine_state.is_idle() or not self.connected:
-            return
-        
-        self.homed = False
-        machine_state.set_status("Homing all axes...", busy=True)
-
-        def send_and_wait_for_ok(command: str) -> bool:
-            with self.ok_lock:
-                expected_ok_count = self.ok_count + 1
-            if not self._send_command(command):
-                return False
-
-            while self.connected and not self.stop_requested:
-                with self.ok_lock:
-                    if self.ok_count >= expected_ok_count:
-                        return True
-                self.ok_event.wait(timeout=0.1)
-                self.ok_event.clear()
-            return False
-
-        def homing_failed() -> None:
-            if self.connected and not self.reset_required:
-                machine_state.set_status("Homing failed", busy=False)
-        
-        # Enable all steppers
-        if not send_and_wait_for_ok("M17"):
-            homing_failed()
-            return
-        
-        # Reset Z speed/accel to safe firmware defaults for homing
-        if not send_and_wait_for_ok("M203 Z5"):
-            homing_failed()
-            return
-        if not send_and_wait_for_ok("M201 Z15"):
-            homing_failed()
-            return
-        if not send_and_wait_for_ok("M204 P1000 T1000"):
-            homing_failed()
-            return
-        
-        # Marlin home all command
-        if not send_and_wait_for_ok("G28"):  # Home X, Y, Z
-            homing_failed()
-            return
-        
-        # Zero the A axis (E in Marlin)
-        self._send_command("G92 E0")
-        self._send_command("M114")  # Request position update
-        
-        # Restore faster XY acceleration (but keep Z safe)
-        self._send_command("M204 P2000 T3000")
-        
-        # Disable steppers after homing
-        self._send_command("M18")
-
-        machine_state.set_status("Idle", busy=False)
-        self.homed = True
+        with self.operation_lock:
+            if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
+                return
+            self.homed = False
+            machine_state.set_status("Homing all axes...", busy=True)
+            if not self._quiesce_before_stream():
+                return
+            commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+                        ("M204 P1000 T1000", 10.0), ("G28", 180.0),
+                        ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
+                        ("M204 P2000 T3000", 10.0), ("M18", 10.0))
+            for command, timeout in commands:
+                response = self._exchange_locked(command, timeout)
+                if not _sd_response_ok(response):
+                    self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
+                    return
+            machine_state.set_status("Idle", busy=False)
+            self.homed = True
+            self.rehome_required = False
 
     # ==================== Job Execution ====================
     
@@ -1183,17 +1231,29 @@ class CNCController:
         Args:
             gcode_lines: List of G-code commands to execute
         """
-        if not machine_state.is_idle() or not self.connected:
-            return
-
-        self.stop_requested = False
-        self.pause_requested = False
-        self.job_thread = threading.Thread(
-            target=self._execute_job, args=(gcode_lines,), kwargs={"is_job": False}, daemon=True
-        )
-        self.job_thread.start()
+        with self.operation_lock:
+            if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
+                    or self.rehome_required):
+                return
+            commands = list(gcode_lines)
+            if not any(line.split(';', 1)[0].strip().upper() == "M400" for line in commands[-2:]):
+                commands.append("M400")
+            self.stop_requested = False
+            self.pause_requested = False
+            # Reserve the machine synchronously so a second UI callback cannot
+            # start another operation before the worker begins.
+            machine_state.set_status("Running", busy=True, paused=False)
+            self.job_thread = threading.Thread(
+                target=self._execute_job, args=(commands,), kwargs={"is_job": False}, daemon=True
+            )
+            self.job_thread.start()
 
     def start_job(self, gcode_lines: list[str], piece_count: int = 0) -> None:
+        """Atomically reserve the machine and start an SD-card job."""
+        with self.operation_lock:
+            self._start_job_locked(gcode_lines, piece_count)
+
+    def _start_job_locked(self, gcode_lines: list[str], piece_count: int = 0) -> None:
         """
         Upload a G-code job to the controller SD card and run it from there.
         
@@ -1201,7 +1261,8 @@ class CNCController:
             gcode_lines: List of G-code commands to execute
             piece_count: Number of pieces this job is expected to cut.
         """
-        if not machine_state.is_idle() or not machine_state.job_loaded or not self.connected:
+        if (not machine_state.is_idle() or not machine_state.job_loaded or not self.connected
+                or self.serial_uncertain or self.rehome_required):
             log_controller_event(
                 "job_start_rejected",
                 idle=machine_state.is_idle(),
@@ -1214,6 +1275,7 @@ class CNCController:
         self.pause_requested = False
         self._current_job_gcode = list(gcode_lines)
         self._current_job_piece_count = max(0, int(piece_count or 0))
+        self.current_job_id = uuid.uuid4().hex
         self.sd_job_active = False
         self.sd_job_disconnected = False
         _SD_JOB_STATE_FILE.unlink(missing_ok=True)
@@ -1224,6 +1286,7 @@ class CNCController:
             command_count=len(gcode_lines),
             filename=machine_state.loaded_filename,
             piece_count=self._current_job_piece_count,
+            job_id=self.current_job_id,
         )
         if _log_uploader:
             _log_uploader.notify_job_run()
@@ -1247,6 +1310,9 @@ class CNCController:
                 response = self.send_command_with_response("M25", timeout=8.0)
                 if not _sd_response_ok(response):
                     logger.error(f"Failed to pause SD print: {response}")
+                    self._mark_serial_uncertain(
+                        "SD pause acknowledgement missing", response, stop_motion=False
+                    )
                     return
             self.pause_requested = True
             machine_state.set_status("Paused", busy=True, paused=True)
@@ -1259,6 +1325,9 @@ class CNCController:
                 response = self.send_command_with_response("M24", timeout=8.0)
                 if not _sd_response_ok(response):
                     logger.error(f"Failed to resume SD print: {response}")
+                    self._mark_serial_uncertain(
+                        "SD resume acknowledgement missing", response, stop_motion=False
+                    )
                     return
             self.pause_requested = False
             machine_state.set_status("Running", busy=True, paused=False)
@@ -1278,14 +1347,22 @@ class CNCController:
             response = self.send_command_with_response("M524", timeout=8.0)
             if not _sd_response_ok(response):
                 machine_state.set_status("SD stop failed — use physical E-stop", busy=True)
+                self.serial_uncertain = True
+                self.rehome_required = True
                 log_controller_event("sd_stop_failed", response=response[:300])
                 return False
             self.stop_requested = True
             # M524 cancels SD playback; M410 also clears queued motion.
-            self._send_command("M410")
+            quick_stop = self.send_command_with_response("M410", timeout=8.0)
+            if not _sd_response_ok(quick_stop):
+                self._mark_serial_uncertain("M410 was not acknowledged after SD stop", quick_stop)
+                return False
         elif self.connected:
             self.stop_requested = True
-            self._send_command("M410")  # Marlin quick stop for utility streaming
+            quick_stop = self.send_command_with_response("M410", timeout=8.0)
+            if not _sd_response_ok(quick_stop):
+                self._mark_serial_uncertain("M410 was not acknowledged", quick_stop)
+                return False
         else:
             self.stop_requested = True
 
@@ -1303,27 +1380,62 @@ class CNCController:
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:
         """Send a G-code command and return the response."""
-        if not self.connected:
-            return "ERROR: Not connected to controller"
-        
+        with self.operation_lock:
+            if not self.connected:
+                return "ERROR: Not connected to controller"
+            return self._exchange_locked(command, timeout)
+
+    def send_manual_command(self, command: str, timeout: float = 10.0) -> str:
+        """Run an operator console command only in a known idle state."""
+        with self.operation_lock:
+            if (not self.connected or not machine_state.is_idle() or self.sd_uploading
+                    or self.sd_job_active or self.serial_uncertain or self.rehome_required):
+                return "ERROR: Controller is not safely idle"
+            return self._exchange_locked(command, timeout)
+
+    def _exchange_locked(self, command: str, timeout: float) -> str:
+        """Perform one request/response exchange while operation_lock is held."""
         with self.read_lock:
-            # Pause the background read loop
-            self.read_loop_paused = True
-            time.sleep(0.05)  # Give read loop time to pause
-            
+            if not self._pause_reader():
+                return "ERROR: Could not acquire serial response ownership"
             try:
-                self._send_command(command)
+                if not self._send_command(command):
+                    return "ERROR: Serial write failed"
                 response = self._read_response(timeout=timeout)
                 return response if response else "No response"
             finally:
-                # Resume the background read loop
-                self.read_loop_paused = False
+                self._resume_reader()
+
+    def _mark_serial_uncertain(
+        self, reason: str, response: str = "", *, stop_motion: bool = True
+    ) -> None:
+        """Fail closed when delivery or controller state cannot be established."""
+        self.serial_uncertain = True
+        self.homed = False
+        self.rehome_required = True
+        if stop_motion:
+            self.stop_requested = True
+        machine_state.set_status("Machine state uncertain — verify and reconnect", busy=True)
+        logger.error("%s: %s", reason, response or "no response")
+        log_controller_event("machine_state_uncertain", reason=reason, response=response[:500])
 
     def read_homing_sensitivity(self) -> str:
         """Read current sensorless homing sensitivity values from firmware."""
-        return self.send_command_with_response("M914", timeout=6.0)
+        return self.send_manual_command("M914", timeout=6.0)
 
     def set_homing_sensitivity(
+        self,
+        *,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        persist_to_eeprom: bool = False,
+    ) -> tuple[bool, str]:
+        with self.operation_lock:
+            return self._set_homing_sensitivity_locked(
+                x=x, y=y, persist_to_eeprom=persist_to_eeprom
+            )
+
+    def _set_homing_sensitivity_locked(
         self,
         *,
         x: Optional[int] = None,
@@ -1338,6 +1450,8 @@ class CNCController:
         """
         if not self.connected:
             return False, "ERROR: Not connected to controller"
+        if not machine_state.is_idle() or self.sd_job_active or self.sd_uploading or self.serial_uncertain:
+            return False, "ERROR: Controller is not safely idle"
         if x is None and y is None:
             return False, "ERROR: Provide at least one axis value"
 
@@ -1374,7 +1488,7 @@ class CNCController:
 
         return True, response
     
-    def _quiesce_before_stream(self, timeout: float = 15.0) -> None:
+    def _quiesce_before_stream(self, timeout: float = 180.0) -> bool:
         """Wait for any in-flight commands to finish before a streaming job begins.
 
         A manually-issued command (e.g. Home All) may still be executing — and
@@ -1383,36 +1497,53 @@ class CNCController:
         those stale acks would otherwise be counted against the first streamed
         lines. That makes blocking commands like G28 appear to finish instantly,
         letting cutting moves race ahead of homing. Here we drain the link, with
-        the read loop paused, until it has been quiet long enough to be sure all
-        prior commands have completed and their `ok`s consumed.
+        the read loop paused, and require an identifiable M115 response queued
+        behind M400 before treating the serial stream as quiescent.
         """
         if not self.serial_port or not self.serial_port.is_open:
-            return
+            return False
 
-        quiet_period = 0.3  # seconds of silence that signal the link is idle
         with self.read_lock:
-            # Pause the background reader so we have exclusive access to the
-            # serial buffer while draining.
-            self.read_loop_paused = True
-            time.sleep(0.05)  # let the read loop notice and yield
+            if not self._pause_reader():
+                return False
             try:
-                # M400 forces Marlin to finish all buffered moves before its `ok`,
-                # so once the link goes quiet we know nothing is still in flight.
-                self._send_command("M400")
-                deadline = time.time() + timeout
-                last_activity = time.time()
-                while time.time() < deadline:
+                # Drain bytes already delivered to the host before creating the
+                # boundary. Outstanding controller work may still reply later,
+                # so an acknowledgement alone is not a sufficient marker.
+                while self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        log_serial_rx(line, mode="sync_drain")
+                if not self._send_command("M400"):
+                    return False
+                # M115 is queued after M400 and has an identifiable banner. A
+                # banner followed by its own ok proves all earlier commands,
+                # including M400, were processed; a stale bare ok cannot do so.
+                if not self._send_command("M115"):
+                    return False
+                lines: list[str] = []
+                banner_seen = False
+                complete = False
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
                     if self.serial_port.in_waiting:
                         line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                         if line:
-                            log_serial_rx(line, mode="sync")
-                        last_activity = time.time()
-                    elif time.time() - last_activity >= quiet_period:
-                        break
+                            lines.append(line)
+                            log_serial_rx(line, mode="sync_boundary")
+                            banner_seen = banner_seen or "FIRMWARE_NAME" in line
+                            if banner_seen and line.lower().startswith("ok"):
+                                complete = True
+                                break
                     else:
                         time.sleep(0.01)
+                response = "\n".join(lines)
+                if not complete:
+                    self._mark_serial_uncertain("M400 quiesce was not acknowledged", response)
+                    return False
+                return True
             finally:
-                self.read_loop_paused = False
+                self._resume_reader()
 
     def _upload_gcode_to_sd(self, gcode_lines: list[str]) -> tuple[bool, int, str]:
         """Upload, verify, select, and start a file using Marlin's SD commands."""
@@ -1442,8 +1573,8 @@ class CNCController:
         # M28 makes every incoming line file content until M29, so no unrelated
         # command may be interleaved during this critical section.
         with self.read_lock:
-            self.read_loop_paused = True
-            time.sleep(0.05)
+            if not self._pause_reader():
+                return False, 0, "Could not acquire serial response ownership"
             write_open = False
             try:
                 if self.stop_requested:
@@ -1529,6 +1660,7 @@ class CNCController:
                     "piece_count": self._current_job_piece_count,
                     "total_bytes": total_bytes,
                     "started_at": time.time(),
+                    "job_id": self.current_job_id,
                 }
                 try:
                     _SD_JOB_STATE_FILE.write_text(json.dumps(sd_state))
@@ -1554,7 +1686,7 @@ class CNCController:
                     # Always leave Marlin out of SD-write mode after a failed or
                     # cancelled transfer. Never start the partial file.
                     exchange("M29", timeout=5.0)
-                self.read_loop_paused = False
+                self._resume_reader()
                 self.sd_uploading = False
 
     def _execute_sd_job(self, gcode_lines: list[str]) -> None:
@@ -1570,11 +1702,15 @@ class CNCController:
             "sd_upload_start",
             filename=_SD_FILENAME,
             command_count=len(gcode_lines),
+            job_id=self.current_job_id,
         )
         # Drain old acknowledgements before the SD-write protocol takes over.
         try:
-            self._quiesce_before_stream()
-            uploaded, total_bytes, error = self._upload_gcode_to_sd(gcode_lines)
+            with self.operation_lock:
+                if not self._quiesce_before_stream():
+                    uploaded, total_bytes, error = False, 0, "Controller did not acknowledge M400"
+                else:
+                    uploaded, total_bytes, error = self._upload_gcode_to_sd(gcode_lines)
         except Exception as exc:
             logger.exception("Failed while preparing the SD upload")
             uploaded, total_bytes, error = False, 0, str(exc)
@@ -1622,6 +1758,7 @@ class CNCController:
             "sd_job_started",
             filename=_SD_FILENAME,
             total_bytes=total_bytes,
+            job_id=self.current_job_id,
             upload_elapsed_s=round(time.time() - started_at, 2),
         )
         self._monitor_sd_job(total_bytes=total_bytes)
@@ -1793,7 +1930,12 @@ class CNCController:
         # counting acks for streamed lines. Otherwise those stale acks inflate
         # ok_count, so blocking commands like G28 appear to finish instantly and
         # cutting moves can race ahead of homing.
-        self._quiesce_before_stream()
+        with self.operation_lock:
+            if not self._quiesce_before_stream():
+                logger.error("Could not establish an idle serial boundary; aborting stream")
+                if not self.serial_uncertain:
+                    self._mark_serial_uncertain("Could not quiesce before stream")
+                return
 
         self.streaming_mode = True
         
@@ -1850,6 +1992,7 @@ class CNCController:
         total_wait_time = 0
         wait_count = 0
         max_wait_time = 0
+        protocol_failed = False
         
         try:
             for i, cmd in enumerate(commands):
@@ -1880,6 +2023,7 @@ class CNCController:
                 # Special handling only for blocking commands
                 if cmd.upper().startswith('G28'):  # Homing
                     # Wait for ALL pending commands to complete
+                    homing_wait_started = time.monotonic()
                     while not self.stop_requested:
                         # Drain any resends triggered by lines already in flight.
                         drained = self._drain_resends()
@@ -1888,6 +2032,13 @@ class CNCController:
                         with self.ok_lock:
                             in_flight = sent_count - self.ok_count
                         if in_flight <= 0:
+                            break
+                        if time.monotonic() - homing_wait_started > self.homing_timeout:
+                            protocol_failed = True
+                            self.stop_requested = True
+                            self._mark_serial_uncertain(
+                                "Timed out waiting for homing acknowledgement"
+                            )
                             break
                         self.ok_event.clear()
                         self.ok_event.wait(timeout=1.0)
@@ -1921,10 +2072,13 @@ class CNCController:
                             with self.ok_lock:
                                 in_flight = sent_count - self.ok_count
                             
-                            if time.time() - wait_start > 30.0:
-                                logger.warning(f"Timeout waiting for ok (in_flight={in_flight})")
-                                with self.ok_lock:
-                                    self.ok_count = sent_count - throttle_threshold + 1
+                            if time.time() - wait_start > self.stream_ack_timeout:
+                                logger.error(f"Timeout waiting for ok (in_flight={in_flight}); aborting")
+                                protocol_failed = True
+                                self.stop_requested = True
+                                self._mark_serial_uncertain(
+                                    "Timed out waiting for streamed command acknowledgement"
+                                )
                                 break
                         
                         this_wait = time.time() - wait_start
@@ -1954,7 +2108,7 @@ class CNCController:
                     )
             
             # Wait for all remaining commands to be acknowledged
-            if not self.stop_requested:
+            if not self.stop_requested and not protocol_failed:
                 logger.info("Waiting for remaining commands to complete...")
                 wait_start = time.time()
                 while True:
@@ -1966,14 +2120,19 @@ class CNCController:
                     if in_flight <= 0:
                         break
                     # Shorter timeout - 10 seconds should be enough for motion to complete
-                    if time.time() - wait_start > 10.0:
-                        logger.warning(f"Timeout waiting for final commands ({in_flight} remaining) - continuing anyway")
+                    if time.time() - wait_start > self.stream_final_ack_timeout:
+                        logger.error(f"Timeout waiting for final commands ({in_flight} remaining); state is uncertain")
+                        protocol_failed = True
+                        self.stop_requested = True
+                        self._mark_serial_uncertain(
+                            "Timed out waiting for final streamed acknowledgements"
+                        )
                         break
                     self.ok_event.clear()
                     self.ok_event.wait(timeout=0.2)
             
             # Job complete
-            if not self.stop_requested:
+            if not self.stop_requested and not protocol_failed:
                 logger.info(f"Job complete! ({self.resend_total} resends)")
                 machine_state.set_status("Complete", busy=False)
                 machine_state.update_job_progress(1.0)
@@ -2002,7 +2161,7 @@ class CNCController:
                             daemon=True,
                             name="log-upload-on-complete",
                         ).start()
-            else:
+            elif not protocol_failed:
                 machine_state.reset_job()
                 if self.connected:
                     machine_state.set_status("Stopped", busy=False)

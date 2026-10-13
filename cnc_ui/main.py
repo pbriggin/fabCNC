@@ -45,6 +45,7 @@ import os
 import math
 import json
 import asyncio
+import hashlib
 import io
 import zipfile
 import re
@@ -1178,8 +1179,13 @@ def xy_zero():
     """Handle XY Zero button click."""
     if not _require_controller_connected():
         return
+    if not machine_state.is_idle():
+        ui.notify('Cannot change XY zero while the machine is active.', type='warning')
+        return
     log_event('control', 'xy_zero')
-    cnc_controller.send_command("G92 X0 Y0")
+    response = cnc_controller.send_manual_command("G92 X0 Y0", timeout=10.0)
+    if not any(line.strip().lower().startswith('ok') for line in response.splitlines()):
+        ui.notify(f'XY zero was not accepted: {response}', type='negative')
 
 
 async def jog_axis(axis: str, distance: float):
@@ -1727,6 +1733,10 @@ async def toggle_toolpath(button):
         button.set_text('Generate Toolpath')
         button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
         current_gcode = []
+        try:
+            app.storage.client.pop('generated_job', None)
+        except Exception:
+            pass
         log_event('toolpath', 'toolpath_cleared')
         ui.notify('Toolpath cleared - shapes are now editable', type='info')
     else:
@@ -1779,9 +1789,21 @@ async def toggle_toolpath(button):
             log_event('toolpath', 'overlap_warning_dismissed',
                       pair_count=len(overlapping_pairs))
 
-        # Update toolpath generator with current Z cut height and homing preference
-        toolpath_generator.cutting_height = z_cut_height['value']
-        toolpath_generator.home_all = home_before_toolpath['enabled']
+        # Snapshot every setting into a per-request generator. The shared UI can
+        # serve multiple browsers, so a mutable global generator would allow one
+        # client's settings/current-A state to alter another client's G-code.
+        generator = ToolpathGenerator(
+            cutting_height=z_cut_height['value'],
+            safe_height=toolpath_generator.safe_height,
+            corner_angle_threshold=math.degrees(toolpath_generator.corner_angle_threshold_radians),
+            feed_rate=toolpath_generator.feed_rate,
+            plunge_rate=toolpath_generator.plunge_rate,
+            rapid_rate=toolpath_generator.rapid_rate,
+            min_curve_feed_rate=toolpath_generator.min_curve_feed_rate,
+            curve_slowdown_radius=toolpath_generator.curve_slowdown_radius,
+        )
+        generator.home_all = home_before_toolpath['enabled']
+        generator.stealthchop = toolpath_generator.stealthchop
         
         # Fetch notch data from canvas (in mm coords, geometry pre-computed)
         notches = {}
@@ -1806,11 +1828,17 @@ async def toggle_toolpath(button):
             viz_data, gcode_str = await loop.run_in_executor(
                 _exec,
                 lambda: (
-                    toolpath_generator.generate_visualization_data(shapes_snapshot),
-                    toolpath_generator.generate_toolpath(shapes_snapshot, source_filename="preview", notches=notches_snapshot)
+                    generator.generate_visualization_data(shapes_snapshot),
+                    generator.generate_toolpath(shapes_snapshot, source_filename="preview", notches=notches_snapshot)
                 )
             )
         current_gcode = gcode_str.split('\n')
+        gcode_digest = hashlib.sha256(gcode_str.encode('utf-8')).hexdigest()
+        app.storage.client['generated_job'] = {
+            'gcode': list(current_gcode),
+            'sha256': gcode_digest,
+            'piece_count': len(shapes_snapshot),
+        }
 
         # Store viz data server-side; JS fetches it via GET /toolpath-preview so we
         # avoid embedding (potentially megabytes of) JSON inline in the WebSocket message.
@@ -2002,7 +2030,9 @@ async def start_job():
         ui.notify('Please generate toolpath first', type='warning')
         return
     
-    if not current_gcode:
+    generated_job = app.storage.client.get('generated_job')
+    job_gcode = list(generated_job.get('gcode', [])) if generated_job else []
+    if not job_gcode:
         ui.notify('No toolpath generated', type='warning')
         return
 
@@ -2011,20 +2041,21 @@ async def start_job():
 
     # Debug: Show gcode summary
     print(f"\n--- Starting Job ---")
-    g0_count = sum(1 for line in current_gcode if line.startswith('G0'))
-    g1_count = sum(1 for line in current_gcode if line.startswith('G1'))
-    print(f"  Total lines: {len(current_gcode)}")
+    g0_count = sum(1 for line in job_gcode if line.startswith('G0'))
+    g1_count = sum(1 for line in job_gcode if line.startswith('G1'))
+    print(f"  Total lines: {len(job_gcode)}")
     print(f"  Rapid moves (G0): {g0_count}")
     print(f"  Cut moves (G1): {g1_count}")
     print(f"{'='*60}\n")
     
     ui.notify('Starting job...', type='info')
-    log_event('job', 'job_start_clicked', gcode_lines=len(current_gcode),
+    log_event('job', 'job_start_clicked', gcode_lines=len(job_gcode),
               g0_count=g0_count, g1_count=g1_count,
-              filename=machine_state.loaded_filename)
+              filename=machine_state.loaded_filename,
+              gcode_sha256=generated_job.get('sha256'))
     
     # Start job without callback - we'll monitor completion via state
-    cnc_controller.start_job(current_gcode, piece_count=len(current_toolpath_shapes))
+    cnc_controller.start_job(job_gcode, piece_count=int(generated_job.get('piece_count', 0)))
 
 
 def pause_job():
@@ -2096,6 +2127,12 @@ def force_controller_recovery():
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
+        if cnc_controller.serial_uncertain and not cnc_controller.reset_required:
+            if cnc_controller.recover_uncertain_state():
+                ui.notify('Communication recovered. Re-home before motion.', type='warning')
+            else:
+                ui.notify('Recovery failed. Use the physical E-stop and inspect the controller.', type='negative')
+            return
         if not cnc_controller.reset_required:
             ui.notify('Controller is already connected.', type='info')
             return
@@ -3244,7 +3281,7 @@ def main_page():
                             if cmd:
                                 response_log.push(f'>>> {cmd}')
                                 log_event('manual_gcode', 'send', command=cmd)
-                                response = cnc_controller.send_command_with_response(cmd, timeout=10.0)
+                                response = cnc_controller.send_manual_command(cmd, timeout=10.0)
                                 for line in response.split('\n'):
                                     response_log.push(f'<<< {line}')
                                 log_event('manual_gcode', 'response', command=cmd,
@@ -3698,6 +3735,7 @@ def main_page():
                 not cnc_controller.connected
                 or current_status in ('Disconnected', 'Retrying connection...')
                 or cnc_controller.reset_required
+                or cnc_controller.serial_uncertain
                 or current_status == 'E-Stop Reset Required'
             ):
                 _connection_alert_dismissed[0] = False
