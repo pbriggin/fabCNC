@@ -3140,19 +3140,6 @@ def main_page():
                     }, 650);
                 }
 
-                // Quasar renders tooltips in a body-level portal. If an explicit
-                // tooltip appears after the fallback timer starts, dismiss the
-                // fallback immediately so the two can never overlap.
-                const explicitTooltipObserver = new MutationObserver(() => {
-                    if (hasVisibleExplicitTooltip()) hideFallbackTooltip();
-                });
-                explicitTooltipObserver.observe(document.body, {
-                    childList: true,
-                    subtree: true,
-                    attributes: true,
-                    attributeFilter: ['class', 'style'],
-                });
-
                 document.addEventListener('pointerover', event => {
                     const control = tooltipControlFrom(event.target);
                     if (control && !control.contains(event.relatedTarget)) showFallbackTooltip(control);
