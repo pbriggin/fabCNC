@@ -4,6 +4,8 @@ import time
 import unittest
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 import serial.tools.list_ports
 
 
@@ -56,6 +58,9 @@ def connected_controller(responses=(), on_write=None, auto_ok=False):
 
 class ControllerSafetyTests(unittest.TestCase):
     def setUp(self):
+        uploader_patch = patch.object(controller_module, "_log_uploader", None)
+        uploader_patch.start()
+        self.addCleanup(uploader_patch.stop)
         machine_state.set_status("Idle", busy=False)
         machine_state.set_job_loaded(False)
 
@@ -373,6 +378,7 @@ class ControllerSafetyTests(unittest.TestCase):
             self.assertTrue(controller.stop_requested)
             self.assertFalse(controller.homed)
             self.assertTrue(controller.rehome_required)
+            self.assertEqual("Stopping", machine_state.snapshot().status_text)
             self.assertTrue(worker.is_alive())
         finally:
             controller.operation_lock.release()
@@ -394,6 +400,32 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertFalse(controller.homed)
         self.assertTrue(controller.rehome_required)
         self.assertEqual("Stopped — re-home required", machine_state.snapshot().status_text)
+
+    def test_stop_during_job_uploads_stopped_log_once(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        controller._quiesce_after_priority_stop = lambda timeout=30.0: True
+        controller._exchange_locked = lambda command, timeout: "Not SD printing\nok"
+        controller._clear_sd_job_state = lambda: setattr(controller, "sd_job_active", False)
+        upload_calls = []
+        uploader = SimpleNamespace(
+            upload_now=lambda full, trigger: upload_calls.append((full, trigger))
+        )
+
+        class ImmediateThread:
+            def __init__(self, target, args=(), **kwargs):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                self.target(*self.args)
+
+        with patch.object(controller_module, "_log_uploader", uploader), \
+                patch.object(controller_module.threading, "Thread", ImmediateThread):
+            self.assertTrue(controller.stop_job())
+            self.assertTrue(controller.stop_job())
+
+        self.assertEqual([(False, "job_stopped")], upload_calls)
 
     def test_priority_stop_boundary_retries_after_abort_clears_first_probe(self):
         controller = connected_controller()

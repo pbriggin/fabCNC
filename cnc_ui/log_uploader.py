@@ -297,7 +297,7 @@ def build_bundle(
 
     *trigger* is embedded in the filename so bundles are easy to distinguish
     in remote storage. Common values: ``"auto"``, ``"manual"``,
-    ``"disconnect"``, ``"job_complete"``, ``"job_abort"``.
+    ``"disconnect"``, ``"job_complete"``, ``"job_abort"``, ``"job_stopped"``.
 
     *max_bytes_override*, when given, replaces ``upload.max_bundle_mb`` for this
     call — used by ``upload_now`` to retry with a shrinking budget after the

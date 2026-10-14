@@ -188,6 +188,7 @@ class CNCController:
         self._current_job_piece_count = 0
         self._current_source_filename: Optional[str] = None
         self.current_job_id = ""
+        self._stopped_log_upload_scheduled = False
         if _SD_JOB_STATE_FILE.exists():
             # A prior process may have exited while the controller continued
             # an SD print. Preserve this marker before opening the serial port.
@@ -1459,6 +1460,7 @@ class CNCController:
         self._current_job_piece_count = max(0, int(piece_count or 0))
         self._current_source_filename = source_filename or state.loaded_filename
         self.current_job_id = uuid.uuid4().hex
+        self._stopped_log_upload_scheduled = False
         self.sd_job_active = False
         self.sd_job_disconnected = False
         _SD_JOB_STATE_FILE.unlink(missing_ok=True)
@@ -1518,11 +1520,26 @@ class CNCController:
     
     def stop_job(self) -> bool:
         """Request an immediate stop, then prove the controller is quiescent."""
+        stopped_during_job = self.sd_uploading or self.sd_job_active or self.streaming_mode
+
+        def upload_stopped_log() -> None:
+            if (not stopped_during_job or not _log_uploader
+                    or self._stopped_log_upload_scheduled):
+                return
+            self._stopped_log_upload_scheduled = True
+            threading.Thread(
+                target=_log_uploader.upload_now,
+                args=(False, "job_stopped"),
+                daemon=True,
+                name="log-upload-on-job-stopped",
+            ).start()
+
         self.pause_requested = False
         self.stop_requested = True
         self.homed = False
         self.rehome_required = True
         self.reset_y_motors_before_home = True
+        machine_state.set_status("Stopping", busy=True, paused=False)
         log_controller_event("job_stop_requested", priority=True)
 
         if self.connected and self.sd_uploading:
@@ -1532,36 +1549,44 @@ class CNCController:
         elif self.connected and self.sd_job_active:
             if not self._send_priority_stop(sd_job=True):
                 self._mark_serial_uncertain("Could not transmit priority SD stop")
+                upload_stopped_log()
                 return False
             with self.operation_lock:
                 if not self._quiesce_after_priority_stop(timeout=30.0):
+                    upload_stopped_log()
                     return False
                 status = self._exchange_locked("M27", 8.0)
                 if "not sd printing" not in status.lower():
                     self._mark_serial_uncertain("Could not confirm SD playback stopped", status)
+                    upload_stopped_log()
                     return False
                 self._clear_sd_job_state()
         elif self.connected:
             if not self._send_priority_stop(sd_job=False):
                 self._mark_serial_uncertain("Could not transmit priority quick stop")
+                upload_stopped_log()
                 return False
             with self.operation_lock:
                 if not self._quiesce_after_priority_stop(timeout=30.0):
+                    upload_stopped_log()
                     return False
         else:
             self.serial_uncertain = True
             machine_state.set_status("Stop unconfirmed — use physical E-stop", busy=True)
+            upload_stopped_log()
             return False
 
         if self.job_thread and self.job_thread.is_alive():
             self.job_thread.join(timeout=2.0)
             if self.job_thread.is_alive() and self.sd_uploading:
                 machine_state.set_status("Cancelling SD upload...", busy=True)
+                upload_stopped_log()
                 return True
 
         machine_state.reset_job()
         machine_state.set_status("Stopped — re-home required", busy=False)
         log_controller_event("job_stopped", rehome_required=True)
+        upload_stopped_log()
         return True
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:

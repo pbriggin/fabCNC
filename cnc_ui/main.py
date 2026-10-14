@@ -2227,6 +2227,9 @@ async def stop_job():
     """Handle stop job button click."""
     if not _require_controller_connected():
         return
+    # Give immediate visual feedback while the controller performs and verifies
+    # the asynchronous SD abort.
+    machine_state.set_status("Stopping", busy=True, paused=False)
     log_event('job', 'stop_clicked')
     if await asyncio.to_thread(cnc_controller.stop_job):
         ui.notify('Job stopped — full re-home required before motion.', type='warning', timeout=8000)
