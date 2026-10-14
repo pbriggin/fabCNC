@@ -2969,7 +2969,7 @@ def main_page():
             .header-tabs .q-tab--active::before {
                 left: -14px;
                 background: radial-gradient(
-                    circle at 100% 0,
+                    circle at 0 0,
                     transparent 13.5px,
                     var(--workspace-surface) 14px
                 );
@@ -2978,7 +2978,7 @@ def main_page():
             .header-tabs .q-tab--active::after {
                 right: -14px;
                 background: radial-gradient(
-                    circle at 0 0,
+                    circle at 100% 0,
                     transparent 13.5px,
                     var(--workspace-surface) 14px
                 );
