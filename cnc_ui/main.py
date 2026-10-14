@@ -832,15 +832,21 @@ def _get_current_wifi_status():
 
 
 def create_header():
-    """Create the application header with position, status, and controls."""
+    """Create the application header with tabs, position, status, and controls."""
     pos_labels = {}
+    tabs = None
     
     with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap; padding-top: 8px;'):
-        # Left side: App name
+        # Left side: App name with navigation tabs
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
                 ui.image('/static/favicon.svg').style('width: 24px; height: 24px;')
                 ui.label('fabCNC').classes('text-h6 font-bold')
+
+            with ui.tabs().props('dense inline-label').classes('header-tabs no-tooltips') as tabs:
+                job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath')
+                gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
+                wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
         
         # Center: Status pill + time estimate
         with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
@@ -872,7 +878,7 @@ def create_header():
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
-    return (pos_labels, status_label, update_btn,
+    return (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
             status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget)
 
 
@@ -2675,6 +2681,12 @@ def main_page():
                 min-width: 1440px;
                 overflow: hidden !important;
             }
+
+            /* The workspace meets the header directly; keep outer page gutters out. */
+            .q-page {
+                padding: 0 !important;
+                margin: 0 !important;
+            }
             
             /* Remove default Quasar tab panel padding to prevent overflow */
             .q-tab-panels, .q-tab-panel {
@@ -2742,7 +2754,7 @@ def main_page():
                 min-height: 56px !important;
                 max-height: 56px !important;
                 height: 56px !important;
-                padding: 7px 16px !important;
+                padding: 7px 16px 0 !important;
             }
             
             /* Cards - Subtle and tight */
@@ -2847,26 +2859,25 @@ def main_page():
                 background: var(--md-border) !important;
             }
             
-            /* Browser-style tabs joined to the shared workspace surface */
+            /* Browser-style tabs stay in the header and meet the workspace below. */
             .header-tabs {
                 background: transparent !important;
                 padding: 0 !important;
                 border-radius: 0 !important;
-                border: 0 !important;
-                width: 100% !important;
-                flex: 0 0 42px;
-                height: 42px !important;
-                min-height: 42px !important;
+                flex: 0 0 auto !important;
+                width: auto !important;
+                height: 48px !important;
+                min-height: 48px !important;
+                align-self: flex-end;
                 overflow: visible !important;
             }
 
-            .workspace-frame {
-                box-sizing: border-box !important;
-                border: 0 solid var(--md-border);
-                border-left-width: 1px;
-                border-right-width: 1px;
-                border-bottom-width: 1px;
-                border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+            .workspace-content {
+                width: 100% !important;
+                max-width: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                gap: 0 !important;
                 background: var(--md-bg-card);
             }
 
@@ -2894,9 +2905,9 @@ def main_page():
             .header-tabs .q-tab {
                 position: relative;
                 box-sizing: border-box !important;
-                min-height: 42px !important;
-                max-height: 42px !important;
-                height: 42px !important;
+                min-height: 48px !important;
+                max-height: 48px !important;
+                height: 48px !important;
                 padding: 0 16px !important;
                 border: 1px solid #383838;
                 border-bottom: 0;
@@ -2977,11 +2988,11 @@ def main_page():
             }
             
             .header-tabs .q-tabs__content {
-                height: 42px !important;
-                min-height: 42px !important;
+                height: 48px !important;
+                min-height: 48px !important;
                 gap: 3px;
                 align-items: stretch;
-                border-bottom: 1px solid #414141;
+                border-bottom: 0;
             }
 
             .header-tabs .q-tab:first-child { border-left: 0; }
@@ -3303,8 +3314,8 @@ def main_page():
         </script>
     ''')
     
-    (pos_labels, status_label, update_btn, status_pill, status_icon,
-     wifi_status_icon, wifi_status_text, wifi_widget) = create_header()
+    (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
+     status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget) = create_header()
     
     # Update button click handler
     async def do_software_update():
@@ -3636,16 +3647,11 @@ def main_page():
         };
     ''')
     
-    # Keep the tab strip on the workspace frame so the selected tab joins its content.
-    with ui.column().classes('w-full mx-auto workspace-frame').style(
-        'height: calc(100vh - 56px); min-height: 600px; overflow: hidden; gap: 0;'
+    # Full-bleed panels meet the header tab strip without an outer gutter or frame.
+    with ui.column().classes('w-full workspace-content').style(
+        'height: calc(100vh - 56px); min-height: 600px; overflow: hidden;'
     ):
-        with ui.tabs().props('dense inline-label').classes('header-tabs no-tooltips') as tabs:
-            job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath')
-            gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
-            wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
-
-        with ui.tab_panels(tabs, value=job_tab).classes('w-full workspace-tab-panels'):
+        with ui.tab_panels(tabs, value=job_tab, animated=False).classes('w-full workspace-tab-panels'):
             # Job tab - File loading, job execution, and toolpath visualization
             with ui.tab_panel(job_tab).classes('tab-content'):
                 # Card: full height
