@@ -3769,7 +3769,7 @@ function clearMeasurement() {
     measureStart = null;
     lastMeasurement = null;
     measureNodeObjects.forEach(node => {
-        node.set({ fill: '#FFD54F', stroke: null });
+        node.set({ fill: '#FFD54F', stroke: null, visible: true });
     });
     if (canvas) canvas.requestRenderAll();
 }
@@ -3884,12 +3884,27 @@ function drawMeasurement(start, end) {
     canvas.add(line, label);
     canvas.bringToFront(line);
     canvas.bringToFront(label);
-    measureNodeObjects.forEach(node => canvas.bringToFront(node));
+    measureNodeObjects.forEach(node => {
+        const point = node._measurePoint;
+        const isStart = point.shapeName === start.shapeName && point.pointIndex === start.pointIndex;
+        const isEnd = point.shapeName === end.shapeName && point.pointIndex === end.pointIndex;
+        node.set({
+            visible: isStart || isEnd,
+            fill: isStart || isEnd ? '#FF6B35' : '#FFD54F'
+        });
+        if (isStart || isEnd) canvas.bringToFront(node);
+    });
     canvas.requestRenderAll();
 }
 
 function selectMeasureNode(circle) {
     const point = circle._measurePoint;
+    // Once a measurement is complete only its two endpoints remain visible.
+    // Clicking either one clears the selection and restores all snap dots.
+    if (lastMeasurement) {
+        clearMeasurement();
+        return;
+    }
     if (!measureStart) {
         clearMeasurement();
         measureStart = point;
