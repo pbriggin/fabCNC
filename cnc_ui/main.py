@@ -1299,15 +1299,19 @@ def create_file_controls():
         ''')
         
         # Canvas document controls
-        with ui.row().classes('w-full gap-1'):
+        with ui.row().classes('w-full gap-1').style('flex-wrap: nowrap;'):
             ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas')
             ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name')
             ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
             ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
 
-        canvas_name_label = ui.label(_canvas_name_text()).classes('w-full text-center').style(
-            'color: #aaa; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
-        )
+        canvas_name_label = ui.label(_canvas_name_text()).classes(
+            'self-center text-center font-bold px-3 py-1 rounded-full'
+        ).style(
+            'max-width: 100%; color: #79bfff; background: #193a59; '
+            'border: 1px solid #347fbd; box-shadow: 0 1px 5px rgba(52, 127, 189, 0.35); '
+            'font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+        ).tooltip('Current canvas; “modified” means it has unsaved changes')
         ui.context.client.storage['canvas_name_label'] = canvas_name_label
 
 
@@ -3782,7 +3786,7 @@ def main_page():
                 with ui.card().classes('workspace-panel-card w-full h-full').style('padding: 10px; box-sizing: border-box;'):
                     with ui.row().classes('gap-2 w-full').style('height: 100%; flex-wrap: nowrap;'):
                         # Left column: Job file and controls (fixed width, scrollable)
-                        with ui.column().classes('gap-2').style('flex: 0 0 200px; max-height: 100%; overflow-y: auto;'):
+                        with ui.column().classes('gap-2').style('flex: 0 0 280px; max-height: 100%; overflow-y: auto;'):
                             create_file_controls()
                             ui.separator()
                             create_job_controls()
