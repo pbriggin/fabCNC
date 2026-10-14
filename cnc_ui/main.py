@@ -844,8 +844,8 @@ def create_header():
                 ui.label('fabCNC').classes('text-h6 font-bold')
             
             # Tabs in header
-            with ui.tabs().props('dense inline-label').classes('header-tabs').style('background: transparent;') as tabs:
-                job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath').tooltip('Open toolpath setup and job controls')
+            with ui.tabs().props('dense inline-label').classes('header-tabs no-tooltips').style('background: transparent;') as tabs:
+                job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath')
                 gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
                 wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
         
@@ -2871,7 +2871,7 @@ def main_page():
                 min-height: 42px !important;
                 max-height: 42px !important;
                 height: 42px !important;
-                padding: 0 13px !important;
+                padding: 0 16px !important;
                 border: 1px solid #383838;
                 border-bottom: 0;
                 border-radius: 9px 9px 0 0 !important;
@@ -2939,10 +2939,15 @@ def main_page():
             }
 
             .header-tabs .q-tab__label {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
                 letter-spacing: 0.01em;
                 line-height: 1;
+            }
+
+            .header-tabs .q-tab__icon {
+                margin: 0 !important;
+                font-size: 21px !important;
             }
             
             .header-tabs .q-tabs__content {
