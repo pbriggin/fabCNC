@@ -2769,6 +2769,10 @@ def main_page():
                 height: 56px !important;
                 padding: 7px 16px 0 !important;
             }
+
+            header.q-header .q-layout__shadow {
+                display: none !important;
+            }
             
             /* Cards - Subtle and tight */
             .q-card {
@@ -2953,6 +2957,16 @@ def main_page():
                 color: #fff !important;
                 opacity: 1;
                 box-shadow: none;
+            }
+
+            .header-tabs .q-tab--active:hover {
+                background: var(--workspace-surface) !important;
+                color: #fff !important;
+                opacity: 1 !important;
+            }
+
+            .header-tabs .q-tab--active:hover > .q-focus-helper {
+                opacity: 0 !important;
             }
 
             .header-tabs .q-tab--active::before,
