@@ -2829,26 +2829,24 @@ def main_page():
             .header-tabs .nav-toolpath.q-tab--active {
                 background: rgba(76, 175, 80, 0.22) !important;
                 border-color: rgba(102, 187, 106, 0.8);
+                box-shadow: inset 0 -3px #66bb6a, 0 3px 10px rgba(0, 0, 0, 0.3);
             }
 
             .header-tabs .nav-gcode.q-tab--active {
                 background: rgba(74, 158, 255, 0.22) !important;
                 border-color: rgba(126, 175, 255, 0.8);
+                box-shadow: inset 0 -3px #7eafff, 0 3px 10px rgba(0, 0, 0, 0.3);
             }
 
             .header-tabs .nav-system.q-tab--active {
                 background: rgba(255, 167, 38, 0.22) !important;
                 border-color: rgba(255, 183, 77, 0.8);
+                box-shadow: inset 0 -3px #ffb74d, 0 3px 10px rgba(0, 0, 0, 0.3);
             }
 
             .header-tabs .q-tab__indicator {
-                height: 3px !important;
-                border-radius: 3px 3px 0 0;
+                display: none !important;
             }
-
-            .header-tabs .nav-toolpath .q-tab__indicator { background: #66bb6a !important; }
-            .header-tabs .nav-gcode .q-tab__indicator { background: #7eafff !important; }
-            .header-tabs .nav-system .q-tab__indicator { background: #ffb74d !important; }
 
             .header-tabs .q-tab__label {
                 font-size: 13px;
@@ -3111,12 +3109,26 @@ def main_page():
                     tooltip.classList.remove('visible');
                 }
 
+                function hasVisibleExplicitTooltip() {
+                    return [...document.querySelectorAll('.q-tooltip')].some(candidate => {
+                        const style = window.getComputedStyle(candidate);
+                        const rect = candidate.getBoundingClientRect();
+                        return candidate !== tooltip
+                            && style.display !== 'none'
+                            && style.visibility !== 'hidden'
+                            && Number(style.opacity || 1) > 0
+                            && rect.width > 0
+                            && rect.height > 0;
+                    });
+                }
+
                 function showFallbackTooltip(control) {
-                    if (!control || control.querySelector?.('.q-tooltip')) return;
+                    if (!control || control.querySelector?.('.q-tooltip')
+                            || hasVisibleExplicitTooltip()) return;
                     activeControl = control;
                     clearTimeout(showTimer);
                     showTimer = setTimeout(() => {
-                        if (activeControl !== control) return;
+                        if (activeControl !== control || hasVisibleExplicitTooltip()) return;
                         tooltip.textContent = fallbackControlTooltipText(control);
                         const rect = control.getBoundingClientRect();
                         tooltip.style.left = `${Math.max(8, Math.min(
@@ -3125,8 +3137,21 @@ def main_page():
                         ))}px`;
                         tooltip.style.top = `${Math.min(window.innerHeight - 36, rect.bottom + 7)}px`;
                         tooltip.classList.add('visible');
-                    }, 450);
+                    }, 650);
                 }
+
+                // Quasar renders tooltips in a body-level portal. If an explicit
+                // tooltip appears after the fallback timer starts, dismiss the
+                // fallback immediately so the two can never overlap.
+                const explicitTooltipObserver = new MutationObserver(() => {
+                    if (hasVisibleExplicitTooltip()) hideFallbackTooltip();
+                });
+                explicitTooltipObserver.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['class', 'style'],
+                });
 
                 document.addEventListener('pointerover', event => {
                     const control = tooltipControlFrom(event.target);
