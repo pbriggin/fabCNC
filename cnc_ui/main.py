@@ -1260,6 +1260,11 @@ def create_file_controls():
             on_upload=lambda e: handle_file_upload(e)
         ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;') \
             .tooltip('Select one or more DXF files to add their shapes to the canvas')
+
+        ui.button('Open DXF', icon='folder_open', on_click=open_saved_dxf_dialog) \
+            .props('dense').classes('w-full').style(
+                'background-color: #2a2a2a; color: #4a9eff; font-size: 13px;'
+            ).tooltip('Add a DXF file already saved on this Raspberry Pi to the canvas')
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -1569,54 +1574,58 @@ def update_toolpath_plot(shapes: dict, clear_existing: bool = True):
     add_shapes_to_canvas(shapes)
 
 
-async def handle_file_upload(event):
-    """Handle file upload event."""
+async def _import_dxf_path(saved_path, filename):
+    """Process a DXF from the uploads folder and add its shapes to this canvas."""
     global current_gcode, current_toolpath_shapes, toolpath_canvas
-    
-    import os
-    import tempfile
-    
+
     try:
-        # NiceGUI UploadEventArguments has a .file attribute containing the SmallFileUpload
-        uploaded_file = event.file
-        filename = uploaded_file.name
-        
         print(f"\n{'='*60}")
         print(f"DXF IMPORT DEBUG: {filename}")
         print(f"{'='*60}")
-        
-        # SmallFileUpload.read() is async
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
-            content = await uploaded_file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-        
-        # Save to uploads directory
-        saved_path = file_manager.save_uploaded_file(tmp_path, filename)
-        os.unlink(tmp_path)
-        print(f"Saved to: {saved_path}")
-        log_event('file', 'dxf_import_started', filename=filename, saved_path=str(saved_path),
-                  size_bytes=len(content))
-        
+        print(f"Loading from: {saved_path}")
+        log_event('file', 'dxf_import_started', filename=filename, saved_path=str(saved_path))
+
         # Process DXF file
         ui.notify('Processing the DXF file…', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
         shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
-        current_toolpath_shapes.update(shapes)
+
+        # Keep Python's persisted canvas names in sync with the browser canvas,
+        # even when another imported DXF contains the same shape_0, shape_1… names.
+        existing_shape_count = len(current_toolpath_shapes)
+        unique_shapes = {}
+        unique_breaks = {}
+        unique_types = {}
+        for shape_name, points in shapes.items():
+            unique_name = shape_name
+            if unique_name in current_toolpath_shapes or unique_name in unique_shapes:
+                unique_name = f'{Path(filename).stem}_{shape_name}'
+                suffix = 1
+                base_name = unique_name
+                while unique_name in current_toolpath_shapes or unique_name in unique_shapes:
+                    unique_name = f'{base_name}_{suffix}'
+                    suffix += 1
+            unique_shapes[unique_name] = points
+            if shape_name in (shape_breaks or {}):
+                unique_breaks[unique_name] = shape_breaks[shape_name]
+            if shape_name in (shape_types or {}):
+                unique_types[unique_name] = shape_types[shape_name]
+
+        current_toolpath_shapes.update(unique_shapes)
         # Persist segment metadata so notch nodes can be regenerated after a
         # browser refresh (otherwise breaks=[0], types=[], and computeCardinalNodes
         # collapses the whole shape into a single midpoint node).
-        if shape_breaks:
-            current_toolpath_breaks.update(shape_breaks)
-        if shape_types:
-            current_toolpath_types.update(shape_types)
+        if unique_breaks:
+            current_toolpath_breaks.update(unique_breaks)
+        if unique_types:
+            current_toolpath_types.update(unique_types)
         
         # Debug: Print shape details
         print(f"\n--- DXF Processing Results ---")
-        print(f"Total shapes extracted: {len(shapes)}")
+        print(f"Total shapes extracted: {len(unique_shapes)}")
         
-        for shape_name, points in shapes.items():
+        for shape_name, points in unique_shapes.items():
             if not points:
                 print(f"  {shape_name}: EMPTY")
                 continue
@@ -1645,7 +1654,8 @@ async def handle_file_upload(event):
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
         # Offset color index by current shape count so each file gets distinct colors
-        add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks, entity_types=shape_types)
+        add_shapes_to_canvas(unique_shapes, start_color_index=existing_shape_count,
+                             breaks=unique_breaks, entity_types=unique_types)
         
         # Update state - clear any generated toolpath since shapes changed
         # A DXF import creates a new, unsaved canvas; the DXF filename is not
@@ -1656,14 +1666,77 @@ async def handle_file_upload(event):
         client_job_state['canvas_dirty'] = True
         client_job_state['toolpath_generated'] = False
         
-        ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
-        log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(shapes),
-                  shape_names=list(shapes.keys()))
+        ui.notify(f'File added: {filename} ({len(unique_shapes)} shapes)', type='positive')
+        log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(unique_shapes),
+                  shape_names=list(unique_shapes.keys()))
+        return True
     except Exception as e:
         ui.notify(_safe_error_message('The DXF file could not be processed.'), type='negative', timeout=8000)
         log_event('file', 'dxf_import_error', filename=locals().get('filename'), error=str(e))
         import traceback
         traceback.print_exc()
+        return False
+
+
+async def handle_file_upload(event):
+    """Save an uploaded DXF, then add its shapes to the current canvas."""
+    import tempfile
+
+    tmp_path = None
+    filename = getattr(getattr(event, 'file', None), 'name', 'uploaded.dxf')
+    try:
+        uploaded_file = event.file
+        filename = uploaded_file.name
+        content = await uploaded_file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        saved_path = file_manager.save_uploaded_file(tmp_path, filename)
+        log_event('file', 'dxf_upload_saved', filename=filename, saved_path=str(saved_path),
+                  size_bytes=len(content))
+        await _import_dxf_path(saved_path, filename)
+    except Exception as e:
+        ui.notify(_safe_error_message('The DXF file could not be uploaded.'), type='negative', timeout=8000)
+        log_event('file', 'dxf_upload_error', filename=filename, error=str(e))
+        logger.exception('Error saving uploaded DXF %s', filename)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def open_saved_dxf_dialog():
+    """Show DXFs stored on the Raspberry Pi for insertion into the canvas."""
+    filenames = file_manager.list_uploaded_files()
+    if not filenames:
+        ui.notify('No DXF files are saved on this Raspberry Pi yet.', type='warning')
+        return
+
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE + 'width: 480px;'):
+        ui.label('Open DXF').classes('text-h6 font-bold').style('color: #fff;')
+        ui.label('Choose a saved DXF to add its shapes to the current canvas.') \
+            .style('color: #aaa; font-size: 12px; margin-top: 4px;')
+        with ui.column().classes('w-full gap-0').style(
+            'max-height: 400px; overflow-y: auto; border: 1px solid #333; border-radius: 4px;'
+        ):
+            for filename in filenames:
+                async def _open_saved_dxf(name=filename):
+                    saved_path = (file_manager.upload_dir / name).resolve()
+                    upload_root = file_manager.upload_dir.resolve()
+                    if saved_path.parent != upload_root or saved_path.suffix.lower() != '.dxf' or not saved_path.is_file():
+                        ui.notify('That DXF file is no longer available.', type='negative')
+                        return
+                    if await _import_dxf_path(str(saved_path), name):
+                        dialog.close()
+
+                ui.button(filename, icon='insert_drive_file', on_click=_open_saved_dxf) \
+                    .props('flat align=left dense') \
+                    .classes('w-full') \
+                    .style('color: #4a9eff; font-size: 13px; text-transform: none; justify-content: flex-start;')
+
+        with ui.row().classes('w-full justify-end mt-2'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+
+    dialog.open()
 
 
 async def save_canvas_state():
@@ -2971,6 +3044,7 @@ def main_page():
             ].join(', ');
 
             function tooltipControlFrom(target) {
+                if (!target) return null;
                 const field = target.closest?.('.q-field');
                 return field || target.closest?.(controlSelector);
             }
@@ -3095,19 +3169,35 @@ def main_page():
                 document.body.appendChild(tooltip);
                 let activeControl = null;
                 let showTimer = null;
+                let pointerPosition = null;
+                let activeTrigger = null;
 
                 function hideFallbackTooltip() {
                     clearTimeout(showTimer);
                     activeControl = null;
+                    activeTrigger = null;
                     tooltip.classList.remove('visible');
                 }
 
-                function showFallbackTooltip(control) {
+                function showFallbackTooltip(control, pointerEvent = null) {
                     if (!control) return;
                     activeControl = control;
+                    activeTrigger = pointerEvent ? 'pointer' : 'focus';
+                    if (pointerEvent) {
+                        pointerPosition = {x: pointerEvent.clientX, y: pointerEvent.clientY};
+                    }
                     clearTimeout(showTimer);
                     showTimer = setTimeout(() => {
                         if (activeControl !== control) return;
+                        if (activeTrigger === 'pointer') {
+                            const hoveredElement = pointerPosition
+                                ? document.elementFromPoint(pointerPosition.x, pointerPosition.y)
+                                : null;
+                            if (tooltipControlFrom(hoveredElement) !== control) {
+                                hideFallbackTooltip();
+                                return;
+                            }
+                        }
                         tooltip.textContent = fallbackControlTooltipText(control);
                         const rect = control.getBoundingClientRect();
                         tooltip.style.left = `${Math.max(8, Math.min(
@@ -3121,11 +3211,17 @@ def main_page():
 
                 document.addEventListener('pointerover', event => {
                     const control = tooltipControlFrom(event.target);
-                    if (control && !control.contains(event.relatedTarget)) showFallbackTooltip(control);
+                    if (control && !control.contains(event.relatedTarget)) {
+                        showFallbackTooltip(control, event);
+                    }
+                });
+                document.addEventListener('pointermove', event => {
+                    pointerPosition = {x: event.clientX, y: event.clientY};
                 });
                 document.addEventListener('pointerout', event => {
                     const control = tooltipControlFrom(event.target);
-                    if (control && !control.contains(event.relatedTarget)) hideFallbackTooltip();
+                    if (control && activeControl === control
+                            && !control.contains(event.relatedTarget)) hideFallbackTooltip();
                 });
                 document.addEventListener('focusin', event => {
                     const control = tooltipControlFrom(event.target);
