@@ -1459,6 +1459,10 @@ class CNCController:
         self._current_job_gcode = list(gcode_lines)
         self._current_job_piece_count = max(0, int(piece_count or 0))
         self._current_source_filename = source_filename or state.loaded_filename
+        if self._current_source_filename:
+            # Freeze the identity of the canvas that actually won the machine
+            # reservation, rather than leaving the header tied to mutable UI state.
+            machine_state.set_job_loaded(True, self._current_source_filename)
         self.current_job_id = uuid.uuid4().hex
         self._stopped_log_upload_scheduled = False
         self.sd_job_active = False

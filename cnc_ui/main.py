@@ -801,7 +801,9 @@ def create_header():
             status_pill = ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded-full').style('background: #2d4a2d; border: 1px solid #3d5a3d;')
             with status_pill:
                 status_icon = ui.icon('radio_button_checked', size='10px').classes('text-green-4')
-                status_label = ui.label('Idle').classes('text-caption font-bold text-green-4')
+                status_label = ui.label('Idle').classes('text-caption font-bold text-green-4').style(
+                    'max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+                )
         
         # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
@@ -1713,6 +1715,11 @@ async def save_canvas_state():
                 with open(filepath, 'w') as f:
                     f.write(canvas_json)
 
+                # Use the saved canvas name as the identity of the next job
+                # generated from it.  Marlin always runs FABJOB.GCO, so the
+                # human-readable canvas name must be retained separately.
+                machine_state.set_job_loaded(True, safe_name)
+                client_job_state['loaded_filename'] = safe_name
                 ui.notify(f'Saved: {safe_name}', type='positive')
                 logger.info(f'Canvas state saved to {filepath}')
                 log_event('canvas', 'canvas_saved', filename=safe_name,
@@ -1975,7 +1982,7 @@ async def toggle_toolpath(button):
             'gcode': list(current_gcode),
             'sha256': gcode_digest,
             'piece_count': len(shapes_snapshot),
-            'source_filename': client_job_state['loaded_filename'],
+            'source_filename': client_job_state['loaded_filename'] or 'Untitled canvas',
         }
 
         # Store viz data server-side; JS fetches it via GET /toolpath-preview so we
@@ -2320,6 +2327,14 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     current_status = state.status_text
     display_status = current_status
     sd_verification_status = 'SD job ended while disconnected — verify machine'
+    if (
+        cnc_controller.sd_job_active
+        and not state.paused
+        and current_status.startswith('Running')
+        and state.loaded_filename
+    ):
+        canvas_name = Path(state.loaded_filename).stem
+        display_status = f'{current_status}: {canvas_name}'
     if current_status == sd_verification_status:
         display_status = 'Verify SD job'
     elif current_status == 'Retrying connection...':
