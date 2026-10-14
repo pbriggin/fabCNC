@@ -3260,7 +3260,7 @@ def main_page():
                             with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
                                 notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
-                                measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between any two shape nodes — click a start node, then an end node')
+                                measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point')
                                 measure_mode_state['btn'] = measure_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')

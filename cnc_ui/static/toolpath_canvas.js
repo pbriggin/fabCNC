@@ -3783,14 +3783,57 @@ function hideMeasureNodes() {
 function _measureNodesForShape(shapeName) {
     const data = shapeData[shapeName];
     if (!data || !data.originalMmPoints) return [];
-    const nodes = [];
-    data.originalMmPoints.forEach((point, pointIndex) => {
-        const previous = nodes[nodes.length - 1];
-        if (!previous || Math.hypot(point[0] - previous.x, point[1] - previous.y) > 1e-6) {
-            nodes.push({ x: point[0], y: point[1], shapeName, pointIndex });
-        }
-    });
-    return nodes;
+    const points = data.originalMmPoints;
+    if (points.length === 0) return [];
+
+    // DXF curves are flattened into many rendering samples. Showing every one
+    // makes the useful snap points impossible to see, so expose only obvious
+    // geometric landmarks: endpoints, extrema, and sharp direction changes.
+    const closed = points.length > 2 &&
+        Math.hypot(points[0][0] - points[points.length - 1][0],
+                   points[0][1] - points[points.length - 1][1]) < 0.01;
+    const count = closed ? points.length - 1 : points.length;
+    if (count === 0) return [];
+
+    const selected = new Set();
+    if (!closed) {
+        selected.add(0);
+        selected.add(count - 1);
+    }
+
+    // Four cardinal extrema make circles/arcs and otherwise cornerless curves
+    // measurable without restoring all their interpolation samples.
+    let minX = 0, maxX = 0, minY = 0, maxY = 0;
+    for (let i = 1; i < count; i++) {
+        if (points[i][0] < points[minX][0]) minX = i;
+        if (points[i][0] > points[maxX][0]) maxX = i;
+        if (points[i][1] < points[minY][1]) minY = i;
+        if (points[i][1] > points[maxY][1]) maxY = i;
+    }
+    [minX, maxX, minY, maxY].forEach(i => selected.add(i));
+
+    const CORNER_THRESHOLD_DEG = 25;
+    const first = closed ? 0 : 1;
+    const last = closed ? count : count - 1;
+    for (let i = first; i < last; i++) {
+        const prev = points[(i - 1 + count) % count];
+        const here = points[i];
+        const next = points[(i + 1) % count];
+        const ax = here[0] - prev[0], ay = here[1] - prev[1];
+        const bx = next[0] - here[0], by = next[1] - here[1];
+        const aLen = Math.hypot(ax, ay), bLen = Math.hypot(bx, by);
+        if (aLen < 1e-9 || bLen < 1e-9) continue;
+        const dot = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (aLen * bLen)));
+        const turnDeg = Math.acos(dot) * 180 / Math.PI;
+        if (turnDeg >= CORNER_THRESHOLD_DEG) selected.add(i);
+    }
+
+    return [...selected].sort((a, b) => a - b).map(pointIndex => ({
+        x: points[pointIndex][0],
+        y: points[pointIndex][1],
+        shapeName,
+        pointIndex
+    }));
 }
 
 function showMeasureNodes() {
