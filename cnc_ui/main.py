@@ -2763,7 +2763,7 @@ def main_page():
             /* Compact Header */
             header.q-header {
                 background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%) !important;
-                border-bottom: 1px solid var(--md-border) !important;
+                border-bottom: 0 !important;
                 min-height: 56px !important;
                 max-height: 56px !important;
                 height: 56px !important;
@@ -2948,9 +2948,10 @@ def main_page():
                 background: var(--workspace-surface) !important;
                 border-color: #414141;
                 border-bottom-color: var(--workspace-surface) !important;
+                border-radius: 12px !important;
                 color: #fff !important;
                 opacity: 1;
-                box-shadow: 0 1px 0 var(--workspace-surface);
+                box-shadow: none;
             }
 
             .header-tabs .q-tab--active::before {
