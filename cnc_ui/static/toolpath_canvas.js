@@ -3769,7 +3769,7 @@ function clearMeasurement() {
     measureStart = null;
     lastMeasurement = null;
     measureNodeObjects.forEach(node => {
-        node.set({ fill: 'rgba(255,255,255,0.16)', stroke: '#bdbdbd' });
+        node.set({ fill: '#FFD54F', stroke: null });
     });
     if (canvas) canvas.requestRenderAll();
 }
@@ -3842,8 +3842,8 @@ function showMeasureNodes() {
         _measureNodesForShape(shapeName).forEach(node => {
             const circle = new fabric.Circle({
                 left: toCanvasX(node.x), top: toCanvasY(node.y),
-                originX: 'center', originY: 'center', radius: 6,
-                fill: 'rgba(255,255,255,0.16)', stroke: '#bdbdbd', strokeWidth: 1.5,
+                originX: 'center', originY: 'center', radius: 3,
+                fill: '#FFD54F', stroke: null,
                 selectable: false, evented: true, hoverCursor: 'crosshair',
                 _measureNode: true, _measurePoint: node
             });
@@ -3893,7 +3893,7 @@ function selectMeasureNode(circle) {
     if (!measureStart) {
         clearMeasurement();
         measureStart = point;
-        circle.set({ fill: '#FFD54F', stroke: '#FFD54F' });
+        circle.set({ fill: '#FF6B35' });
         canvas.requestRenderAll();
         return;
     }
