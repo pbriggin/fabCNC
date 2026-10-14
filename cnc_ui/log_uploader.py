@@ -297,7 +297,7 @@ def build_bundle(
 
     *trigger* is embedded in the filename so bundles are easy to distinguish
     in remote storage. Common values: ``"auto"``, ``"manual"``,
-    ``"disconnect"``, ``"job_complete"``, ``"job_abort"``.
+    ``"disconnect"``, ``"job_complete"``, ``"job_abort"``, ``"job_stopped"``.
 
     *max_bytes_override*, when given, replaces ``upload.max_bundle_mb`` for this
     call — used by ``upload_now`` to retry with a shrinking budget after the
@@ -727,10 +727,16 @@ def _uploader_loop(interval_s: float) -> None:
     while not _stop_event.is_set():
         global _job_run_since_last_periodic
         if _job_run_since_last_periodic:
+            # Clear before uploading so a job that starts during the upload
+            # sets the flag for the following interval. Restore it on failure
+            # so transient network errors do not silently discard the retry.
             _job_run_since_last_periodic = False
             try:
-                upload_now(full=False, trigger="retry")
+                result = upload_now(full=False, trigger="retry")
+                if not result.get("ok"):
+                    _job_run_since_last_periodic = True
             except Exception as e:
+                _job_run_since_last_periodic = True
                 logger.exception(f"Uploader iteration crashed: {e}")
         else:
             logger.debug("Periodic upload skipped — no job run since last upload")

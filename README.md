@@ -19,7 +19,7 @@ A web-based controller for a 4-axis fabric CNC cutting machine, built with Pytho
 
 - Python 3.10 or higher
 - Raspberry Pi 5 (or any Linux/macOS for development)
-- Marlin-based CNC controller connected via USB serial (auto-detected at 115200 baud)
+- Marlin-based CNC controller connected via USB serial (auto-detected at 250000 baud)
 - Network connection
 
 ## Installation
@@ -50,6 +50,27 @@ The application will be available at:
 - Local access: http://127.0.0.1:8080
 - Network access (by hostname): http://fabcnc.local:8080
 - Network access (by IP): http://\<raspberry-pi-ip\>:8080
+
+The default operator password remains `2026`. On Linux, `setup.sh` stores that
+password and a generated session-signing secret in `/etc/fabcnc.env`; existing
+settings are preserved on later setup runs. An authenticated operator can use
+**System → Security → Change UI Password** without backend access. The changed
+password is stored locally as a salted hash and takes precedence over the
+default. `FABCNC_APP_PASSWORD` controls the initial password before the first
+user change.
+When the UI is served only through HTTPS, set `FABCNC_SECURE_COOKIES=true`.
+
+For development without systemd, set `FABCNC_APP_PASSWORD` and
+`FABCNC_STORAGE_SECRET` in the environment before starting `main.py`. The
+password defaults to `2026` when the variable is omitted.
+
+During the first Linux setup, `setup.sh` also prints a unique factory recovery
+code once. Put that code on the machine's recovery label or card. Only a salted
+hash is retained on the Pi. From the login page, **Forgot password?** accepts
+this permanent machine-specific code and restores the password to `2026`; the
+operator should then sign in and choose a new password. Recovery attempts are
+rate-limited, successful recovery invalidates every existing login session, and
+running setup again does not replace the machine's recovery code.
 
 ## Project Structure
 
@@ -116,9 +137,9 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 
 ### Marlin SD-card job execution
 
-`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, and sends numbered/checksummed lines so Marlin can request retransmission if needed. It confirms the file appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress and `M114` for position. Short utility sequences continue to use the existing serial streamer.
+`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`, including logging whether `Cap:EMERGENCY_PARSER:1` is present. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, and sends numbered/checksummed lines so Marlin can request retransmission if needed. It confirms the file appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress. Position polling is suspended during SD playback so it cannot delay Stop. Short utility sequences continue to use the existing serial streamer.
 
-Pause and resume use Marlin `M25`/`M24`; stop uses `M524` plus `M410`. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. USB loss can leave an SD print running; do not power-cycle the controller until the machine has been checked. Controller power loss is not automatically resumable by fabCNC.
+Pause and resume use Marlin `M25`/`M24`. Stop writes `M524` plus `M410` through a priority serial path, invalidates homing, and does not report success until SD-idle state and serial ordering are confirmed. The currently installed firmware may finish its active command before processing these stop commands, so the physical E-stop remains the only emergency stop. After every software Stop, run a full Home All before further motion. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. USB loss can leave an SD print running; do not power-cycle the controller until the machine has been checked. Controller power loss is not automatically resumable by fabCNC.
 
 If reconnect probing fails after a controller power cycle, **Force Recovery** in the disconnect alert requires an explicit stopped-machine confirmation before trying one USB DTR reset. If Marlin is connected but halted, it sends `M999` instead. This can abort an SD job; verify the cutter is stopped first.
 
@@ -210,6 +231,8 @@ sudo nmcli connection modify "$CON" -802-11-wireless.bssid "" && echo "BSSID loc
 
 - Physical E-stop required; no software E-stop is implemented
 - Job controls are disabled during manual operations and vice versa
+- Run the supervised [hardware validation checklist](docs/HARDWARE_VALIDATION.md)
+  after controller, firmware, wiring, or motion-setting changes.
 
 ## Logging & Remote Diagnostics
 

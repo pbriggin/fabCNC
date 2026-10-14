@@ -197,6 +197,9 @@ class DXFProcessor:
         """Process a CIRCLE entity by breaking it into small arcs."""
         center = entity.dxf.center
         radius = entity.dxf.radius
+        if not math.isfinite(radius) or radius <= 0:
+            logger.warning("Skipping circle with invalid radius: %r", radius)
+            return []
         
         # Calculate number of segments needed
         circumference = 2 * math.pi * radius
@@ -219,6 +222,9 @@ class DXFProcessor:
         """Process an ARC entity by breaking it into small segments."""
         center = entity.dxf.center
         radius = entity.dxf.radius
+        if not math.isfinite(radius) or radius <= 0:
+            logger.warning("Skipping arc with invalid radius: %r", radius)
+            return []
         start_angle = math.radians(entity.dxf.start_angle)
         end_angle = math.radians(entity.dxf.end_angle)
         
@@ -245,6 +251,17 @@ class DXFProcessor:
     
     def _process_lwpolyline(self, entity) -> List[Tuple[float, float]]:
         """Process a LWPOLYLINE entity with increased point density."""
+        vertices_with_bulge = list(entity.get_points("xyb"))
+        if any(abs(vertex[2]) > 1e-12 for vertex in vertices_with_bulge):
+            # A non-zero DXF bulge encodes an arc. Treating those vertices as
+            # straight chords changes the part geometry and therefore the
+            # physical cut. ezdxf's path flattener preserves the arc while
+            # bounding its deviation from the source curve.
+            points = [(point.x, point.y) for point in make_path(entity).flattening(0.05)]
+            if entity.closed and points and points[0] != points[-1]:
+                points.append(points[0])
+            return self._remove_duplicate_points(points, min_distance=0.05)
+
         original_points = []
         
         for vertex in entity.get_points():
@@ -1097,4 +1114,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

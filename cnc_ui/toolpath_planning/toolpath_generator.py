@@ -57,7 +57,6 @@ class ToolpathGenerator:
         self.min_curve_feed_rate = min_curve_feed_rate
         self.curve_slowdown_radius = curve_slowdown_radius
         self.stealthchop = False  # Enable StealthChop for quiet operation (Slow/Medium speeds)
-        self.home_all = True  # Home all axes (X, Y, Z, A) before toolpath; False = Z and A only
         self.current_z = safe_height  # Track current Z position
         self.current_a = 0.0  # Track current A position for continuous rotation
         
@@ -175,17 +174,15 @@ class ToolpathGenerator:
             "",
             "G21 ; Set units to millimeters",
             "G90 ; Set absolute positioning",
+            "M18 Y ; Release both Y motors before homing",
+            "G4 P1000 ; Allow Y motors to fully de-energize",
+            "M17 Y ; Re-enable both Y motors",
+            "G4 P500 ; Allow Y motor current to stabilize",
             "M17 ; Enable all steppers",
             "",
-        ] + ([
             "; Home all axes for safe starting position",
             "G28 X Y Z ; Home X, Y, Z (explicit axes - avoids homing A twice)",
             "G28 A ; Home A (rotation)",
-        ] if self.home_all else [
-            "; Home Z and A axes for safe starting position (preserves XY zero)",
-            "G28 Z ; Home Z",
-            "G28 A ; Home A (rotation)",
-        ]) + [
             "",
             "; Set speed/accel for cutting",
             "M203 Z25 ; Max Z speed 25 mm/s (1500 mm/min)",
@@ -930,4 +927,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
