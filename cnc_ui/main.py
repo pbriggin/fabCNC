@@ -3156,10 +3156,16 @@ def main_page():
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
-                                nest_offset = ui.number(value=15, format='%.0f', min=1, max=100).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                nest_offset = ui.number(
+                                    value=15.0,
+                                    format='%.1f',
+                                    min=1.0,
+                                    max=100.0,
+                                    step=0.1,
+                                ).props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
                                 
                                 async def do_nest():
-                                    offset_val = int(nest_offset.value)
+                                    offset_val = float(nest_offset.value)
                                     keep_orient = str(keep_orientation.value).lower()
                                     logger.info(f"[NEST] do_nest start: offset={offset_val} keep={keep_orient} "
                                                 f"py_shape_count={len(current_toolpath_shapes)}")
