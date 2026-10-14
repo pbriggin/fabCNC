@@ -3478,8 +3478,8 @@ def main_page():
         };
     ''')
     
-    # Main content area - 48px header + 1px border = 49px, use 50px for safety
-    with ui.column().classes('w-full mx-auto').style('height: calc(100vh - 50px); min-height: 600px; overflow: hidden;'):
+    # Match the fixed 56px header so the content card keeps equal outer margins.
+    with ui.column().classes('w-full mx-auto').style('height: calc(100vh - 56px); min-height: 600px; overflow: hidden;'):
         with ui.tab_panels(tabs, value=job_tab).classes('w-full').style('height: 100%;'):
             # Job tab - File loading, job execution, and toolpath visualization
             with ui.tab_panel(job_tab).classes('tab-content'):
