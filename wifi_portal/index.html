@@ -327,13 +327,14 @@
         <div class="input-wrap">
           <input type="password" id="password"
             placeholder="Enter Wi-Fi password"
+            title="Enter the password for the selected Wi-Fi network"
             autocomplete="off" autocorrect="off"
             autocapitalize="none" spellcheck="false">
-          <button type="button" class="toggle-pw" onclick="togglePassword()">Show</button>
+          <button type="button" class="toggle-pw" onclick="togglePassword()" title="Show or hide the Wi-Fi password">Show</button>
         </div>
       </div>
 
-      <button class="btn btn-primary" id="connect-btn" onclick="submitConnect()">Connect</button>
+      <button class="btn btn-primary" id="connect-btn" onclick="submitConnect()" title="Connect fabCNC to the selected Wi-Fi network">Connect</button>
     </div>
 
     <div class="status-bar" id="status-bar"></div>
@@ -390,7 +391,7 @@
       list.innerHTML =
         '<li><div class="placeholder">' +
           '<span>No networks found.</span>' +
-          '<button class="btn btn-ghost" onclick="loadNetworks()">Retry</button>' +
+          '<button class="btn btn-ghost" onclick="loadNetworks()" title="Scan for Wi-Fi networks again">Retry</button>' +
         '</div></li>';
       return;
     }
@@ -398,7 +399,7 @@
     list.innerHTML = networks.map(function(n) {
       var secured = n.security && n.security.length > 0 &&
                     n.security.indexOf('none') === -1;
-      return '<li class="network-item" ' +
+      return '<li class="network-item" title="Connect to ' + esc(n.ssid) + '" ' +
                'onclick="selectNetwork(' + JSON.stringify(n.ssid) + ',' + secured + ',this)">' +
                '<div class="signal-icon">' + renderSignal(n.signal) + '</div>' +
                '<span class="network-name">' + esc(n.ssid) + '</span>' +
@@ -449,7 +450,7 @@
           '<span style="color:var(--accent-red)">Could not reach device.<br>' +
           '<small style="color:var(--text-secondary)">' + esc(err.message) + '</small><br><br>' +
           'Make sure you are connected to <strong>fabCNC Setup</strong> and reload.</span>' +
-          '<button class="btn btn-ghost" onclick="loadNetworks()">Retry</button>' +
+          '<button class="btn btn-ghost" onclick="loadNetworks()" title="Scan for Wi-Fi networks again">Retry</button>' +
         '</div></li>';
     });
   }

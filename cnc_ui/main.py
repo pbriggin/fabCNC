@@ -834,13 +834,14 @@ def create_header():
             
             # Tabs in header
             with ui.tabs().props('dense inline-label').classes('header-tabs').style('background: transparent;') as tabs:
-                job_tab = ui.tab('Toolpath', icon='route').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
-                gcode_tab = ui.tab('GCODE', icon='terminal').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
-                wifi_tab = ui.tab('System', icon='settings').style('font-size: 12px; min-height: 36px; padding: 0 12px;')
+                job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath').tooltip('Open toolpath setup and job controls')
+                gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode').tooltip('Open manual G-code controls and response log')
+                wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system').tooltip('Open connection, system, security, and diagnostic settings')
         
         # Center: Status pill + time estimate
         with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
             status_pill = ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded-full').style('background: #2d4a2d; border: 1px solid #3d5a3d;')
+            status_pill.tooltip('Machine status; select to view recovery options when attention is required')
             with status_pill:
                 status_icon = ui.icon('radio_button_checked', size='10px').classes('text-green-4')
                 status_label = ui.label('Idle').classes('text-caption font-bold text-green-4').style(
@@ -863,6 +864,7 @@ def create_header():
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
                 ui.element('div').style('width: 10px; flex-shrink: 0;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
+            wifi_widget.tooltip('Open Wi-Fi settings')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
@@ -2396,9 +2398,6 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     ):
         display_status = 'Controller disconnected'
     status_label.set_text(display_status)
-    if previous_status != current_status:
-        status_label.tooltip(current_status if display_status != current_status else '')
-
     # Update status pill appearance
     if status_pill and status_icon:
         if display_status in ('Controller disconnected', 'Controller reset required', 'Reconnecting…'):
@@ -2472,7 +2471,7 @@ def login_page():
             ).classes('text-body2 text-grey-5')
             recovery_input = ui.input('Machine recovery code').props(
                 'outlined dense autocomplete=off'
-            ).classes('w-full')
+            ).classes('w-full').tooltip('Enter the recovery code provided with this machine')
 
             async def recover():
                 global _BOOT_TOKEN
@@ -2506,8 +2505,8 @@ def login_page():
                 ui.notify('Password reset to 2026. Sign in and choose a new password.', type='positive', timeout=8000)
 
             with ui.row().classes('w-full justify-end gap-2'):
-                ui.button('Cancel', on_click=recovery_dialog.close).props('flat')
-                ui.button('Reset Password', on_click=recover, icon='lock_reset').props('color=primary')
+                ui.button('Cancel', on_click=recovery_dialog.close).props('flat').tooltip('Close without resetting the password')
+                ui.button('Reset Password', on_click=recover, icon='lock_reset').props('color=primary').tooltip('Verify the recovery code and reset the UI password')
 
         recovery_dialog.open()
         await recovery_dialog
@@ -2521,12 +2520,13 @@ def login_page():
                 ui.input(placeholder='Password', password=True)
                 .props('outlined dense autofocus')
                 .style('width: 100%; margin-bottom: 1rem;')
+                .tooltip('Enter the fabCNC UI password')
             )
             password_input.on('keydown.enter', try_login)
             ui.button('Unlock', on_click=try_login) \
-                .props('color=primary').style('width: 100%;')
+                .props('color=primary').style('width: 100%;').tooltip('Sign in to the fabCNC controller')
             ui.button('Forgot password?', on_click=forgot_password) \
-                .props('flat color=grey-5 no-caps').style('width: 100%; margin-top: 0.5rem;')
+                .props('flat color=grey-5 no-caps').style('width: 100%; margin-top: 0.5rem;').tooltip('Open password recovery')
 
 
 @ui.page('/')
@@ -2793,16 +2793,64 @@ def main_page():
             }
             
             .header-tabs .q-tab {
-                min-height: 36px !important;
-                padding: 0 10px !important;
-                border-radius: 4px !important;
+                min-height: 38px !important;
+                padding: 0 14px !important;
+                border: 1px solid transparent;
+                border-radius: var(--radius-md) !important;
                 margin: 0 2px !important;
-                opacity: 0.7;
+                color: var(--md-text-secondary) !important;
+                opacity: 0.82;
+                transition: background 0.15s ease, border-color 0.15s ease,
+                            color 0.15s ease, opacity 0.15s ease,
+                            transform 0.15s ease !important;
             }
-            
-            .header-tabs .q-tab--active {
-                background: rgba(255,255,255,0.1) !important;
+
+            .header-tabs .q-tab:hover:not(.q-tab--active) {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border-color: var(--md-border-light);
+                color: var(--md-text-primary) !important;
                 opacity: 1;
+            }
+
+            .header-tabs .q-tab--active {
+                color: #fff !important;
+                opacity: 1;
+                transform: translateY(-1px);
+                box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+            }
+
+            .header-tabs .nav-toolpath .q-icon { color: #66bb6a; }
+            .header-tabs .nav-gcode .q-icon { color: #7eafff; }
+            .header-tabs .nav-system .q-icon { color: #ffb74d; }
+
+            .header-tabs .nav-toolpath.q-tab--active {
+                background: rgba(76, 175, 80, 0.22) !important;
+                border-color: rgba(102, 187, 106, 0.8);
+            }
+
+            .header-tabs .nav-gcode.q-tab--active {
+                background: rgba(74, 158, 255, 0.22) !important;
+                border-color: rgba(126, 175, 255, 0.8);
+            }
+
+            .header-tabs .nav-system.q-tab--active {
+                background: rgba(255, 167, 38, 0.22) !important;
+                border-color: rgba(255, 183, 77, 0.8);
+            }
+
+            .header-tabs .q-tab__indicator {
+                height: 3px !important;
+                border-radius: 3px 3px 0 0;
+            }
+
+            .header-tabs .nav-toolpath .q-tab__indicator { background: #66bb6a !important; }
+            .header-tabs .nav-gcode .q-tab__indicator { background: #7eafff !important; }
+            .header-tabs .nav-system .q-tab__indicator { background: #ffb74d !important; }
+
+            .header-tabs .q-tab__label {
+                font-size: 13px;
+                font-weight: 600;
+                letter-spacing: 0.01em;
             }
             
             .header-tabs .q-tabs__content {
@@ -2895,6 +2943,56 @@ def main_page():
             }
         </style>
         <script>
+            // Ensure every interactive control has a non-empty hover description.
+            // NiceGUI tooltips render inside their control; this fallback only adds
+            // a native title when no explicit tooltip is present.
+            function installMissingControlTooltips(root = document) {
+                const iconNames = {
+                    home: 'Home all axes', download: 'Download', delete: 'Delete',
+                    close: 'Close', play_arrow: 'Start or resume', pause: 'Pause',
+                    stop: 'Stop', clear_all: 'Clear', restart_alt: 'Restart or recover',
+                    align_horizontal_center: 'Align horizontal centers',
+                    align_vertical_center: 'Align vertical centers',
+                    horizontal_distribute: 'Distribute horizontally',
+                    vertical_distribute: 'Distribute vertically'
+                };
+                const candidates = root.querySelectorAll(
+                    'button, [role="tab"], input, textarea, select, [role="checkbox"], '
+                    + '.q-field, .q-uploader, .jog-segment'
+                );
+                candidates.forEach(el => {
+                    if (el.title || el.querySelector?.('.q-tooltip')) return;
+                    let text = el.getAttribute('aria-label') || '';
+                    if (!text && el.classList.contains('jog-segment')) {
+                        text = (el.id || '').replaceAll('-', ' ').replace(/\b([xyza])\b/gi, '$1 axis');
+                    }
+                    if (!text && el.classList.contains('q-field')) {
+                        text = el.querySelector('.q-field__label')?.textContent || '';
+                    }
+                    if (!text) {
+                        const visibleText = (el.innerText || el.value || '').trim();
+                        text = visibleText.length <= 80 ? visibleText : '';
+                    }
+                    if (!text) {
+                        const icon = el.querySelector?.('.q-icon')?.textContent?.trim();
+                        text = iconNames[icon] || (icon ? icon.replaceAll('_', ' ') : 'Control');
+                    }
+                    text = String(text).replace(/\\s+/g, ' ').trim();
+                    if (text) el.title = text.charAt(0).toUpperCase() + text.slice(1);
+                });
+            }
+            window.addEventListener('load', () => {
+                installMissingControlTooltips();
+                const observer = new MutationObserver(records => records.forEach(record =>
+                    record.addedNodes.forEach(node => {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            installMissingControlTooltips(node.matches?.('button, [role="tab"], input, textarea, select, [role="checkbox"], .q-field, .q-uploader, .jog-segment') ? node.parentElement : node);
+                        }
+                    })
+                ));
+                observer.observe(document.body, {childList: true, subtree: true});
+            });
+
             // Reset scroll position when window is resized to normal size
             window.addEventListener('resize', function() {
                 if (window.innerWidth >= 1440 && window.innerHeight >= 600) {
