@@ -317,7 +317,7 @@ class ControllerSafetyTests(unittest.TestCase):
     def test_stop_ack_loss_preserves_possible_sd_job(self):
         controller = connected_controller()
         controller.sd_job_active = True
-        controller._quiesce_before_stream = lambda timeout=180.0: False
+        controller._quiesce_after_priority_stop = lambda timeout=30.0: False
         machine_state.set_status("Running", busy=True)
 
         stopped = controller.stop_job()
@@ -333,7 +333,7 @@ class ControllerSafetyTests(unittest.TestCase):
         controller = connected_controller()
         controller.sd_job_active = True
         controller.homed = True
-        controller._quiesce_before_stream = lambda timeout=180.0: False
+        controller._quiesce_after_priority_stop = lambda timeout=30.0: False
         machine_state.set_status("Running", busy=True)
 
         controller.operation_lock.acquire()
@@ -357,7 +357,7 @@ class ControllerSafetyTests(unittest.TestCase):
         controller = connected_controller()
         controller.sd_job_active = True
         controller.homed = True
-        controller._quiesce_before_stream = lambda timeout=180.0: True
+        controller._quiesce_after_priority_stop = lambda timeout=30.0: True
         controller._exchange_locked = lambda command, timeout: "Not SD printing\nok"
         controller._clear_sd_job_state = lambda: setattr(controller, "sd_job_active", False)
         machine_state.set_status("Running", busy=True)
@@ -370,6 +370,29 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertTrue(controller.rehome_required)
         self.assertEqual("Stopped — re-home required", machine_state.snapshot().status_text)
 
+    def test_priority_stop_boundary_retries_after_abort_clears_first_probe(self):
+        controller = connected_controller()
+        attempts = iter(((False, ""), (True, "FIRMWARE_NAME:Marlin\nok")))
+        controller._try_serial_boundary = lambda timeout: next(attempts)
+
+        synchronized = controller._quiesce_after_priority_stop(timeout=1.0)
+
+        self.assertTrue(synchronized)
+        self.assertFalse(controller.serial_uncertain)
+
+    def test_priority_stop_boundary_marks_uncertain_only_after_retries_fail(self):
+        controller = connected_controller()
+        controller._try_serial_boundary = lambda timeout: (False, "no response")
+
+        synchronized = controller._quiesce_after_priority_stop(timeout=0.02)
+
+        self.assertFalse(synchronized)
+        self.assertTrue(controller.serial_uncertain)
+        self.assertEqual(
+            "Machine state uncertain — verify controller",
+            machine_state.snapshot().status_text,
+        )
+
     def test_uncertain_state_home_is_rejected_without_g28(self):
         controller = connected_controller()
         controller.serial_uncertain = True
@@ -379,6 +402,49 @@ class ControllerSafetyTests(unittest.TestCase):
 
         self.assertFalse(homed)
         self.assertNotIn("G28", controller.serial_port.writes)
+
+    def test_recovery_home_all_cycles_y_motors_before_g28(self):
+        controller = connected_controller()
+        controller.rehome_required = True
+        controller.reset_y_motors_before_home = True
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        commands = []
+        controller._exchange_locked = lambda command, timeout: commands.append(command) or "ok"
+
+        homed = controller.home_all()
+
+        self.assertTrue(homed)
+        self.assertEqual(
+            ["M18 Y", "G4 P1000", "M17 Y", "G4 P500", "M17"],
+            commands[:5],
+        )
+        self.assertLess(commands.index("M17 Y"), commands.index("G28"))
+        self.assertFalse(controller.reset_y_motors_before_home)
+
+    def test_normal_home_all_does_not_cycle_y_motors(self):
+        controller = connected_controller()
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        commands = []
+        controller._exchange_locked = lambda command, timeout: commands.append(command) or "ok"
+
+        homed = controller.home_all()
+
+        self.assertTrue(homed)
+        self.assertNotIn("M18 Y", commands)
+        self.assertEqual("M17", commands[0])
+
+    def test_home_x_preserves_pending_y_motor_cycle(self):
+        controller = connected_controller()
+        controller.reset_y_motors_before_home = True
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        commands = []
+        controller._exchange_locked = lambda command, timeout: commands.append(command) or "ok"
+
+        homed = controller.home_axis("X")
+
+        self.assertTrue(homed)
+        self.assertNotIn("M18 Y", commands)
+        self.assertTrue(controller.reset_y_motors_before_home)
 
     def test_sd_monitor_does_not_issue_position_poll(self):
         controller = connected_controller()

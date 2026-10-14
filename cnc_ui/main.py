@@ -4060,13 +4060,14 @@ def main_page():
             if cnc_controller.connected and cnc_controller.serial_uncertain:
                 connection_alert_icon.props('name=warning color=orange-4')
                 connection_alert_title.set_text('Machine state uncertain')
-                connection_alert_subtitle.set_text('Recovery is required before homing or motion:')
+                connection_alert_subtitle.set_text('Automatic Stop verification did not complete:')
                 connection_alert_steps.set_text(
                     '1. Confirm the cutter is fully stopped.\n'
-                    '2. Click "Force Recovery" below.\n'
-                    '3. After recovery succeeds, run Home All.'
+                    '2. Click "Verify Controller" below.\n'
+                    '3. After verification succeeds, run Home All.'
                 )
                 retry_connection_button.set_visibility(False)
+                force_recovery_button.set_text('Verify Controller')
             elif cnc_controller.sd_job_disconnected:
                 connection_alert_icon.props('name=usb_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
@@ -4076,6 +4077,7 @@ def main_page():
                     'Check the machine, restore the USB connection when safe, then verify the job state.'
                 )
                 retry_connection_button.set_visibility(True)
+                force_recovery_button.set_text('Force Reconnect')
             else:
                 connection_alert_icon.props('name=usb_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
@@ -4086,6 +4088,9 @@ def main_page():
                     '3. Click "Retry Connection".'
                 )
                 retry_connection_button.set_visibility(True)
+                force_recovery_button.set_text(
+                    'Reset Controller' if cnc_controller.reset_required else 'Force Reconnect'
+                )
             force_recovery_button.set_visibility(True)
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas

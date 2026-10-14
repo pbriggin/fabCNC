@@ -147,6 +147,11 @@ class CNCController:
         self.operation_lock = threading.RLock()
         self.serial_uncertain = False
         self.rehome_required = False
+        # A software Stop may leave the dual-Y motors in a state that makes the
+        # next sensorless home trigger asymmetrically. Release and re-energize
+        # Y once before the next Y-containing recovery home. This is deliberately
+        # not applied to ordinary cold homing.
+        self.reset_y_motors_before_home = False
         
         # Flow control for streaming
         self.ok_count = 0  # Number of 'ok' responses received
@@ -1298,15 +1303,23 @@ class CNCController:
             machine_state.set_status(f"Homing {axis}...", busy=True)
             if not self._quiesce_before_stream():
                 return False
-            commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
-                        ("M204 P1000 T1000", 10.0), (f"G28 {axis.upper()}", 180.0),
-                        ("M400", 180.0), ("M114", 10.0),
-                        ("M204 P2000 T3000", 10.0), ("M18", 10.0))
+            reset_y = axis == "Y" and self.reset_y_motors_before_home
+            commands = []
+            if reset_y:
+                commands.extend((("M18 Y", 10.0), ("G4 P1000", 10.0),
+                                 ("M17 Y", 10.0), ("G4 P500", 10.0)))
+                log_controller_event("recovery_home_y_motor_cycle", axis=axis)
+            commands.extend((("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+                             ("M204 P1000 T1000", 10.0), (f"G28 {axis}", 180.0),
+                             ("M400", 180.0), ("M114", 10.0),
+                             ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
                     self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
                     return False
+            if reset_y:
+                self.reset_y_motors_before_home = False
             machine_state.set_status("Idle", busy=False)
             return True
     
@@ -1331,15 +1344,23 @@ class CNCController:
             machine_state.set_status("Homing all axes...", busy=True)
             if not self._quiesce_before_stream():
                 return False
-            commands = (("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
-                        ("M204 P1000 T1000", 10.0), ("G28", 180.0),
-                        ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
-                        ("M204 P2000 T3000", 10.0), ("M18", 10.0))
+            reset_y = self.reset_y_motors_before_home
+            commands = []
+            if reset_y:
+                commands.extend((("M18 Y", 10.0), ("G4 P1000", 10.0),
+                                 ("M17 Y", 10.0), ("G4 P500", 10.0)))
+                log_controller_event("recovery_home_y_motor_cycle", axis="ALL")
+            commands.extend((("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+                             ("M204 P1000 T1000", 10.0), ("G28", 180.0),
+                             ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
+                             ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
                     self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
                     return False
+            if reset_y:
+                self.reset_y_motors_before_home = False
             machine_state.set_status("Idle", busy=False)
             self.homed = True
             self.rehome_required = False
@@ -1474,6 +1495,7 @@ class CNCController:
         self.stop_requested = True
         self.homed = False
         self.rehome_required = True
+        self.reset_y_motors_before_home = True
         log_controller_event("job_stop_requested", priority=True)
 
         if self.connected and self.sd_uploading:
@@ -1485,7 +1507,7 @@ class CNCController:
                 self._mark_serial_uncertain("Could not transmit priority SD stop")
                 return False
             with self.operation_lock:
-                if not self._quiesce_before_stream(timeout=30.0):
+                if not self._quiesce_after_priority_stop(timeout=30.0):
                     return False
                 status = self._exchange_locked("M27", 8.0)
                 if "not sd printing" not in status.lower():
@@ -1497,7 +1519,7 @@ class CNCController:
                 self._mark_serial_uncertain("Could not transmit priority quick stop")
                 return False
             with self.operation_lock:
-                if not self._quiesce_before_stream(timeout=30.0):
+                if not self._quiesce_after_priority_stop(timeout=30.0):
                     return False
         else:
             self.serial_uncertain = True
@@ -1552,7 +1574,7 @@ class CNCController:
         self.rehome_required = True
         if stop_motion:
             self.stop_requested = True
-        machine_state.set_status("Machine state uncertain — verify and reconnect", busy=True)
+        machine_state.set_status("Machine state uncertain — verify controller", busy=True)
         logger.error("%s: %s", reason, response or "no response")
         log_controller_event("machine_state_uncertain", reason=reason, response=response[:500])
 
@@ -1612,6 +1634,75 @@ class CNCController:
 
         return True, response
     
+    def _try_serial_boundary(self, timeout: float) -> tuple[bool, str]:
+        """Try one identifiable M400/M115 serial boundary without changing safety state."""
+        if not self.serial_port or not self.serial_port.is_open:
+            return False, "Serial port is not open"
+
+        with self.read_lock:
+            if not self._pause_reader():
+                return False, "Could not acquire serial response ownership"
+            try:
+                # Drain bytes already delivered to the host before creating the
+                # boundary. Outstanding controller work may still reply later,
+                # so an acknowledgement alone is not a sufficient marker.
+                while self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        log_serial_rx(line, mode="sync_drain")
+                if not self._send_command("M400"):
+                    return False, "Could not send M400"
+                # M115 is queued after M400 and has an identifiable banner. A
+                # banner followed by its own ok proves all earlier commands,
+                # including M400, were processed; a stale bare ok cannot do so.
+                if not self._send_command("M115"):
+                    return False, "Could not send M115"
+                lines: list[str] = []
+                banner_seen = False
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if self.serial_port.in_waiting:
+                        line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                        if line:
+                            lines.append(line)
+                            log_serial_rx(line, mode="sync_boundary")
+                            banner_seen = banner_seen or "FIRMWARE_NAME" in line
+                            if banner_seen and line.lower().startswith("ok"):
+                                return True, "\n".join(lines)
+                    else:
+                        time.sleep(0.01)
+                return False, "\n".join(lines)
+            finally:
+                self._resume_reader()
+
+    def _quiesce_after_priority_stop(self, timeout: float = 30.0) -> bool:
+        """Retry synchronization while Marlin finishes its asynchronous SD abort.
+
+        With EMERGENCY_PARSER, M524 can clear the normal command queue just after
+        the host sends its first boundary probe. Retrying is safe after M410 and
+        avoids requiring operator recovery merely because that probe was erased.
+        """
+        deadline = time.monotonic() + timeout
+        responses: list[str] = []
+        attempts = 0
+        while time.monotonic() < deadline:
+            attempts += 1
+            remaining = deadline - time.monotonic()
+            complete, response = self._try_serial_boundary(min(2.0, remaining))
+            if complete:
+                log_controller_event("priority_stop_serial_boundary", attempts=attempts)
+                return True
+            if response:
+                responses.append(response)
+            if time.monotonic() < deadline:
+                time.sleep(0.1)
+
+        response = "\n--- retry ---\n".join(responses[-3:])
+        self._mark_serial_uncertain(
+            "Could not synchronize after priority stop", response
+        )
+        return False
+
     def _quiesce_before_stream(self, timeout: float = 180.0) -> bool:
         """Wait for any in-flight commands to finish before a streaming job begins.
 
@@ -1624,50 +1715,11 @@ class CNCController:
         the read loop paused, and require an identifiable M115 response queued
         behind M400 before treating the serial stream as quiescent.
         """
-        if not self.serial_port or not self.serial_port.is_open:
+        complete, response = self._try_serial_boundary(timeout)
+        if not complete:
+            self._mark_serial_uncertain("M400 quiesce was not acknowledged", response)
             return False
-
-        with self.read_lock:
-            if not self._pause_reader():
-                return False
-            try:
-                # Drain bytes already delivered to the host before creating the
-                # boundary. Outstanding controller work may still reply later,
-                # so an acknowledgement alone is not a sufficient marker.
-                while self.serial_port.in_waiting:
-                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                    if line:
-                        log_serial_rx(line, mode="sync_drain")
-                if not self._send_command("M400"):
-                    return False
-                # M115 is queued after M400 and has an identifiable banner. A
-                # banner followed by its own ok proves all earlier commands,
-                # including M400, were processed; a stale bare ok cannot do so.
-                if not self._send_command("M115"):
-                    return False
-                lines: list[str] = []
-                banner_seen = False
-                complete = False
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
-                    if self.serial_port.in_waiting:
-                        line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                        if line:
-                            lines.append(line)
-                            log_serial_rx(line, mode="sync_boundary")
-                            banner_seen = banner_seen or "FIRMWARE_NAME" in line
-                            if banner_seen and line.lower().startswith("ok"):
-                                complete = True
-                                break
-                    else:
-                        time.sleep(0.01)
-                response = "\n".join(lines)
-                if not complete:
-                    self._mark_serial_uncertain("M400 quiesce was not acknowledged", response)
-                    return False
-                return True
-            finally:
-                self._resume_reader()
+        return True
 
     def _upload_gcode_to_sd(self, gcode_lines: list[str]) -> tuple[bool, int, str]:
         """Upload, verify, select, and start a file using Marlin's SD commands."""
