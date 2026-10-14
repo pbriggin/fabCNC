@@ -1300,10 +1300,10 @@ def create_file_controls():
         
         # Canvas document controls
         with ui.row().classes('w-full gap-1').style('flex-wrap: nowrap;'):
-            ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas')
-            ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name')
-            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
-            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
+            ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas')
+            ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name')
+            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
+            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
 
         canvas_name_label = ui.label(_canvas_name_text()).classes(
             'self-center text-center font-bold px-3 py-1 rounded-full'
@@ -3419,6 +3419,11 @@ def main_page():
                 document.addEventListener('pointermove', event => {
                     pointerPosition = {x: event.clientX, y: event.clientY};
                 });
+                // A click can focus a control after the pointer has already
+                // moved away or the control has opened a dialog. Cancel the
+                // pending hover tooltip instead of letting it appear later.
+                document.addEventListener('pointerdown', hideFallbackTooltip, true);
+                document.addEventListener('click', hideFallbackTooltip, true);
                 document.addEventListener('pointerout', event => {
                     const control = tooltipControlFrom(event.target);
                     if (control && activeControl === control
@@ -3426,7 +3431,11 @@ def main_page():
                 });
                 document.addEventListener('focusin', event => {
                     const control = tooltipControlFrom(event.target);
-                    if (control) showFallbackTooltip(control);
+                    // Preserve keyboard-accessible tooltips, but do not start a
+                    // second delayed tooltip for focus created by a mouse click.
+                    if (control && event.target.matches?.(':focus-visible')) {
+                        showFallbackTooltip(control);
+                    }
                 });
                 document.addEventListener('focusout', hideFallbackTooltip);
             });
