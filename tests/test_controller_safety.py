@@ -173,10 +173,43 @@ class ControllerSafetyTests(unittest.TestCase):
             machine_state.set_status("Idle", busy=False)
 
         controller._execute_job = capture
-        controller.run_utility_sequence(["G90", "G0 X10"])
-        controller.job_thread.join(timeout=1)
+        worker = controller.run_utility_sequence(["G90", "G0 X10"])
+        worker.join(timeout=1)
 
         self.assertEqual("M400", captured[-1])
+
+    def test_successful_utility_sequence_returns_to_idle_not_job_complete(self):
+        controller = connected_controller()
+        controller._quiesce_before_stream = lambda: True
+
+        def accept_reset(_payload):
+            with controller.ok_lock:
+                controller.ok_count += 1
+            return True
+
+        def accept_command(_command):
+            with controller.ok_lock:
+                controller.ok_count += 1
+            controller.committed_line += 1
+            return controller.committed_line
+
+        controller._write_serial_payload = accept_reset
+        controller._emit_new_streamed = accept_command
+
+        worker = controller.run_utility_sequence(["G90", "G0 X10"])
+        self.assertIsNotNone(worker)
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("Idle", machine_state.snapshot().status_text)
+
+    def test_rejected_utility_sequence_does_not_start_worker(self):
+        controller = connected_controller(auto_ok=True)
+        machine_state.set_status("Running", busy=True)
+
+        worker = controller.run_utility_sequence(["G90", "G0 X10"])
+
+        self.assertIsNone(worker)
 
     def test_unhomed_controller_accepts_job_that_fully_homes_before_motion(self):
         controller = connected_controller()

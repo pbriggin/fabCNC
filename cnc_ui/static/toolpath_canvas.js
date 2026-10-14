@@ -327,7 +327,7 @@ function initCanvas(elementId) {
         'padding:4px 8px',
         'border-radius:4px',
         'font-size:12px',
-        'font-family:monospace',
+        'font-family:var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace)',
         'pointer-events:none',
         'display:none',
         'z-index:9999',
@@ -1552,7 +1552,7 @@ function distributeVertically() {
 function ensureSpacing(targetSpacingMm) {
     const names = Object.keys(shapeData).filter(n => shapeData[n] && shapeData[n].originalMmPoints);
     if (names.length < 2) {
-        showToast('Need at least 2 shapes to enforce spacing', 'warning', 3000);
+        showToast('Add at least two shapes before applying spacing.', 'warning', 3000);
         return;
     }
 
@@ -1670,9 +1670,9 @@ function ensureSpacing(targetSpacingMm) {
     }
 
     if (tooClosePairs > 0) {
-        showToast(`Spread done — ${tooClosePairs} pair(s) couldn't reach ${targetSpacingMm}mm (not enough room)`, 'warning', 5000);
+        showToast(`Spacing finished. ${tooClosePairs} pair(s) could not reach ${targetSpacingMm} mm because there was not enough room.`, 'warning', 5000);
     } else {
-        showToast(`Shapes spaced ≥${targetSpacingMm}mm apart`, 'success', 3000);
+        showToast(`Shapes spaced at least ${targetSpacingMm} mm apart.`, 'success', 3000);
     }
 }
 
@@ -2008,7 +2008,7 @@ function gridArray(countX, countY) {
     
     if (skipped > 0) {
         console.warn('Grid: skipped', skipped, 'copies that would exceed work area bounds');
-        showToast(`Grid: ${skipped} copies skipped (would exceed work area)`, 'warning');
+        showToast(`${skipped} grid copies were skipped because they would exceed the work area.`, 'warning');
     }
     console.log('Grid created:', countX, 'x', countY, 'spacing:', spacingX.toFixed(1), 'x', spacingY.toFixed(1));
     return newNames;
@@ -2107,22 +2107,22 @@ function _ensureNestOverlay() {
         'display:none',
         'align-items:center', 'justify-content:center',
         'z-index:99999',
-        'font-family:system-ui,sans-serif',
-        'color:#fff',
+        'font-family:var(--font-ui, "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif)',
+        'color:var(--md-text-primary, #e0e0e0)',
         'backdrop-filter:blur(2px)'
     ].join(';') + ';';
     el.innerHTML = `
-        <div style="background:#222;border:1px solid #444;border-radius:12px;padding:24px 32px;min-width:320px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,0.5);text-align:center;">
+        <div style="background:var(--md-bg-card, #333);border:1px solid var(--md-border-light, #4a4a4a);border-radius:var(--radius-lg, 10px);padding:24px 32px;min-width:320px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,0.5);text-align:center;">
             <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:12px;">
-                <div class="nest-spinner" style="width:24px;height:24px;border:3px solid #444;border-top-color:#4fc3f7;border-radius:50%;animation:nestSpin 0.9s linear infinite;"></div>
+                <div class="nest-spinner" style="width:24px;height:24px;border:3px solid var(--md-border-light, #4a4a4a);border-top-color:var(--md-accent-blue, #4a9eff);border-radius:50%;animation:nestSpin 0.9s linear infinite;"></div>
                 <div id="nestProgressTitle" style="font-size:16px;font-weight:600;">Nesting…</div>
             </div>
-            <div id="nestProgressDetail" style="font-size:13px;color:#bbb;line-height:1.5;">Preparing…</div>
-            <div style="margin-top:12px;height:6px;background:#333;border-radius:3px;overflow:hidden;">
-                <div id="nestProgressBar" style="height:100%;width:0%;background:#4fc3f7;transition:width 0.2s ease;"></div>
+            <div id="nestProgressDetail" style="font-size:13px;color:var(--md-text-secondary, #9e9e9e);line-height:1.5;">Preparing…</div>
+            <div style="margin-top:12px;height:6px;background:var(--md-bg-secondary, #252525);border-radius:3px;overflow:hidden;">
+                <div id="nestProgressBar" style="height:100%;width:0%;background:var(--md-accent-blue, #4a9eff);transition:width 0.2s ease;"></div>
             </div>
-            <div id="nestProgressElapsed" style="margin-top:8px;font-size:11px;color:#888;">0.0s</div>
-            <button id="nestProgressCancel" style="margin-top:16px;background:#444;color:#fff;border:1px solid #666;border-radius:6px;padding:8px 20px;font-size:13px;cursor:pointer;font-family:inherit;">Cancel</button>
+            <div id="nestProgressElapsed" style="margin-top:8px;font-size:11px;color:var(--md-text-muted, #757575);">0.0s</div>
+            <button id="nestProgressCancel" style="margin-top:16px;background:var(--md-bg-elevated, #2d2d2d);color:var(--md-text-primary, #e0e0e0);border:1px solid var(--md-border-light, #4a4a4a);border-radius:var(--radius-md, 6px);padding:8px 20px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;">Cancel</button>
         </div>
     `;
     // Inject keyframes once.
@@ -2196,7 +2196,7 @@ function nestShapes(keepOrientation = true, spacing = 15) {
         undoStackSize: undoStack.length
     });
     if (allShapeNames.length === 0) {
-        showToast('No shapes to nest', 'warning');
+        showToast('Add at least one shape before nesting.', 'warning');
         return { success: false, error: 'No shapes to nest' };
     }
     
@@ -2248,19 +2248,19 @@ function nestShapes(keepOrientation = true, spacing = 15) {
     });
     
     if (shapeInfos.length === 0) {
-        showToast('No valid shapes', 'warning');
+        showToast('No valid shapes are available to nest.', 'warning');
         return { success: false, error: 'No valid shapes' };
     }
     
     // Show starting notification + persistent overlay (in case it takes a while)
-    showToast(`Nesting ${shapeInfos.length} shapes...`, 'info', 5000);
+    showToast(`Nesting ${shapeInfos.length} shapes…`, 'info', 5000);
     showNestOverlay('Nesting…', `Preparing ${shapeInfos.length} shapes (${_totalPoints} points)`);
     
     // Try Packaide first (async call)
     nestShapesPackaide(shapeInfos, keepOrientation, spacing);
     
     _nestDiag('nest_sync_return', { totalMs: (performance.now() - _t0).toFixed(1) });
-    return { success: true, pending: true, message: 'Nesting with Packaide...' };
+    return { success: true, pending: true, message: 'Nesting with Packaide…' };
 }
 
 // Async nesting using Packaide backend
@@ -2345,14 +2345,14 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             });
             
             console.log(`=== PACKAIDE COMPLETE === ${result.placed} placed, ${result.failed} failed, bounds: ${maxX.toFixed(0)}x${maxY.toFixed(0)}`);
-            showToast(`Nested ${result.placed} shapes to ${maxX.toFixed(0)}×${maxY.toFixed(0)}mm`, 'success', 4000);
+            showToast(`Nested ${result.placed} shapes within ${maxX.toFixed(0)} × ${maxY.toFixed(0)} mm.`, 'success', 4000);
             hideNestOverlay();
             return;
         }
         
         // Fall back to local algorithm if Packaide fails
         console.log('Packaide returned no placements, falling back to local algorithm');
-        showToast('Using local algorithm...', 'info', 2000);
+        showToast('Using the local nesting method…', 'info', 2000);
         updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Packaide unavailable, falling back…', percent: 0 });
         _nestDiag('about_to_call_local', { from: 'packaide_no_placements' });
         await nestShapesLocal(shapeInfos, keepOrientation, spacing);
@@ -2365,7 +2365,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
             stack: error && error.stack ? String(error.stack).slice(0, 800) : ''
         });
         console.log('Falling back to local nesting algorithm');
-        showToast('Server busy, using local algorithm...', 'warning', 2000);
+        showToast('The nesting service is busy. Using the local nesting method…', 'warning', 2000);
         updateNestOverlay({ title: 'Nesting (local algorithm)…', detail: 'Server busy, falling back…', percent: 0 });
         try {
             _nestDiag('about_to_call_local', { from: 'packaide_catch' });
@@ -2375,7 +2375,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 message: String(localErr && localErr.message || localErr),
                 stack: localErr && localErr.stack ? String(localErr.stack).slice(0, 800) : ''
             });
-            showToast('Nesting failed: ' + String(localErr), 'error', 4000);
+            showToast('Nesting failed. Try again with fewer shapes.', 'error', 4000);
             hideNestOverlay();
         }
     }
@@ -2442,7 +2442,7 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         _stopNestHeartbeat();
         hideNestOverlay();
         console.log('=== NESTING CANCELLED ===');
-        showToast('Nesting cancelled', 'warning', 3000);
+        showToast('Nesting cancelled.', 'warning', 3000);
         return;
     }
     
@@ -2454,7 +2454,7 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
         _stopNestHeartbeat();
         hideNestOverlay();
         console.log('=== NESTING FAILED ===');
-        showToast('Could not nest shapes - not enough space', 'error', 4000);
+        showToast('The shapes could not be nested because there is not enough space.', 'error', 4000);
         return;
     }
     
@@ -2489,7 +2489,7 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
     hideNestOverlay();
     
     console.log('=== LOCAL NESTING COMPLETE ===', bestResult.width.toFixed(0), 'x', bestResult.height.toFixed(0));
-    showToast(`Nested to ${bestResult.width.toFixed(0)}×${bestResult.height.toFixed(0)}mm`, 'success', 4000);
+    showToast(`Nested within ${bestResult.width.toFixed(0)} × ${bestResult.height.toFixed(0)} mm.`, 'success', 4000);
 }
 
 // Try nesting with a specific shape order. Async so we can yield to the event

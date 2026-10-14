@@ -178,6 +178,18 @@ update_state = {'available': False, 'acknowledged': False}
 # polled by the per-page UI timer to (re)open the disconnect alert popup.
 disconnect_alert_state = {'requested': False}
 
+# User-facing copy and dialog styling live here so Python dialogs and transient
+# messages use the same visual language. Technical details still belong in logs.
+_DIALOG_CARD_STYLE = (
+    'width: 420px; max-width: 95vw; background: var(--md-bg-card, #333333); '
+    'padding: var(--space-5, 20px); border-radius: var(--radius-lg, 10px);'
+)
+
+
+def _safe_error_message(action: str) -> str:
+    """Return stable operator copy; callers should log the underlying error."""
+    return f'{action} Try again. If the problem continues, send the logs to support.'
+
 
 def _cloudflare_request_details(headers) -> dict:
     """Return trusted Cloudflare request markers from an incoming header mapping."""
@@ -1189,7 +1201,7 @@ def create_jog_controls():
 def create_homing_controls():
     """Create the compact homing control panel."""
     with ui.column().classes('gap-3 remote-control-lock'):
-        ui.label('Homing').classes('text-h5 font-bold')
+        ui.label('Homing').classes('text-h6 font-bold')
         
         with ui.row().classes('gap-2'):
             ui.button('X', on_click=lambda: home_axis('X')) \
@@ -1347,7 +1359,8 @@ async def xy_zero():
         cnc_controller.send_manual_command, "G92 X0 Y0", timeout=10.0
     )
     if not any(line.strip().lower().startswith('ok') for line in response.splitlines()):
-        ui.notify(f'XY zero was not accepted: {response}', type='negative')
+        logger.warning('XY zero was not accepted: %s', response)
+        ui.notify('The controller did not accept XY Zero. Verify the controller, then try again.', type='negative', timeout=8000)
 
 
 async def jog_axis(axis: str, distance: float):
@@ -1404,14 +1417,30 @@ async def tape_fabric():
         'M114',
     ]
     log_event('control', 'tape_fabric', center_x=center_x, center_y=center_y)
-    ui.notify('Homing and moving to center for fabric taping...', type='info')
-    cnc_controller.run_utility_sequence(gcode)
+    ui.notify('Homing and moving to the fabric-taping position…', type='info')
+    if not await _run_utility_sequence(gcode):
+        ui.notify('Could not move to the fabric-taping position. Verify the controller, then try again.', type='negative', timeout=8000)
+
+
+async def _run_utility_sequence(gcode: list[str]) -> bool:
+    """Start a utility sequence and wait for its verified completion barrier."""
+    worker = cnc_controller.run_utility_sequence(gcode)
+    if worker is None:
+        return False
+    await asyncio.to_thread(worker.join)
+    state = machine_state.snapshot()
+    return (
+        cnc_controller.connected
+        and not cnc_controller.serial_uncertain
+        and state.status_text == 'Idle'
+        and not state.busy
+    )
 
 
 async def _wheel_step_confirm(step: str, instruction: str, confirm_label: str = 'Next Step', icon: str = 'build') -> bool:
     """Show a cutting wheel wizard step dialog. Returns True if user pressed the confirm button."""
     confirmed = False
-    with ui.dialog() as dialog, ui.card().classes('w-96'):
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE):
         with ui.row().classes('items-center gap-2'):
             ui.icon(icon, size='28px').style('color: #FFB300;')
             ui.label(step).classes('text-h6 font-bold')
@@ -1444,30 +1473,28 @@ async def change_cutting_wheel():
     wheel_a = 90
 
     # ── Step 1: Home, lower to -20, rotate A to -90, disable steppers ──
-    ui.notify('Step 1: Homing and moving to screw-access position...', type='info')
-    cnc_controller.run_utility_sequence([
+    ui.notify('Step 1: Homing and moving to the screw-access position…', type='info')
+    if not await _run_utility_sequence([
         'G90', 'G28',
         f'G1 Z{wheel_z_low} F{plunge:.0f}',
         f'G0 A{wheel_a}',
         'M400', 'M18',
-    ])
-    await asyncio.sleep(0.5)
-    while not machine_state.is_idle():
-        await asyncio.sleep(0.5)
+    ]):
+        ui.notify('Could not reach the screw-access position. Verify the controller before continuing.', type='negative', timeout=8000)
+        return
 
     if not await _wheel_step_confirm('Step 1 of 3', 'Remove cutting wheel bolt', icon='hardware'):
         return
 
     # ── Step 2: Raise to -15, disable steppers ──
-    ui.notify('Step 2: Raising toolhead to wheel-access height...', type='info')
-    cnc_controller.run_utility_sequence([
+    ui.notify('Step 2: Raising the toolhead to the wheel-access height…', type='info')
+    if not await _run_utility_sequence([
         'G90',
         f'G1 Z{wheel_z_high} F{plunge:.0f}',
         'M400', 'M18',
-    ])
-    await asyncio.sleep(0.5)
-    while not machine_state.is_idle():
-        await asyncio.sleep(0.5)
+    ]):
+        ui.notify('Could not reach the wheel-access height. Verify the controller before continuing.', type='negative', timeout=8000)
+        return
 
     if not await _wheel_step_confirm(
         'Step 2 of 3',
@@ -1478,15 +1505,14 @@ async def change_cutting_wheel():
         return
 
     # ── Step 3: Lower back to -20, disable steppers ──
-    ui.notify('Step 3: Lowering to bolt-insertion position...', type='info')
-    cnc_controller.run_utility_sequence([
+    ui.notify('Step 3: Lowering to the bolt-insertion position…', type='info')
+    if not await _run_utility_sequence([
         'G90',
         f'G1 Z{wheel_z_low} F{plunge:.0f}',
         'M400', 'M18',
-    ])
-    await asyncio.sleep(0.5)
-    while not machine_state.is_idle():
-        await asyncio.sleep(0.5)
+    ]):
+        ui.notify('Could not reach the bolt-insertion position. Verify the controller before continuing.', type='negative', timeout=8000)
+        return
 
     if not await _wheel_step_confirm(
         'Step 3 of 3',
@@ -1497,10 +1523,12 @@ async def change_cutting_wheel():
         return
 
     # ── Step 4: Return to home ──
-    ui.notify('Returning to home position...', type='info')
-    cnc_controller.run_utility_sequence(['G90', 'G28'])
+    ui.notify('Returning to the home position…', type='info')
+    if not await _run_utility_sequence(['G90', 'G28']):
+        ui.notify('Could not verify the return home. Keep clear and verify the controller.', type='negative', timeout=8000)
+        return
     log_event('control', 'change_cutting_wheel_complete', wheel_z=wheel_z_low, wheel_a=wheel_a)
-    ui.notify('Cutting wheel replacement complete!', type='positive')
+    ui.notify('Cutting wheel replacement complete.', type='positive')
 
 
 def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict = None, entity_types: dict = None):
@@ -1519,7 +1547,15 @@ def add_shapes_to_canvas(shapes: dict, start_color_index: int = 0, breaks: dict 
                 breaks_json = json.dumps(seg_breaks)
                 seg_types = entity_types.get(shape_name, []) if entity_types else []
                 types_json = json.dumps(seg_types)
-                ui.run_javascript(f'''try {{ window.toolpathCanvas.addShape("{shape_name}", {points_json}, {start_color_index + i}, {breaks_json}, {types_json}); }} catch(e) {{ alert(e.message); }}''')
+                shape_name_json = json.dumps(shape_name)
+                ui.run_javascript(f'''try {{
+                    window.toolpathCanvas.addShape({shape_name_json}, {points_json}, {start_color_index + i}, {breaks_json}, {types_json});
+                }} catch(e) {{
+                    console.error('Could not add shape to canvas:', e);
+                    if (typeof showToast === 'function') {{
+                        showToast('A shape could not be added to the canvas. Reload the page and try again.', 'error', 8000);
+                    }}
+                }}''')
                 logger.info(f"  Added {shape_name}: {len(points)} points, {len(seg_breaks)} segments, types={seg_types}")
 
 
@@ -1565,7 +1601,7 @@ async def handle_file_upload(event):
                   size_bytes=len(content))
         
         # Process DXF file
-        ui.notify('Processing DXF file...', type='info')
+        ui.notify('Processing the DXF file…', type='info')
         # min_distance is in inches (DXF units before conversion to mm)
         # 0.1" = 2.54mm spacing - good balance of detail and point count
         shapes, shape_breaks, shape_types = dxf_processor.process_dxf_basic(saved_path, min_distance=0.1)
@@ -1626,7 +1662,7 @@ async def handle_file_upload(event):
         log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(shapes),
                   shape_names=list(shapes.keys()))
     except Exception as e:
-        ui.notify(f'Error processing DXF: {str(e)}', type='negative')
+        ui.notify(_safe_error_message('The DXF file could not be processed.'), type='negative', timeout=8000)
         log_event('file', 'dxf_import_error', filename=locals().get('filename'), error=str(e))
         import traceback
         traceback.print_exc()
@@ -1642,8 +1678,8 @@ async def save_canvas_state():
     overwrite_confirmed = {'value': False}
     save_btn_ref = {}
 
-    with ui.dialog() as dialog, ui.card().style('width: 540px; max-width: 95vw; background: #1e1e1e;'):
-        ui.label('Save Canvas').classes('text-h5 font-bold').style('color: #fff;')
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE + 'width: 540px;'):
+        ui.label('Save Canvas').classes('text-h6 font-bold').style('color: #fff;')
 
         # ── Existing saves list ──────────────────────────────────────────
         if files:
@@ -1669,36 +1705,13 @@ async def save_canvas_state():
                             save_btn_ref['btn'].props('color=primary')
                             save_btn_ref['btn'].set_text('Save')
 
-                    def _download(fp=filepath):
-                        safe = Path(fp).name
-                        ui.run_javascript(
-                            f"(function(){{const a=document.createElement('a');"
-                            f"a.href='/canvas/download/{safe}';"
-                            f"a.download='{safe}';"
-                            f"document.body.appendChild(a);a.click();document.body.removeChild(a);}})();"
-                        )
-
                     with ui.row().classes('w-full items-center gap-1').style(
                         'padding: 2px 6px; border-bottom: 1px solid #2a2a2a;'
-                    ) as row:
+                    ):
                         ui.button(stem, on_click=_fill) \
                             .classes('flex-1').props('flat align=left dense') \
                             .style('color: #4a9eff; font-size: 13px; text-transform: none; justify-content: flex-start;')
                         ui.label(mtime).style('color: #666; font-size: 11px; min-width: 72px; text-align: right;')
-                        ui.button(icon='download', on_click=_download) \
-                            .props('flat dense').style('color: #aaa;').tooltip('Download to computer')
-
-                        def _delete(fp=filepath, r=row):
-                            try:
-                                os.remove(fp)
-                                r.delete()
-                                log_event('canvas', 'canvas_deleted', filename=os.path.basename(fp))
-                                ui.notify(f'Deleted: {os.path.basename(fp)}', type='info')
-                            except Exception as ex:
-                                ui.notify(f'Error deleting: {ex}', type='negative')
-
-                        ui.button(icon='delete', on_click=_delete) \
-                            .props('flat dense color=negative').tooltip('Delete')
 
         ui.separator().style('margin: 10px 0 4px;')
 
@@ -1710,13 +1723,13 @@ async def save_canvas_state():
             try:
                 name = name_input.value.strip()
                 if not name:
-                    ui.notify('Please enter a filename', type='warning')
+                    ui.notify('Enter a filename.', type='warning')
                     return
 
                 safe_name = ''.join(c if c.isalnum() or c in '-_ ' else '' for c in name).strip()
                 safe_name = safe_name.replace(' ', '_')
                 if not safe_name:
-                    ui.notify('Invalid filename', type='warning')
+                    ui.notify('Enter a filename containing letters, numbers, spaces, hyphens, or underscores.', type='warning')
                     return
 
                 if not safe_name.endswith('.json'):
@@ -1737,7 +1750,7 @@ async def save_canvas_state():
 
                 canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()', timeout=15.0)
                 if not canvas_json:
-                    ui.notify('No canvas data to save', type='warning')
+                    ui.notify('There is no canvas data to save.', type='warning')
                     dialog.close()
                     return
 
@@ -1761,8 +1774,8 @@ async def save_canvas_state():
                 dialog.close()
 
             except Exception as e:
-                ui.notify(f'Error saving canvas: {str(e)}', type='negative')
-                logger.error(f'Error saving canvas: {e}')
+                ui.notify(_safe_error_message('The canvas could not be saved.'), type='negative', timeout=8000)
+                logger.exception('Error saving canvas')
 
         with ui.row().classes('w-full gap-2 mt-2'):
             ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
@@ -1781,11 +1794,11 @@ async def load_canvas_state():
     files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)  # Most recent first
     
     if not files:
-        ui.notify('No saved canvases found', type='warning')
+        ui.notify('No saved canvases were found.', type='warning')
         return
     
-    with ui.dialog() as dialog, ui.card().style('width: 540px; max-width: 95vw; background: #1e1e1e;'):
-        ui.label('Load Canvas').classes('text-h5 font-bold').style('color: #fff;')
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE + 'width: 540px;'):
+        ui.label('Load Canvas').classes('text-h6 font-bold').style('color: #fff;')
 
         ui.label('Click a canvas to load it').style('color: #aaa; font-size: 12px; margin-top: 4px;')
         with ui.column().classes('w-full gap-0').style(
@@ -1850,8 +1863,8 @@ async def load_canvas_state():
                                   cut_settings=saved_cut)
                         dialog.close()
                     except Exception as e:
-                        ui.notify(f'Error loading canvas: {str(e)}', type='negative')
-                        logger.error(f'Error loading canvas: {e}')
+                        ui.notify(_safe_error_message('The canvas could not be loaded.'), type='negative', timeout=8000)
+                        logger.exception('Error loading canvas %s', fp)
 
                 with ui.row().classes('w-full items-center gap-1').style(
                     'padding: 2px 6px; border-bottom: 1px solid #2a2a2a;'
@@ -1870,7 +1883,8 @@ async def load_canvas_state():
                             log_event('canvas', 'canvas_deleted', filename=os.path.basename(fp))
                             ui.notify(f'Deleted: {os.path.basename(fp)}', type='info')
                         except Exception as ex:
-                            ui.notify(f'Error deleting: {ex}', type='negative')
+                            logger.exception('Could not delete saved canvas %s', fp)
+                            ui.notify(_safe_error_message('The saved canvas could not be deleted.'), type='negative', timeout=8000)
 
                     ui.button(icon='delete', on_click=_delete) \
                         .props('flat dense color=negative').tooltip('Delete')
@@ -1896,7 +1910,7 @@ def clear_canvas():
     client_job_state['loaded_filename'] = None
     client_job_state['canvas_dirty'] = False
     client_job_state['toolpath_generated'] = False
-    ui.notify('Canvas cleared', type='info')
+    ui.notify('Canvas cleared.', type='info')
 
 
 async def toggle_toolpath(button):
@@ -1917,17 +1931,17 @@ async def toggle_toolpath(button):
         except Exception:
             pass
         log_event('toolpath', 'toolpath_cleared')
-        ui.notify('Toolpath cleared - shapes are now editable', type='info')
+        ui.notify('Toolpath cleared. Shapes are now editable.', type='info')
     else:
         # Generate toolpath mode
         if _deny_cloudflare_control():
             return
 
         if not current_toolpath_shapes:
-            ui.notify('No shapes loaded', type='warning')
+            ui.notify('No shapes are loaded.', type='warning')
             return
         
-        ui.notify('Generating toolpath...', type='info')
+        ui.notify('Generating the toolpath…', type='info')
         
         # Fetch current shape positions from JavaScript canvas (in case shapes were moved)
         print("=== FETCHING POSITIONS FROM CANVAS ===")
@@ -1963,7 +1977,7 @@ async def toggle_toolpath(button):
             if not await overlap_warning_confirm(overlapping_pairs):
                 log_event('toolpath', 'overlap_warning_cancelled',
                           pair_count=len(overlapping_pairs))
-                ui.notify('Toolpath generation cancelled', type='info')
+                ui.notify('Toolpath generation cancelled.', type='info')
                 return
             log_event('toolpath', 'overlap_warning_dismissed',
                       pair_count=len(overlapping_pairs))
@@ -2070,13 +2084,13 @@ async def toggle_toolpath(button):
                      z_cut_height=z_cut_height['value'],
                      cut_settings=cut_settings.copy(),
                      notch_count=sum(len(v) for v in notches.values()) if notches else 0)
-        ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
+        ui.notify(f'Toolpath generated: {total_segments} segments and {total_corners} corners.', type='positive')
 
 
 async def safety_confirm() -> bool:
     """Show safety check dialog. Returns True if the user confirmed, False if cancelled."""
     confirmed = False
-    with ui.dialog() as dialog, ui.card().classes('w-96'):
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE):
         with ui.row().classes('items-center gap-2'):
             ui.icon('warning', size='28px').style('color: #FFA726;')
             ui.label('Safety Check').classes('text-h6 font-bold')
@@ -2107,7 +2121,7 @@ async def overlap_warning_confirm(pairs):
     proceed = False
     shown = pairs[:10]
     extra = len(pairs) - len(shown)
-    with ui.dialog() as dialog, ui.card().classes('w-[28rem]'):
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE + 'width: 448px;'):
         with ui.row().classes('items-center gap-2'):
             ui.icon('warning', size='28px').style('color: #FFA726;')
             ui.label('Overlapping Shapes Detected').classes('text-h6 font-bold')
@@ -2147,7 +2161,7 @@ async def outline_job():
         return
 
     if not current_toolpath_shapes:
-        ui.notify('No shapes loaded', type='warning')
+        ui.notify('No shapes are loaded.', type='warning')
         return
 
     if not cnc_controller.homed:
@@ -2174,7 +2188,7 @@ async def outline_job():
     all_x = [p[0] for pts in current_toolpath_shapes.values() for p in pts]
     all_y = [p[1] for pts in current_toolpath_shapes.values() for p in pts]
     if not all_x:
-        ui.notify('No shape points found', type='warning')
+        ui.notify('No valid shape points were found.', type='warning')
         return
 
     min_x, max_x = min(all_x), max(all_x)
@@ -2200,7 +2214,7 @@ async def outline_job():
 
     w = max_x - min_x
     h = max_y - min_y
-    ui.notify(f'Outlining job area: {w:.0f} x {h:.0f} mm', type='info')
+    ui.notify(f'Outlining the job area: {w:.0f} × {h:.0f} mm.', type='info')
     log_event('job', 'outline_clicked', width_mm=w, height_mm=h,
               min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y)
     cnc_controller.start_job(outline_gcode)
@@ -2216,7 +2230,7 @@ async def start_job():
     generated_job = app.storage.user.get('generated_job')
     job_gcode = list(generated_job.get('gcode', [])) if generated_job else []
     if not job_gcode:
-        ui.notify('No toolpath generated', type='warning')
+        ui.notify('Generate a toolpath before starting the job.', type='warning')
         return
 
     if not await safety_confirm():
@@ -2231,7 +2245,7 @@ async def start_job():
     print(f"  Cut moves (G1): {g1_count}")
     print(f"{'='*60}\n")
     
-    ui.notify('Starting job...', type='info')
+    ui.notify('Starting the job…', type='info')
     log_event('job', 'job_start_clicked', gcode_lines=len(job_gcode),
               g0_count=g0_count, g1_count=g1_count,
               filename=machine_state.loaded_filename,
@@ -2255,7 +2269,7 @@ async def pause_job():
     log_event('job', 'pause_clicked')
     await asyncio.to_thread(cnc_controller.pause_job)
     if machine_state.paused:
-        ui.notify('Job paused', type='warning')
+        ui.notify('Job paused.', type='warning')
     else:
         ui.notify('Pause command was not accepted.', type='negative')
 
@@ -2267,7 +2281,7 @@ async def resume_job():
     log_event('job', 'resume_clicked')
     await asyncio.to_thread(cnc_controller.resume_job)
     if machine_state.is_running():
-        ui.notify('Job resumed', type='positive')
+        ui.notify('Job resumed.', type='positive')
     else:
         ui.notify('Resume command was not accepted.', type='negative')
 
@@ -2308,8 +2322,8 @@ async def retry_controller_connection():
     if _deny_cloudflare_control():
         return
     log_event('system', 'controller_reconnect_clicked')
+    ui.notify('Retrying the controller connection…', type='info')
     await asyncio.to_thread(cnc_controller.attempt_reconnect)
-    ui.notify('Retrying controller connection…', type='info')
 
 
 async def force_controller_recovery():
@@ -2329,16 +2343,13 @@ async def force_controller_recovery():
         if await asyncio.to_thread(cnc_controller.reset_controller_after_estop):
             ui.notify('Controller reset. Re-home before the next job.', type='positive')
         else:
-            ui.notify(
-                f'Controller reset failed: {cnc_controller.last_controller_error or "No M999 response"}',
-                type='negative',
-                timeout=8000,
-            )
+            logger.error('Controller reset failed: %s', cnc_controller.last_controller_error or 'No M999 response')
+            ui.notify('The controller reset failed. Use the physical E-stop and inspect the controller.', type='negative', timeout=8000)
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    await asyncio.to_thread(cnc_controller.attempt_reconnect, force_dtr_reset=True)
     ui.notify('Trying one USB reset, then reconnecting…', type='warning', timeout=6000)
+    await asyncio.to_thread(cnc_controller.attempt_reconnect, force_dtr_reset=True)
 
 
 async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None):
@@ -2373,20 +2384,24 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     if current_status == sd_verification_status:
         display_status = 'Verify SD job'
     elif current_status == 'Retrying connection...':
-        display_status = 'Retrying connection...'
+        display_status = 'Reconnecting…'
+    elif current_status == 'Disconnected':
+        display_status = 'Controller disconnected'
+    elif current_status == 'E-Stop Reset Required':
+        display_status = 'Controller reset required'
     elif (
         not cnc_controller.connected
         or cnc_controller.reset_required
         or current_status == 'E-Stop Reset Required'
     ):
-        display_status = 'Disconnected'
+        display_status = 'Controller disconnected'
     status_label.set_text(display_status)
     if previous_status != current_status:
         status_label.tooltip(current_status if display_status != current_status else '')
 
     # Update status pill appearance
     if status_pill and status_icon:
-        if display_status in ('Disconnected', 'Retrying connection...'):
+        if display_status in ('Controller disconnected', 'Controller reset required', 'Reconnecting…'):
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
@@ -2407,9 +2422,9 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     # disconnect/reconnect handled per-page in _update_ui_timer)
     if previous_status != current_status:
         if current_status == 'Complete':
-            ui.notify('Job completed successfully!', type='positive')
+            ui.notify('Job completed successfully.', type='positive')
         elif current_status == 'Error':
-            ui.notify('Job error!', type='negative')
+            ui.notify('The job stopped because of an error. Verify the machine and controller before continuing.', type='negative', timeout=8000)
         ui.context.client.storage['previous_machine_status'] = current_status
 
 
@@ -2419,7 +2434,22 @@ def login_page():
     ui.dark_mode().enable()
     ui.add_head_html('''
         <style>
-            html, body { margin: 0; padding: 0; height: 100vh; background: #121212; }
+            :root {
+                --font-ui: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                --md-bg-card: #333333;
+                --radius-lg: 10px;
+                --space-5: 20px;
+            }
+            html, body {
+                margin: 0;
+                padding: 0;
+                height: 100vh;
+                background: #121212;
+                font-family: var(--font-ui);
+            }
+            button, input, .q-btn, .q-field, .q-dialog {
+                font-family: var(--font-ui) !important;
+            }
         </style>
     ''')
 
@@ -2429,12 +2459,12 @@ def login_page():
             app.storage.user['boot_token'] = _BOOT_TOKEN
             ui.navigate.to('/')
         else:
-            ui.notify('Incorrect password', type='negative')
+            ui.notify('Incorrect password.', type='negative')
             password_input.value = ''
             password_input.run_method('focus')
 
     async def forgot_password():
-        with ui.dialog() as recovery_dialog, ui.card().classes('w-96'):
+        with ui.dialog() as recovery_dialog, ui.card().style(_DIALOG_CARD_STYLE):
             ui.label('Recover UI Password').classes('text-h6 font-bold')
             ui.label(
                 'Enter the recovery code shipped with this machine. '
@@ -2483,7 +2513,7 @@ def login_page():
         await recovery_dialog
 
     with ui.column().classes('items-center justify-center').style('height: 100vh; width: 100%;'):
-        with ui.card().style('min-width: 320px; padding: 2rem; background: #1e1e1e; border-radius: 12px;'):
+        with ui.card().style('min-width: 320px; padding: 32px; background: var(--md-bg-card, #333333); border-radius: var(--radius-lg, 10px);'):
             ui.image('/static/favicon.svg').style('width: 72px; height: 72px; margin: 0 auto 0.5rem;')
             ui.label('fabCNC').style('font-size: 28px; font-weight: bold; color: #4a9eff; text-align: center; width: 100%;')
             ui.label('Enter password to continue').style('color: #888; text-align: center; margin-bottom: 1.5rem; width: 100%;')
@@ -2598,6 +2628,8 @@ def main_page():
             
             /* Material Design Dark Theme - Bambu Studio Inspired */
             :root {
+                --font-ui: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
                 --md-bg-primary: #1e1e1e;
                 --md-bg-secondary: #252525;
                 --md-bg-elevated: #2d2d2d;
@@ -2606,10 +2638,34 @@ def main_page():
                 --md-border-light: #4a4a4a;
                 --md-text-primary: #e0e0e0;
                 --md-text-secondary: #9e9e9e;
+                --md-text-muted: #757575;
                 --md-accent-blue: #4a9eff;
                 --md-accent-green: #4caf50;
-                --md-accent-orange: #ff9800;
+                --md-accent-orange: #ffa726;
                 --md-accent-red: #f44336;
+                --md-overlay: rgba(0, 0, 0, 0.6);
+                --radius-sm: 4px;
+                --radius-md: 6px;
+                --radius-lg: 10px;
+                --space-1: 4px;
+                --space-2: 8px;
+                --space-3: 12px;
+                --space-4: 16px;
+                --space-5: 20px;
+                --type-caption: 12px;
+                --type-control: 13px;
+                --type-body: 14px;
+                --type-section: 16px;
+                --type-title: 20px;
+            }
+
+            html, body, button, input, select, textarea,
+            .q-btn, .q-field, .q-tab, .q-menu, .q-dialog, .q-notification {
+                font-family: var(--font-ui) !important;
+            }
+
+            .q-log, .q-log *, code, pre {
+                font-family: var(--font-mono) !important;
             }
             
             /* Global Background */
@@ -2631,13 +2687,14 @@ def main_page():
             .q-card {
                 background: var(--md-bg-card) !important;
                 border: 1px solid var(--md-border) !important;
-                border-radius: 8px !important;
+                border-radius: var(--radius-lg) !important;
                 box-shadow: none !important;
             }
             
             /* Dense Buttons - Material Design 3 style */
             .q-btn {
-                border-radius: 6px !important;
+                border-radius: var(--radius-md) !important;
+                font-size: var(--type-control);
                 text-transform: none !important;
                 font-weight: 500 !important;
                 letter-spacing: 0.01em !important;
@@ -2656,14 +2713,14 @@ def main_page():
             /* Compact Tabs - Match sidebar style */
             .q-tabs {
                 background: var(--md-bg-secondary) !important;
-                border-radius: 8px !important;
-                padding: 4px !important;
+                border-radius: var(--radius-lg) !important;
+                padding: var(--space-1) !important;
             }
             
             .q-tab {
                 min-height: 40px !important;
                 padding: 0 16px !important;
-                border-radius: 6px !important;
+                border-radius: var(--radius-md) !important;
                 margin: 2px !important;
                 text-transform: none !important;
                 font-weight: 500 !important;
@@ -2699,7 +2756,7 @@ def main_page():
             
             /* Inputs - Clean and compact */
             .q-field--outlined .q-field__control {
-                border-radius: 6px !important;
+                border-radius: var(--radius-md) !important;
                 background: var(--md-bg-secondary) !important;
             }
             
@@ -2715,7 +2772,7 @@ def main_page():
             .q-uploader {
                 background: var(--md-bg-secondary) !important;
                 border: 1px dashed var(--md-border) !important;
-                border-radius: 8px !important;
+                border-radius: var(--radius-lg) !important;
             }
             
             .q-uploader__header {
@@ -2755,6 +2812,25 @@ def main_page():
             /* Labels styling */
             .text-h5, .text-h6 {
                 color: var(--md-text-primary) !important;
+                font-size: var(--type-title) !important;
+                font-weight: 600 !important;
+                line-height: 1.3 !important;
+                letter-spacing: 0 !important;
+            }
+
+            .text-subtitle1, .text-body1 {
+                font-size: var(--type-section) !important;
+                line-height: 1.4 !important;
+            }
+
+            .text-body2 {
+                font-size: var(--type-body) !important;
+                line-height: 1.45 !important;
+            }
+
+            .text-caption {
+                font-size: var(--type-caption) !important;
+                line-height: 1.4 !important;
             }
             
             .text-grey-7 {
@@ -2775,7 +2851,7 @@ def main_page():
             
             /* Notification styling */
             .q-notification {
-                border-radius: 8px !important;
+                border-radius: var(--radius-lg) !important;
             }
             
             /* Log area */
@@ -2837,7 +2913,7 @@ def main_page():
     async def do_software_update():
         import asyncio
         import concurrent.futures
-        update_btn.set_text('Updating...')
+        update_btn.set_text('Updating…')
         update_btn.props('dense flat no-caps icon=hourglass_top')
         update_btn.style('font-size: 11px; min-width: 140px; color: #ffa726;')
         update_btn.disable()
@@ -3010,11 +3086,12 @@ def main_page():
                     try:
                         networks, raw = await loop.run_in_executor(None, _parse_wifi_networks)
                     except Exception as exc:
-                        wifi_status_label.set_text(f'Scan failed: {exc}')
+                        logger.exception('Wi-Fi scan failed')
+                        wifi_status_label.set_text('The Wi-Fi scan failed. Try again.')
                         return
                     if not networks:
-                        # show raw output to help diagnose
-                        wifi_status_label.set_text(f'No networks parsed. Raw: {raw[:200]!r}')
+                        logger.warning('No Wi-Fi networks parsed. Raw output: %r', raw[:500])
+                        wifi_status_label.set_text('No Wi-Fi networks were found. Try scanning again.')
                         return
                     options = {}
                     for n in networks:
@@ -3030,8 +3107,8 @@ def main_page():
                     if not ssid:
                         ui.notify('Select a network first.', type='warning')
                         return
-                    with ui.dialog() as conn_dlg, ui.card().style('min-width: 320px;'):
-                        ui.label(f'Connect to "{ssid}"').classes('text-h6')
+                    with ui.dialog() as conn_dlg, ui.card().style(_DIALOG_CARD_STYLE):
+                        ui.label(f'Connect to "{ssid}"').classes('text-h6 font-bold')
                         pwd_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
                         conn_status = ui.label('').classes('text-caption').style('color: #f88;')
                         with ui.row().classes('gap-2 justify-end w-full mt-2'):
@@ -3056,21 +3133,22 @@ def main_page():
                                 result = await loop.run_in_executor(None, run_connect)
                                 if result.returncode == 0:
                                     conn_dlg.close()
-                                    ui.notify(f'Connected to {ssid}', type='positive')
+                                    ui.notify(f'Connected to {ssid}.', type='positive')
                                     wifi_status_label.set_text(f'Connected to {ssid}')
                                 else:
                                     err = result.stderr.strip() or result.stdout.strip()
-                                    conn_status.set_text(err or 'Connection failed.')
+                                    logger.warning('Wi-Fi connection to %s failed: %s', ssid, err)
+                                    conn_status.set_text('Connection failed. Check the password and try again.')
                             ui.button('Connect', on_click=do_connect).props('color=primary dense')
                     conn_dlg.open()
 
                 def confirm_forget_wifi():
                     if _deny_cloudflare_control():
                         return
-                    with ui.dialog() as dlg, ui.card():
-                        ui.label('Forget all WiFi networks?').classes('text-h6')
+                    with ui.dialog() as dlg, ui.card().style(_DIALOG_CARD_STYLE):
+                        ui.label('Forget all Wi-Fi networks?').classes('text-h6 font-bold')
                         ui.label(
-                            'This will delete all saved WiFi connections and reboot the Pi. '
+                            'This will delete all saved Wi-Fi connections and reboot the Pi. '
                             'On next boot it will create a "fabCNC Setup" hotspot.'
                         ).classes('text-body2').style('color: #aaa; max-width: 340px;')
                         with ui.row().classes('gap-2 justify-end w-full mt-4'):
@@ -3079,7 +3157,7 @@ def main_page():
                                 if _deny_cloudflare_control():
                                     return
                                 dlg.close()
-                                ui.notify('Removing WiFi connections and rebooting…', type='warning')
+                                ui.notify('Removing Wi-Fi connections and rebooting…', type='warning')
                                 loop = asyncio.get_running_loop()
                                 try:
                                     result = await loop.run_in_executor(
@@ -3092,24 +3170,23 @@ def main_page():
                                         ),
                                     )
                                 except (OSError, subprocess.TimeoutExpired) as exc:
-                                    ui.notify(f'WiFi reset failed: {exc}', type='negative')
+                                    logger.exception('Wi-Fi reset helper failed')
+                                    ui.notify(_safe_error_message('The Wi-Fi reset failed.'), type='negative', timeout=8000)
                                     return
                                 if result.returncode != 0:
                                     error = result.stderr.strip() or result.stdout.strip()
-                                    ui.notify(
-                                        f'WiFi reset failed: {error or "helper exited with an error"}',
-                                        type='negative',
-                                    )
+                                    logger.error('Wi-Fi reset helper returned %s: %s', result.returncode, error)
+                                    ui.notify(_safe_error_message('The Wi-Fi reset failed.'), type='negative', timeout=8000)
                             ui.button('Forget & Reboot', on_click=do_forget).props('color=negative dense')
                     dlg.open()
 
                 def confirm_forget_wifi_except_current():
                     if _deny_cloudflare_control():
                         return
-                    with ui.dialog() as dlg, ui.card():
-                        ui.label('Forget all other WiFi networks?').classes('text-h6')
+                    with ui.dialog() as dlg, ui.card().style(_DIALOG_CARD_STYLE):
+                        ui.label('Forget all other Wi-Fi networks?').classes('text-h6 font-bold')
                         ui.label(
-                            'This deletes every saved WiFi profile except the one currently '
+                            'This deletes every saved Wi-Fi profile except the one currently '
                             'connected. No reboot needed.'
                         ).classes('text-body2').style('color: #aaa; max-width: 340px;')
                         with ui.row().classes('gap-2 justify-end w-full mt-4'):
@@ -3118,7 +3195,7 @@ def main_page():
                                 if _deny_cloudflare_control():
                                     return
                                 dlg.close()
-                                ui.notify('Removing other saved WiFi networks…', type='warning')
+                                ui.notify('Removing other saved Wi-Fi networks…', type='warning')
                                 subprocess.Popen(
                                     'bash -c \''
                                     'active=$(nmcli -t -f NAME,TYPE connection show --active'
@@ -3245,7 +3322,7 @@ def main_page():
                                                       error=str(e))
                                         except Exception:
                                             pass
-                                        ui.notify('Nesting timed out — try with fewer shapes', type='warning')
+                                        ui.notify('Nesting timed out. Try again with fewer shapes.', type='warning')
                                         return
                                     if result and isinstance(result, dict):
                                         log_event('transform', 'nest_result',
@@ -3253,10 +3330,6 @@ def main_page():
                                                   width=result.get('width'),
                                                   height=result.get('height'),
                                                   error=result.get('error'))
-                                        if not result.get('success'):
-                                            ui.notify(result.get('error', 'Nesting failed'), type='negative')
-                                        elif 'width' in result and 'height' in result:
-                                            ui.notify(f'Nested to {result["width"]:.0f}×{result["height"]:.0f}mm', type='positive')
                                 
                                 ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                             
@@ -3489,7 +3562,7 @@ def main_page():
                                         machine_state.set_toolpath_generated(False)
                                         client_job_state['toolpath_generated'] = False
                                         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
-                                        ui.notify('Toolpath cleared - shape deleted', type='info')
+                                        ui.notify('Toolpath cleared because a shape was deleted.', type='info')
                             
                             ui.on('shape_deleted', on_shape_deleted)
 
@@ -3585,7 +3658,7 @@ def main_page():
                     
                     # Response log
                     ui.label('Response Log:').classes('text-body2 mb-1').style('color: #888;')
-                    response_log = ui.log().classes('w-full').style('height: 280px; font-family: monospace; font-size: 14px;')
+                    response_log = ui.log().classes('w-full').style('height: 280px; font-family: var(--font-mono); font-size: 14px;')
                     
                     # Allow enter key to send command
                     gcode_input.on('keydown.enter', send_gcode)
@@ -3628,7 +3701,7 @@ def main_page():
                                 async def restart_service():
                                     if _deny_cloudflare_control():
                                         return
-                                    ui.notify('Restarting service...', type='warning')
+                                    ui.notify('Restarting the service…', type='warning')
                                     await ui.run_javascript('setTimeout(() => window.location.reload(), 5000)')
                                     import sys
                                     sys.exit(0)
@@ -3639,7 +3712,7 @@ def main_page():
                                 def reboot_system():
                                     if _deny_cloudflare_control():
                                         return
-                                    ui.notify('Rebooting system...', type='warning')
+                                    ui.notify('Rebooting the system…', type='warning')
                                     subprocess.Popen(['sudo', 'reboot'], 
                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 
@@ -3651,7 +3724,7 @@ def main_page():
                             ui.label('Security').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
                             async def change_ui_password():
-                                with ui.dialog() as password_dialog, ui.card().classes('w-96'):
+                                with ui.dialog() as password_dialog, ui.card().style(_DIALOG_CARD_STYLE):
                                     ui.label('Change UI Password').classes('text-h6 font-bold')
                                     current_input = ui.input(
                                         'Current password', password=True, password_toggle_button=True,
@@ -3715,13 +3788,13 @@ def main_page():
                             ui.label('Applied values are automatically saved to EEPROM (M500).').classes('text-caption').style('color: #666;')
 
                             homing_response_log = ui.log().classes('w-full').style(
-                                'height: 96px; font-family: monospace; font-size: 12px; '
+                                'height: 96px; font-family: var(--font-mono); font-size: 12px; '
                                 'background: #111; color: #d4d4d4; border-radius: 6px; padding: 6px;'
                             )
 
                             async def read_homing_sensitivity():
                                 if not _require_controller_connected():
-                                    ui.notify('Controller not connected', type='warning')
+                                    ui.notify('The controller is not connected.', type='warning')
                                     return
                                 ui.notify('Reading homing sensitivity…', type='info')
                                 loop = asyncio.get_event_loop()
@@ -3744,7 +3817,7 @@ def main_page():
 
                             async def apply_homing_sensitivity():
                                 if not _require_controller_connected():
-                                    ui.notify('Controller not connected', type='warning')
+                                    ui.notify('The controller is not connected.', type='warning')
                                     return
                                 try:
                                     x_val = _parse_homing_sensitivity_value(homing_x_input.value, 'X')
@@ -3779,7 +3852,7 @@ def main_page():
                                         homing_response_log.push(f'<<< {line}')
 
                                 if ok:
-                                    ui.notify('Homing sensitivity applied', type='positive')
+                                    ui.notify('Homing sensitivity applied.', type='positive')
                                     log_event(
                                         'system',
                                         'homing_sensitivity_applied',
@@ -3788,7 +3861,8 @@ def main_page():
                                         persist=persist,
                                     )
                                 else:
-                                    ui.notify('Failed to apply homing sensitivity', type='negative')
+                                    logger.warning('Failed to apply homing sensitivity: %s', response)
+                                    ui.notify('Homing sensitivity could not be applied. Review the controller response, then try again.', type='negative', timeout=8000)
                                     log_event(
                                         'system',
                                         'homing_sensitivity_apply_failed',
@@ -3818,7 +3892,8 @@ def main_page():
                                         type='positive',
                                     )
                                 else:
-                                    ui.notify(f"Send failed: {result.get('error')}", type='negative', timeout=8000)
+                                    logger.warning('Log upload failed: %s', result.get('error'))
+                                    ui.notify(_safe_error_message('The logs could not be sent.'), type='negative', timeout=8000)
 
                             with ui.row().classes('gap-2'):
                                 ui.button('Send Logs to Dev', icon='cloud_upload', on_click=send_logs_to_dev) \
@@ -3835,7 +3910,7 @@ def main_page():
                             ui.label('Runs shell commands directly on the Pi.').classes('text-caption').style('color: #666;')
 
                             terminal_log = ui.log().classes('w-full').style(
-                                'height: 320px; font-family: monospace; font-size: 13px; '
+                                'height: 320px; font-family: var(--font-mono); font-size: 13px; '
                                 'background: #111; color: #d4d4d4; border-radius: 6px; padding: 8px;'
                             )
 
@@ -4004,7 +4079,7 @@ def main_page():
                                 term_input.value = ''
 
                             with ui.row().classes('w-full gap-2 items-center'):
-                                ui.label('$').style('color: #4caf50; font-family: monospace; font-size: 16px;')
+                                ui.label('$').style('color: var(--md-accent-green); font-family: var(--font-mono); font-size: 16px;')
                                 term_input = ui.input(placeholder='Type a command…') \
                                     .classes('flex-1').props('outlined dense autocomplete=off autocapitalize=off spellcheck=false')
                                 ui.button('Run', icon='play_arrow', on_click=run_terminal_command) \
@@ -4045,7 +4120,7 @@ def main_page():
         # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
         # instead of blending into the dark theme.
         alert_backdrop = ui.element('div').style(
-            'position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 5000; '
+            'position: fixed; inset: 0; background: var(--md-overlay); z-index: 5000; '
             'display: none; pointer-events: none;'
         )
 
@@ -4062,7 +4137,7 @@ def main_page():
                 connection_alert_icon = ui.icon('usb_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
                 with ui.column().classes('gap-1 w-full'):
                     connection_alert_title = ui.label('Controller disconnected') \
-                        .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
+                        .classes('text-h6').style('color: var(--md-text-primary);')
                     connection_alert_subtitle = ui.label('') \
                         .classes('text-caption').style('color: #ffb4b4; white-space: normal;')
 
@@ -4075,7 +4150,7 @@ def main_page():
                 ui.button(icon='close', on_click=_dismiss_connection_alert) \
                     .props('flat dense round').style('color: #aaa; margin: -4px -4px 0 0;')
             connection_alert_steps = ui.label('').style(
-                'white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;'
+                'white-space: pre-line; color: var(--md-text-primary); font-size: 14px; line-height: 1.45; margin-top: 10px;'
             )
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
@@ -4083,9 +4158,9 @@ def main_page():
 
                 def _confirm_force_controller_recovery():
                     with ui.dialog().props('persistent') as recovery_dialog, \
-                         ui.card().style('background:#1e1e1e; min-width:360px; padding:20px;'):
-                        ui.label('Force controller recovery?') \
-                            .classes('text-h6').style('color:#fff; margin-bottom:6px;')
+                         ui.card().style(_DIALOG_CARD_STYLE):
+                        ui.label('Recover the controller?') \
+                            .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
                             'This may reset Marlin and abort any SD-card job still in progress.'
@@ -4103,7 +4178,7 @@ def main_page():
                                     force_recovery_button.enable()
 
                             ui.button(
-                                'Cutter stopped — recover',
+                                'Cutter Stopped — Continue',
                                 icon='restart_alt',
                                 on_click=_run_forced_recovery,
                             ).props('color=negative dense')
@@ -4127,18 +4202,18 @@ def main_page():
                 ui.icon('system_update_alt', size='28px').style('color: #66bb6a; margin-top: 2px;')
                 with ui.column().classes('gap-1 w-full'):
                     ui.label('Software update available') \
-                        .classes('text-subtitle1').style('color: #fff; font-weight: 600;')
+                        .classes('text-h6').style('color: var(--md-text-primary);')
                     ui.label('A software update is ready to install.') \
                         .classes('text-caption').style('color: #b7dfc1; white-space: normal;')
             ui.label('Acknowledge this notice or install the update now.') \
-                .style('white-space: pre-line; color: #ddd; font-size: 13px; line-height: 1.45; margin-top: 10px;')
+                .style('white-space: pre-line; color: var(--md-text-primary); font-size: 14px; line-height: 1.45; margin-top: 10px;')
             with ui.row().classes('w-full justify-end gap-2').style('margin-top: 14px;'):
                 acknowledge_update_button = ui.button('Acknowledge', on_click=acknowledge_software_update).props('flat dense') \
                     .style('color: #aaa;')
                 update_now_button = ui.button('Update Now').props('dense color=positive').style('font-size: 12px; color: #111;')
 
                 async def _do_update_now():
-                    update_now_button.set_text('Updating...')
+                    update_now_button.set_text('Updating…')
                     update_now_button.props('icon=hourglass_top')
                     update_now_button.disable()
                     acknowledge_update_button.disable()
@@ -4211,9 +4286,9 @@ def main_page():
         def _show_resume_dialog():
             _resume_dialog_shown[0] = True
             with ui.dialog().props('persistent') as dlg, \
-                 ui.card().style('background:#1e1e1e; min-width:340px; padding:20px;'):
+                 ui.card().style(_DIALOG_CARD_STYLE):
                 ui.label('Resume interrupted job?') \
-                    .classes('text-h6').style('color:#fff; margin-bottom:6px;')
+                    .classes('text-h6 font-bold').style('margin-bottom:6px;')
                 ui.label(
                     'The controller reconnected. The machine will re-home then continue from the last safe position.'
                 ).classes('text-body2').style('color:#aaa;')

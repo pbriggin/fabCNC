@@ -462,6 +462,9 @@ class CNCController:
             finally:
                 self.reconnect_thread_active = False
 
+        # Reserve ownership before starting the worker so rapid UI clicks cannot
+        # create competing reconnect loops.
+        self.reconnect_thread_active = True
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
 
     def attempt_reconnect(self, *, force_dtr_reset: bool = False) -> None:
@@ -1369,7 +1372,7 @@ class CNCController:
 
     # ==================== Job Execution ====================
     
-    def run_utility_sequence(self, gcode_lines: list[str]) -> None:
+    def run_utility_sequence(self, gcode_lines: list[str]) -> Optional[threading.Thread]:
         """
         Run a utility G-code sequence (e.g. move to center) without requiring a loaded job.
         
@@ -1379,7 +1382,7 @@ class CNCController:
         with self.operation_lock:
             if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
                     or self.rehome_required):
-                return
+                return None
             commands = list(gcode_lines)
             if not any(line.split(';', 1)[0].strip().upper() == "M400" for line in commands[-2:]):
                 commands.append("M400")
@@ -1392,6 +1395,7 @@ class CNCController:
                 target=self._execute_job, args=(commands,), kwargs={"is_job": False}, daemon=True
             )
             self.job_thread.start()
+            return self.job_thread
 
     def start_job(
         self,
@@ -2406,7 +2410,7 @@ class CNCController:
             # Job complete
             if not self.stop_requested and not protocol_failed:
                 logger.info(f"Job complete! ({self.resend_total} resends)")
-                machine_state.set_status("Complete", busy=False)
+                machine_state.set_status("Complete" if is_job else "Idle", busy=False)
                 machine_state.update_job_progress(1.0)
                 if is_job:
                     log_controller_event(
