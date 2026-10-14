@@ -2764,6 +2764,7 @@ def main_page():
             header.q-header {
                 background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%) !important;
                 border-bottom: 0 !important;
+                box-shadow: none !important;
                 min-height: 56px !important;
                 max-height: 56px !important;
                 height: 56px !important;
