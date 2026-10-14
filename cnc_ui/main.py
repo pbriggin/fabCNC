@@ -439,6 +439,7 @@ cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medi
 def _mark_canvas_dirty() -> None:
     """Record that the in-memory canvas no longer matches its saved file."""
     client_job_state['canvas_dirty'] = True
+    _refresh_canvas_name_label()
 
 
 def apply_cut_pressure(name: str) -> None:
@@ -480,6 +481,22 @@ client_job_state = _ClientDict(
     'client_job_state',
     {'toolpath_generated': False, 'loaded_filename': None, 'canvas_dirty': False},
 )
+
+
+def _canvas_name_text() -> str:
+    """Return the current document name, including its unsaved-change state."""
+    filename = client_job_state.get('loaded_filename')
+    canvas_name = Path(filename).stem if filename else 'Untitled canvas'
+    if client_job_state.get('canvas_dirty', False):
+        canvas_name += ' (modified)'
+    return canvas_name
+
+
+def _refresh_canvas_name_label() -> None:
+    """Refresh the current canvas name shown below the file controls."""
+    label = ui.context.client.storage.get('canvas_name_label')
+    if label is not None:
+        label.set_text(_canvas_name_text())
 
 
 def _canvas_job_label() -> str:
@@ -1281,11 +1298,17 @@ def create_file_controls():
             </script>
         ''')
         
-        # Save/Load canvas buttons
+        # Canvas document controls
         with ui.row().classes('w-full gap-1'):
-            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas layout as a reusable file')
+            ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas')
+            ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name')
             ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
             ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
+
+        canvas_name_label = ui.label(_canvas_name_text()).classes('w-full text-center').style(
+            'color: #aaa; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+        )
+        ui.context.client.storage['canvas_name_label'] = canvas_name_label
 
 
 def create_job_controls():
@@ -1656,14 +1679,13 @@ async def _import_dxf_path(saved_path, filename):
         add_shapes_to_canvas(unique_shapes, start_color_index=existing_shape_count,
                              breaks=unique_breaks, entity_types=unique_types)
         
-        # Update state - clear any generated toolpath since shapes changed
-        # A DXF import creates a new, unsaved canvas; the DXF filename is not
-        # the identity of a saved canvas project.
-        machine_state.set_job_loaded(True, 'Untitled canvas')
+        # Update state and retain the current canvas identity. On a new canvas
+        # this remains untitled; on a loaded canvas the import is a modification
+        # which Save should write back to that same canvas.
         machine_state.set_toolpath_generated(False)
-        client_job_state['loaded_filename'] = None
-        client_job_state['canvas_dirty'] = True
+        _mark_canvas_dirty()
         client_job_state['toolpath_generated'] = False
+        machine_state.set_job_loaded(True, _canvas_job_label())
         
         ui.notify(f'File added: {filename} ({len(unique_shapes)} shapes)', type='positive')
         log_event('file', 'dxf_import_complete', filename=filename, shape_count=len(unique_shapes),
@@ -1738,8 +1760,50 @@ def open_saved_dxf_dialog():
     dialog.open()
 
 
-async def save_canvas_state():
-    """Save current canvas state — shows all existing canvases with overwrite, download, and delete options."""
+async def _save_canvas_to_filename(safe_name: str) -> bool:
+    """Persist the browser canvas and make ``safe_name`` the current document."""
+    try:
+        canvas_json = await ui.run_javascript(
+            'window.toolpathCanvas.saveCanvasState()', timeout=15.0
+        )
+        if not canvas_json:
+            ui.notify('There is no canvas data to save.', type='warning')
+            return False
+
+        state = json.loads(canvas_json)
+        state['cut_settings'] = cut_settings.copy()
+        canvas_json = json.dumps(state, indent=2)
+        filepath = os.path.join(file_manager.upload_dir, safe_name)
+        with open(filepath, 'w') as f:
+            f.write(canvas_json)
+
+        client_job_state['loaded_filename'] = safe_name
+        client_job_state['canvas_dirty'] = False
+        _refresh_canvas_name_label()
+        ui.notify(f'Saved: {safe_name}', type='positive')
+        logger.info('Canvas state saved to %s', filepath)
+        log_event('canvas', 'canvas_saved', filename=safe_name,
+                  shape_count=len(state.get('shapes', {})),
+                  cut_settings=cut_settings.copy())
+        return True
+    except Exception:
+        ui.notify(_safe_error_message('The canvas could not be saved.'), type='negative', timeout=8000)
+        logger.exception('Error saving canvas')
+        return False
+
+
+async def save_canvas_state(after_save=None):
+    """Save over the current canvas, using Save As for an untitled canvas."""
+    filename = client_job_state.get('loaded_filename')
+    if not filename:
+        await save_canvas_as(after_save=after_save)
+        return
+    if await _save_canvas_to_filename(Path(filename).name) and after_save:
+        await after_save()
+
+
+async def save_canvas_as(after_save=None):
+    """Prompt for a name and save the current canvas as a new document."""
     import glob
 
     pattern = os.path.join(file_manager.upload_dir, '*.json')
@@ -1818,34 +1882,14 @@ async def save_canvas_state():
 
                 overwrite_confirmed['value'] = False
 
-                canvas_json = await ui.run_javascript('window.toolpathCanvas.saveCanvasState()', timeout=15.0)
-                if not canvas_json:
-                    ui.notify('There is no canvas data to save.', type='warning')
+                if await _save_canvas_to_filename(safe_name):
                     dialog.close()
-                    return
+                    if after_save:
+                        await after_save()
 
-                state = json.loads(canvas_json)
-                state['cut_settings'] = cut_settings.copy()
-                canvas_json = json.dumps(state, indent=2)
-
-                with open(filepath, 'w') as f:
-                    f.write(canvas_json)
-
-                # Use the saved canvas name as the identity of the next job
-                # generated from it.  Marlin always runs FABJOB.GCO, so the
-                # human-readable canvas name must be retained separately.
-                client_job_state['loaded_filename'] = safe_name
-                client_job_state['canvas_dirty'] = False
-                ui.notify(f'Saved: {safe_name}', type='positive')
-                logger.info(f'Canvas state saved to {filepath}')
-                log_event('canvas', 'canvas_saved', filename=safe_name,
-                          shape_count=len(state.get('shapes', {})),
-                          cut_settings=cut_settings.copy())
-                dialog.close()
-
-            except Exception as e:
+            except Exception:
                 ui.notify(_safe_error_message('The canvas could not be saved.'), type='negative', timeout=8000)
-                logger.exception('Error saving canvas')
+                logger.exception('Error preparing canvas save')
 
         with ui.row().classes('w-full gap-2 mt-2'):
             ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
@@ -1855,7 +1899,40 @@ async def save_canvas_state():
     dialog.open()
 
 
+async def _confirm_unsaved_changes(action, action_label: str) -> None:
+    """Run an action after the user resolves dirty canvas changes."""
+    if not client_job_state.get('canvas_dirty', False):
+        await action()
+        return
+
+    with ui.dialog() as dialog, ui.card().style(_DIALOG_CARD_STYLE + 'width: 440px;'):
+        ui.label('Unsaved Canvas Changes').classes('text-h6 font-bold').style('color: #fff;')
+        ui.label(
+            f'Save your changes before you {action_label}?'
+        ).style('color: #ccc; font-size: 14px;')
+
+        async def _save_then_continue():
+            dialog.close()
+            await save_canvas_state(after_save=action)
+
+        async def _discard_then_continue():
+            dialog.close()
+            await action()
+
+        with ui.row().classes('w-full justify-end gap-2 mt-3'):
+            ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
+            ui.button('Discard Changes', on_click=_discard_then_continue) \
+                .props('flat color=negative')
+            ui.button('Save Changes', on_click=_save_then_continue, color='primary')
+    dialog.open()
+
+
 async def load_canvas_state():
+    """Protect unsaved changes, then show the saved-canvas chooser."""
+    await _confirm_unsaved_changes(_show_load_canvas_dialog, 'load another canvas')
+
+
+async def _show_load_canvas_dialog():
     """Show dialog to load a saved canvas state."""
     import glob
     
@@ -1927,6 +2004,7 @@ async def load_canvas_state():
                         client_job_state['loaded_filename'] = os.path.basename(fp)
                         client_job_state['canvas_dirty'] = False
                         client_job_state['toolpath_generated'] = False
+                        _refresh_canvas_name_label()
                         ui.notify(f'Canvas loaded: {os.path.basename(fp)}', type='positive')
                         log_event('canvas', 'canvas_loaded', filename=os.path.basename(fp),
                                   shape_count=len(current_toolpath_shapes),
@@ -1965,8 +2043,16 @@ async def load_canvas_state():
     dialog.open()
 
 
-def clear_canvas():
-    """Clear all shapes from canvas."""
+async def clear_canvas():
+    """Protect unsaved changes, then clear the current canvas."""
+    async def _clear():
+        _clear_canvas_now()
+
+    await _confirm_unsaved_changes(_clear, 'clear the canvas')
+
+
+def _clear_canvas_now():
+    """Clear all shapes and reset the document identity."""
     global current_toolpath_shapes, current_toolpath_breaks, current_toolpath_types, current_toolpath_notches
     log_event('canvas', 'canvas_cleared', shape_count=len(current_toolpath_shapes),
               shape_names=list(current_toolpath_shapes.keys()))
@@ -1980,6 +2066,7 @@ def clear_canvas():
     client_job_state['loaded_filename'] = None
     client_job_state['canvas_dirty'] = False
     client_job_state['toolpath_generated'] = False
+    _refresh_canvas_name_label()
     ui.notify('Canvas cleared.', type='info')
 
 
