@@ -846,8 +846,8 @@ def create_header():
             # Tabs in header
             with ui.tabs().props('dense inline-label').classes('header-tabs').style('background: transparent;') as tabs:
                 job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath').tooltip('Open toolpath setup and job controls')
-                gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode').tooltip('Open manual G-code controls and response log')
-                wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system').tooltip('Open connection, system, security, and diagnostic settings')
+                gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
+                wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
         
         # Center: Status pill + time estimate
         with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
@@ -869,7 +869,7 @@ def create_header():
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
                 .props('dense flat no-caps color=grey-6') \
-                .style('font-size: 11px; min-width: 140px;')
+                .classes('no-tooltips').style('font-size: 11px; min-width: 140px;')
             
             with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
@@ -2854,38 +2854,59 @@ def main_page():
                 background: var(--md-border) !important;
             }
             
-            /* Header tabs styling */
+            /* Browser-style tabs in the application header */
             .header-tabs {
                 background: transparent !important;
                 padding: 0 !important;
                 border-radius: 0 !important;
+                height: 42px !important;
+                min-height: 42px !important;
+                align-self: stretch;
+                overflow: visible !important;
             }
             
             .header-tabs .q-tab {
-                min-height: 36px !important;
-                height: 36px !important;
-                padding: 0 10px !important;
-                border: 1px solid transparent;
-                border-radius: var(--radius-md) !important;
+                position: relative;
+                box-sizing: border-box !important;
+                min-height: 42px !important;
+                max-height: 42px !important;
+                height: 42px !important;
+                padding: 0 13px !important;
+                border: 1px solid #383838;
+                border-bottom: 0;
+                border-radius: 9px 9px 0 0 !important;
                 margin: 0 !important;
+                background: #252525 !important;
                 color: var(--md-text-secondary) !important;
                 opacity: 0.82;
                 transition: background 0.15s ease, border-color 0.15s ease,
-                            color 0.15s ease, opacity 0.15s ease,
-                            transform 0.15s ease !important;
+                            color 0.15s ease, opacity 0.15s ease !important;
             }
 
             .header-tabs .q-tab:hover:not(.q-tab--active) {
-                background: rgba(255, 255, 255, 0.06) !important;
-                border-color: var(--md-border-light);
+                background: #303030 !important;
+                border-color: #464646;
                 color: var(--md-text-primary) !important;
                 opacity: 1;
             }
 
             .header-tabs .q-tab--active {
+                z-index: 1;
+                background: #363636 !important;
+                border-color: #4a4a4a;
                 color: #fff !important;
                 opacity: 1;
-                box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+                box-shadow: 0 1px #363636;
+            }
+
+            .header-tabs .q-tab--active::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 9px;
+                right: 9px;
+                height: 3px;
+                border-radius: 9px 9px 0 0;
             }
 
             .header-tabs .nav-toolpath .q-icon { color: #66bb6a; }
@@ -2893,21 +2914,24 @@ def main_page():
             .header-tabs .nav-system .q-icon { color: #ffb74d; }
 
             .header-tabs .nav-toolpath.q-tab--active {
-                background: rgba(76, 175, 80, 0.22) !important;
-                border-color: rgba(102, 187, 106, 0.8);
-                box-shadow: inset 0 -3px #66bb6a, 0 3px 10px rgba(0, 0, 0, 0.3);
+                border-top-color: rgba(102, 187, 106, 0.85);
+            }
+            .header-tabs .nav-toolpath.q-tab--active::before {
+                background: #66bb6a;
             }
 
             .header-tabs .nav-gcode.q-tab--active {
-                background: rgba(74, 158, 255, 0.22) !important;
-                border-color: rgba(126, 175, 255, 0.8);
-                box-shadow: inset 0 -3px #7eafff, 0 3px 10px rgba(0, 0, 0, 0.3);
+                border-top-color: rgba(126, 175, 255, 0.85);
+            }
+            .header-tabs .nav-gcode.q-tab--active::before {
+                background: #7eafff;
             }
 
             .header-tabs .nav-system.q-tab--active {
-                background: rgba(255, 167, 38, 0.22) !important;
-                border-color: rgba(255, 183, 77, 0.8);
-                box-shadow: inset 0 -3px #ffb74d, 0 3px 10px rgba(0, 0, 0, 0.3);
+                border-top-color: rgba(255, 183, 77, 0.85);
+            }
+            .header-tabs .nav-system.q-tab--active::before {
+                background: #ffb74d;
             }
 
             .header-tabs .q-tab__indicator {
@@ -2918,11 +2942,15 @@ def main_page():
                 font-size: 13px;
                 font-weight: 600;
                 letter-spacing: 0.01em;
+                line-height: 1;
             }
             
             .header-tabs .q-tabs__content {
-                gap: 0;
-                align-items: center;
+                height: 42px !important;
+                min-height: 42px !important;
+                gap: 3px;
+                align-items: stretch;
+                border-bottom: 1px solid #414141;
             }
             
             /* Labels styling */
@@ -3045,6 +3073,7 @@ def main_page():
 
             function tooltipControlFrom(target) {
                 if (!target) return null;
+                if (target.closest?.('.no-tooltips')) return null;
                 const field = target.closest?.('.q-field');
                 return field || target.closest?.(controlSelector);
             }
@@ -3107,7 +3136,6 @@ def main_page():
                     'Force Recovery': 'Open guarded recovery for an uncertain controller state',
                     Acknowledge: 'Dismiss this update notice without installing now',
                     'Update Now': 'Install the available fabCNC software update now',
-                    'Software Up To Date': 'The installed fabCNC software is current',
                     Unlock: 'Sign in to unlock the fabCNC controls',
                     'Forgot password?': 'Open password recovery using the machine recovery code',
                     Discard: 'Discard the interrupted job recovery record',
@@ -3960,7 +3988,7 @@ def main_page():
                             create_jog_controls()
             
             # GCODE tab - Manual G-code command interface
-            with ui.tab_panel(gcode_tab).classes('tab-content remote-control-lock'):
+            with ui.tab_panel(gcode_tab).classes('tab-content remote-control-lock no-tooltips'):
                 with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
                     ui.label('Manual G-code Commands').classes('text-body1 font-bold mb-2').style('color: #aaa;')
                     
@@ -3999,7 +4027,7 @@ def main_page():
                     gcode_input.on('keydown.enter', send_gcode)
             
             # System tab - WiFi, connection info, and system controls
-            with ui.tab_panel(wifi_tab).classes('tab-content'):
+            with ui.tab_panel(wifi_tab).classes('tab-content no-tooltips'):
                 with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
                     with ui.row().classes('w-full gap-6'):
                         # Left column: Connection info
