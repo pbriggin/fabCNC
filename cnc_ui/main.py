@@ -413,15 +413,25 @@ z_cut_height = _ClientDict('z_cut_height', {'value': -35.0})
 PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5, 'Very Hard': -40.0}
 SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
 cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medium'})
+def _mark_canvas_dirty() -> None:
+    """Record that the in-memory canvas no longer matches its saved file."""
+    client_job_state['canvas_dirty'] = True
+
+
 def apply_cut_pressure(name: str) -> None:
     """Apply a named pressure setting and record it in cut_settings."""
+    changed = cut_settings.get('pressure') != name
     z_cut_height.update({'value': PRESSURE_MAP[name]})
     cut_settings['pressure'] = name
+    if changed:
+        _mark_canvas_dirty()
 
 def apply_cut_speed(name: str) -> None:
     """Apply a named speed setting and record it in cut_settings."""
-    feed, rapid = SPEED_MAP[name]
+    changed = cut_settings.get('speed') != name
     cut_settings['speed'] = name
+    if changed:
+        _mark_canvas_dirty()
 
 # DXF processing and toolpath generation
 dxf_processor = DXFProcessor()
@@ -445,8 +455,28 @@ current_toolpath_types = _ClientDict('toolpath_types')
 current_toolpath_notches = _ClientDict('toolpath_notches')
 client_job_state = _ClientDict(
     'client_job_state',
-    {'toolpath_generated': False, 'loaded_filename': None},
+    {'toolpath_generated': False, 'loaded_filename': None, 'canvas_dirty': False},
 )
+
+
+def _canvas_job_label() -> str:
+    """Return the truthful identity to freeze into a generated machine job."""
+    filename = client_job_state.get('loaded_filename')
+    if not filename:
+        return 'Untitled canvas'
+    label = Path(filename).name
+    if client_job_state.get('canvas_dirty', False):
+        label += ' (modified)'
+    return label
+
+
+_CANVAS_MUTATING_ACTIONS = {
+    'mirrorX', 'mirrorY', 'alignCentersVertical', 'alignCentersHorizontal',
+    'distributeHorizontally', 'distributeVertically', 'ensureSpacing',
+    'rotate90', 'rotateByDegrees', 'scaleShape', 'moveToOrigin',
+    'centerOnBed', 'linearArray', 'gridArray', 'mirrorCopy', 'nestShapes',
+    'duplicate', 'deleteShape', 'pasteShape', 'undo',
+}
 toolpath_canvas = None  # Reference to the canvas element
 
 # API endpoint for jog control from JavaScript
@@ -1584,9 +1614,12 @@ async def handle_file_upload(event):
         add_shapes_to_canvas(shapes, start_color_index=len(current_toolpath_shapes), breaks=shape_breaks, entity_types=shape_types)
         
         # Update state - clear any generated toolpath since shapes changed
-        machine_state.set_job_loaded(True, filename)
+        # A DXF import creates a new, unsaved canvas; the DXF filename is not
+        # the identity of a saved canvas project.
+        machine_state.set_job_loaded(True, 'Untitled canvas')
         machine_state.set_toolpath_generated(False)
-        client_job_state['loaded_filename'] = filename
+        client_job_state['loaded_filename'] = None
+        client_job_state['canvas_dirty'] = True
         client_job_state['toolpath_generated'] = False
         
         ui.notify(f'File loaded: {filename} ({len(shapes)} shapes)', type='positive')
@@ -1718,8 +1751,8 @@ async def save_canvas_state():
                 # Use the saved canvas name as the identity of the next job
                 # generated from it.  Marlin always runs FABJOB.GCO, so the
                 # human-readable canvas name must be retained separately.
-                machine_state.set_job_loaded(True, safe_name)
                 client_job_state['loaded_filename'] = safe_name
+                client_job_state['canvas_dirty'] = False
                 ui.notify(f'Saved: {safe_name}', type='positive')
                 logger.info(f'Canvas state saved to {filepath}')
                 log_event('canvas', 'canvas_saved', filename=safe_name,
@@ -1809,6 +1842,7 @@ async def load_canvas_state():
                         machine_state.set_job_loaded(True, os.path.basename(fp))
                         machine_state.set_toolpath_generated(False)
                         client_job_state['loaded_filename'] = os.path.basename(fp)
+                        client_job_state['canvas_dirty'] = False
                         client_job_state['toolpath_generated'] = False
                         ui.notify(f'Canvas loaded: {os.path.basename(fp)}', type='positive')
                         log_event('canvas', 'canvas_loaded', filename=os.path.basename(fp),
@@ -1860,6 +1894,7 @@ def clear_canvas():
     machine_state.set_job_loaded(False)
     machine_state.set_toolpath_generated(False)
     client_job_state['loaded_filename'] = None
+    client_job_state['canvas_dirty'] = False
     client_job_state['toolpath_generated'] = False
     ui.notify('Canvas cleared', type='info')
 
@@ -1982,7 +2017,7 @@ async def toggle_toolpath(button):
             'gcode': list(current_gcode),
             'sha256': gcode_digest,
             'piece_count': len(shapes_snapshot),
-            'source_filename': client_job_state['loaded_filename'] or 'Untitled canvas',
+            'source_filename': _canvas_job_label(),
         }
 
         # Store viz data server-side; JS fetches it via GET /toolpath-preview so we
@@ -2333,7 +2368,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
         and current_status.startswith('Running')
         and state.loaded_filename
     ):
-        canvas_name = Path(state.loaded_filename).stem
+        canvas_name = Path(state.loaded_filename).name
         display_status = f'{current_status}: {canvas_name}'
     if current_status == sd_verification_status:
         display_status = 'Verify SD job'
@@ -3406,6 +3441,7 @@ def main_page():
                                 if shape_name and new_points:
                                     # Update the stored shapes with new positions
                                     current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
+                                    _mark_canvas_dirty()
                                     logger.info(f"Shape '{shape_name}' moved to new position")
                                     try:
                                         xs = [p[0] for p in new_points]
@@ -3445,6 +3481,7 @@ def main_page():
                                     current_toolpath_breaks.pop(shape_name, None)
                                     current_toolpath_types.pop(shape_name, None)
                                     current_toolpath_notches.pop(shape_name, None)
+                                    _mark_canvas_dirty()
                                     logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
                                     log_event('canvas', 'shape_deleted', shape=shape_name)
                                     # Clear toolpath if it was generated since shapes changed
@@ -3463,6 +3500,8 @@ def main_page():
                                 if not isinstance(data, dict):
                                     data = {}
                                 action = data.pop('action', 'unknown')
+                                if action in _CANVAS_MUTATING_ACTIONS:
+                                    _mark_canvas_dirty()
                                 log_event('canvas', action, **data)
 
                             ui.on('canvas_action', on_canvas_action)
@@ -3502,6 +3541,7 @@ def main_page():
                                     current_toolpath_notches[shape_name] = [dict(n) for n in notches]
                                 else:
                                     current_toolpath_notches.pop(shape_name, None)
+                                _mark_canvas_dirty()
 
                             ui.on('notches_changed', on_notches_changed)
                         
