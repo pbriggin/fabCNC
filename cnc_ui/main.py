@@ -2932,6 +2932,7 @@ def main_page():
                 background: #252525 !important;
                 color: var(--md-text-secondary) !important;
                 opacity: 0.82;
+                overflow: visible !important;
                 transition: background 0.15s ease, border-color 0.15s ease,
                             color 0.15s ease, opacity 0.15s ease !important;
             }
@@ -2948,14 +2949,39 @@ def main_page():
                 background: var(--workspace-surface) !important;
                 border-color: #414141;
                 border-bottom-color: var(--workspace-surface) !important;
-                border-radius: 12px !important;
+                border-radius: 14px 14px 0 0 !important;
                 color: #fff !important;
                 opacity: 1;
                 box-shadow: none;
             }
 
+            .header-tabs .q-tab--active::before,
+            .header-tabs .q-tab--active::after {
+                content: '';
+                position: absolute;
+                bottom: 0;
+                width: 14px;
+                height: 14px;
+                pointer-events: none;
+                z-index: 1;
+            }
+
             .header-tabs .q-tab--active::before {
-                display: none !important;
+                left: -14px;
+                background: radial-gradient(
+                    circle at 100% 0,
+                    transparent 13.5px,
+                    var(--workspace-surface) 14px
+                );
+            }
+
+            .header-tabs .q-tab--active::after {
+                right: -14px;
+                background: radial-gradient(
+                    circle at 0 0,
+                    transparent 13.5px,
+                    var(--workspace-surface) 14px
+                );
             }
 
             .header-tabs .nav-toolpath .q-icon { color: #66bb6a; }
@@ -2984,6 +3010,7 @@ def main_page():
                 gap: 3px;
                 align-items: stretch;
                 border-bottom: 0;
+                overflow: visible !important;
             }
 
             .header-tabs .q-tab:first-child { border-left: 0; }
