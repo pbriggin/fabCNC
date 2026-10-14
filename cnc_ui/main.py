@@ -2682,10 +2682,22 @@ def main_page():
                 overflow: hidden !important;
             }
 
-            /* The workspace meets the header directly; keep outer page gutters out. */
-            .q-page {
+            /* NiceGUI nests page content in an extra wrapper; remove its default gutters too. */
+            .q-page-container {
+                padding-right: 0 !important;
+                padding-bottom: 0 !important;
+                padding-left: 0 !important;
+            }
+
+            .q-page, .nicegui-content {
+                width: 100% !important;
+                max-width: none !important;
                 padding: 0 !important;
                 margin: 0 !important;
+            }
+
+            .nicegui-content {
+                gap: 0 !important;
             }
             
             /* Remove default Quasar tab panel padding to prevent overflow */
@@ -2708,6 +2720,7 @@ def main_page():
                 --md-bg-secondary: #252525;
                 --md-bg-elevated: #2d2d2d;
                 --md-bg-card: #333333;
+                --workspace-surface: #333333;
                 --md-border: #404040;
                 --md-border-light: #4a4a4a;
                 --md-text-primary: #e0e0e0;
@@ -2878,7 +2891,7 @@ def main_page():
                 margin: 0 !important;
                 padding: 0 !important;
                 gap: 0 !important;
-                background: var(--md-bg-card);
+                background: var(--workspace-surface) !important;
             }
 
             .workspace-tab-panels {
@@ -2887,6 +2900,7 @@ def main_page():
                 min-height: 0 !important;
                 height: auto !important;
                 overflow: hidden !important;
+                background: var(--workspace-surface) !important;
             }
 
             .workspace-tab-panels > .q-tab-panel {
@@ -2894,9 +2908,11 @@ def main_page():
                 min-height: 0 !important;
                 height: 100% !important;
                 overflow: hidden !important;
+                background: var(--workspace-surface) !important;
             }
 
             .workspace-panel-card {
+                background: var(--workspace-surface) !important;
                 border: 0 !important;
                 border-radius: 0 !important;
                 box-shadow: none !important;
@@ -2911,7 +2927,7 @@ def main_page():
                 padding: 0 16px !important;
                 border: 1px solid #383838;
                 border-bottom: 0;
-                border-radius: 9px 9px 0 0 !important;
+                border-radius: 12px 12px 0 0 !important;
                 margin: 0 !important;
                 background: #252525 !important;
                 color: var(--md-text-secondary) !important;
@@ -2929,47 +2945,21 @@ def main_page():
 
             .header-tabs .q-tab--active {
                 z-index: 1;
-                background: var(--md-bg-card) !important;
-                border-color: #4a4a4a;
+                background: var(--workspace-surface) !important;
+                border-color: #414141;
+                border-bottom-color: var(--workspace-surface) !important;
                 color: #fff !important;
                 opacity: 1;
-                box-shadow: 0 1px var(--md-bg-card);
+                box-shadow: 0 1px 0 var(--workspace-surface);
             }
 
             .header-tabs .q-tab--active::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: 9px;
-                right: 9px;
-                height: 3px;
-                border-radius: 9px 9px 0 0;
+                display: none !important;
             }
 
             .header-tabs .nav-toolpath .q-icon { color: #66bb6a; }
             .header-tabs .nav-gcode .q-icon { color: #7eafff; }
             .header-tabs .nav-system .q-icon { color: #ffb74d; }
-
-            .header-tabs .nav-toolpath.q-tab--active {
-                border-top-color: rgba(102, 187, 106, 0.85);
-            }
-            .header-tabs .nav-toolpath.q-tab--active::before {
-                background: #66bb6a;
-            }
-
-            .header-tabs .nav-gcode.q-tab--active {
-                border-top-color: rgba(126, 175, 255, 0.85);
-            }
-            .header-tabs .nav-gcode.q-tab--active::before {
-                background: #7eafff;
-            }
-
-            .header-tabs .nav-system.q-tab--active {
-                border-top-color: rgba(255, 183, 77, 0.85);
-            }
-            .header-tabs .nav-system.q-tab--active::before {
-                background: #ffb74d;
-            }
 
             .header-tabs .q-tab__indicator {
                 display: none !important;
