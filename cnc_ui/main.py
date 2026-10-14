@@ -841,7 +841,7 @@ def create_header():
         # Center: Status pill + time estimate
         with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
             status_pill = ui.element('div').classes('flex items-center gap-2 px-3 py-1 rounded-full').style('background: #2d4a2d; border: 1px solid #3d5a3d;')
-            status_pill.tooltip('Machine status; select to view recovery options when attention is required')
+            status_pill.tooltip('Shows the current machine state; select it to reopen connection or recovery guidance when attention is required')
             with status_pill:
                 status_icon = ui.icon('radio_button_checked', size='10px').classes('text-green-4')
                 status_label = ui.label('Idle').classes('text-caption font-bold text-green-4').style(
@@ -864,7 +864,7 @@ def create_header():
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
                 ui.element('div').style('width: 10px; flex-shrink: 0;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
-            wifi_widget.tooltip('Open Wi-Fi settings')
+            wifi_widget.tooltip('View Wi-Fi status, scan for networks, or manage saved connections')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
@@ -1249,7 +1249,8 @@ def create_file_controls():
             auto_upload=True,
             multiple=True,
             on_upload=lambda e: handle_file_upload(e)
-        ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;')
+        ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;') \
+            .tooltip('Select one or more DXF files to add their shapes to the canvas')
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -1269,9 +1270,9 @@ def create_file_controls():
         
         # Save/Load canvas buttons
         with ui.row().classes('w-full gap-1'):
-            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save canvas to file')
-            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Load saved canvas')
-            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Clear all shapes')
+            ui.button('Save', icon='save', on_click=save_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas layout as a reusable file')
+            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
+            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack').style('flex: 1; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
 
 
 def create_job_controls():
@@ -1286,14 +1287,16 @@ def create_job_controls():
                 options=list(PRESSURE_MAP.keys()),
                 value=cut_settings['pressure'],
                 on_change=lambda e: apply_cut_pressure(e.value)
-            ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+            ).props('dense outlined').classes('w-full').style('font-size: 13px;') \
+                .tooltip('Select the cutting-wheel pressure used when generating the toolpath')
             ui.context.client.storage['pressure_select'] = _pressure_select
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
             _speed_select = ui.select(
                 options=list(SPEED_MAP.keys()),
                 value=cut_settings['speed'],
                 on_change=lambda e: apply_cut_speed(e.value)
-            ).props('dense outlined').classes('w-full').style('font-size: 13px;')
+            ).props('dense outlined').classes('w-full').style('font-size: 13px;') \
+                .tooltip('Select the machine feed rate used for cutting moves')
             ui.context.client.storage['speed_select'] = _speed_select
         apply_cut_pressure(cut_settings['pressure'])
         apply_cut_speed(cut_settings['speed'])
@@ -1876,7 +1879,7 @@ async def load_canvas_state():
                         .style('color: #4a9eff; font-size: 13px; text-transform: none; justify-content: flex-start;')
                     ui.label(mtime).style('color: #666; font-size: 11px; min-width: 72px; text-align: right;')
                     ui.button(icon='download', on_click=_download) \
-                        .props('flat dense').style('color: #aaa;').tooltip('Download to computer')
+                        .props('flat dense').style('color: #aaa;').tooltip('Download this saved canvas file to your computer')
 
                     def _delete(fp=filepath, r=row):
                         try:
@@ -1889,7 +1892,7 @@ async def load_canvas_state():
                             ui.notify(_safe_error_message('The saved canvas could not be deleted.'), type='negative', timeout=8000)
 
                     ui.button(icon='delete', on_click=_delete) \
-                        .props('flat dense color=negative').tooltip('Delete')
+                        .props('flat dense color=negative').tooltip('Permanently delete this saved canvas file')
 
         with ui.row().classes('w-full mt-2'):
             ui.button('Cancel', on_click=dialog.close).props('flat').style('color: #aaa;')
@@ -2677,10 +2680,10 @@ def main_page():
             header.q-header {
                 background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%) !important;
                 border-bottom: 1px solid var(--md-border) !important;
-                min-height: 48px !important;
-                max-height: 48px !important;
-                height: 48px !important;
-                padding: 8px 16px !important;
+                min-height: 56px !important;
+                max-height: 56px !important;
+                height: 56px !important;
+                padding: 7px 16px !important;
             }
             
             /* Cards - Subtle and tight */
@@ -2793,7 +2796,8 @@ def main_page():
             }
             
             .header-tabs .q-tab {
-                min-height: 38px !important;
+                min-height: 40px !important;
+                height: 40px !important;
                 padding: 0 14px !important;
                 border: 1px solid transparent;
                 border-radius: var(--radius-md) !important;
@@ -2815,7 +2819,6 @@ def main_page():
             .header-tabs .q-tab--active {
                 color: #fff !important;
                 opacity: 1;
-                transform: translateY(-1px);
                 box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
             }
 
@@ -2941,56 +2944,203 @@ def main_page():
                 border-radius: 4px !important;
                 font-size: 12px !important;
             }
+
+            .fallback-control-tooltip {
+                position: fixed;
+                z-index: 100000;
+                max-width: 320px;
+                padding: 6px 9px;
+                border-radius: var(--radius-sm);
+                background: #484848;
+                color: var(--md-text-primary);
+                box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+                font-size: var(--type-caption);
+                line-height: 1.4;
+                pointer-events: none;
+                opacity: 0;
+                transform: translateY(2px);
+                transition: opacity 0.1s ease, transform 0.1s ease;
+            }
+
+            .fallback-control-tooltip.visible {
+                opacity: 1;
+                transform: translateY(0);
+            }
         </style>
         <script>
-            // Ensure every interactive control has a non-empty hover description.
-            // NiceGUI tooltips render inside their control; this fallback only adds
-            // a native title when no explicit tooltip is present.
-            function installMissingControlTooltips(root = document) {
+            // Delegated tooltip coverage for every standard and dynamic control.
+            // Explicit NiceGUI tooltips win; this supplies the remainder without
+            // relying on browser-native title handling or mutation timing.
+            const controlSelector = [
+                'button', 'a[href]', '.q-btn', 'input', 'textarea', 'select',
+                '[role="button"]', '[role="tab"]', '[role="checkbox"]',
+                '[role="radio"]', '[role="switch"]', '[role="slider"]',
+                '.q-field', '.q-uploader', '.jog-segment'
+            ].join(', ');
+
+            function tooltipControlFrom(target) {
+                const field = target.closest?.('.q-field');
+                return field || target.closest?.(controlSelector);
+            }
+
+            function fallbackControlTooltipText(el) {
                 const iconNames = {
-                    home: 'Home all axes', download: 'Download', delete: 'Delete',
-                    close: 'Close', play_arrow: 'Start or resume', pause: 'Pause',
-                    stop: 'Stop', clear_all: 'Clear', restart_alt: 'Restart or recover',
+                    home: 'Home all machine axes', download: 'Download this file',
+                    delete: 'Delete this item', close: 'Close this message',
+                    play_arrow: 'Start or resume this operation', pause: 'Pause the active job',
+                    stop: 'Stop the active job', clear_all: 'Clear the displayed output',
+                    restart_alt: 'Restart or recover the selected service',
+                    check: 'Confirm', password: 'Change password', cloud_upload: 'Send logs',
+                    wifi: 'Connect to Wi-Fi', wifi_find: 'Scan for Wi-Fi networks',
+                    tune: 'Apply settings', manage_search: 'Read current settings',
+                    refresh: 'Restart the fabCNC service', send: 'Send this command to the controller',
+                    folder_open: 'Open a saved canvas layout', save: 'Save the current canvas layout',
+                    crop_free: 'Trace the job boundary without cutting',
+                    build: 'Move the machine to the cutting-wheel change position',
+                    straighten: 'Move the machine to the fabric-taping position',
+                    wifi_off: 'Remove saved Wi-Fi connections',
+                    lock_reset: 'Reset the UI password', article: 'Show recent service logs',
+                    info: 'Show fabCNC service status', usb: 'List attached USB devices',
+                    cable: 'List available serial ports',
                     align_horizontal_center: 'Align horizontal centers',
                     align_vertical_center: 'Align vertical centers',
                     horizontal_distribute: 'Distribute horizontally',
                     vertical_distribute: 'Distribute vertically'
                 };
-                const candidates = root.querySelectorAll(
-                    'button, [role="tab"], input, textarea, select, [role="checkbox"], '
-                    + '.q-field, .q-uploader, .jog-segment'
-                );
-                candidates.forEach(el => {
-                    if (el.title || el.querySelector?.('.q-tooltip')) return;
-                    let text = el.getAttribute('aria-label') || '';
-                    if (!text && el.classList.contains('jog-segment')) {
-                        text = (el.id || '').replaceAll('-', ' ').replace(/\b([xyza])\b/gi, '$1 axis');
-                    }
-                    if (!text && el.classList.contains('q-field')) {
-                        text = el.querySelector('.q-field__label')?.textContent || '';
-                    }
-                    if (!text) {
-                        const visibleText = (el.innerText || el.value || '').trim();
-                        text = visibleText.length <= 80 ? visibleText : '';
-                    }
-                    if (!text) {
-                        const icon = el.querySelector?.('.q-icon')?.textContent?.trim();
-                        text = iconNames[icon] || (icon ? icon.replaceAll('_', ' ') : 'Control');
-                    }
-                    text = String(text).replace(/\\s+/g, ' ').trim();
-                    if (text) el.title = text.charAt(0).toUpperCase() + text.slice(1);
-                });
+                const actionNames = {
+                    Start: 'Start the generated cutting job on the machine',
+                    Stop: 'Stop the active machine job',
+                    Pause: 'Pause the active job', Resume: 'Resume the paused job',
+                    Save: 'Save the current canvas layout as a reusable file',
+                    Load: 'Replace the canvas with a saved layout',
+                    Clear: 'Clear the current contents',
+                    Nest: 'Arrange shapes automatically to reduce material usage',
+                    Apply: 'Apply these settings', Cancel: 'Close without applying changes',
+                    Run: 'Run the entered shell command on the fabCNC computer',
+                    Rescan: 'Scan for available Wi-Fi networks again',
+                    Send: 'Send the entered G-code command directly to the controller',
+                    'Generate Toolpath': 'Generate the cutting path from the current canvas shapes',
+                    'Clear Toolpath': 'Remove the generated cutting path while keeping the canvas shapes',
+                    'Outline Job': 'Move around the job boundary without lowering the cutting wheel',
+                    Scale: 'Resize the selected shapes using the entered percentage',
+                    Grid: 'Duplicate the selected shapes into the specified rows and columns',
+                    'XY Zero': 'Set the current X and Y positions as zero without moving the machine',
+                    'Tape Fabric': 'Home the machine, then move to the fabric-taping position',
+                    'Change Cutting Wheel': 'Home the machine, then lower Z to the cutting-wheel change position',
+                    'Home All': 'Home every machine axis',
+                    Connect: 'Connect to the selected Wi-Fi network',
+                    'Forget Others': 'Delete all saved Wi-Fi networks except the current connection',
+                    'Forget All & Reboot': 'Delete all saved Wi-Fi networks and reboot into setup mode',
+                    'Forget & Reboot': 'Delete saved Wi-Fi networks and reboot into setup mode',
+                    'Restart Service': 'Restart the fabCNC application service',
+                    'Reboot System': 'Reboot the fabCNC computer',
+                    'Change UI Password': 'Open the form for changing the fabCNC UI password',
+                    'Read Current': 'Read homing sensitivity values from the controller',
+                    'Send Logs to Dev': 'Package and securely send diagnostic logs to the developer',
+                    'Download Logs': 'Download a diagnostic log bundle to this computer',
+                    'Retry Connection': 'Try connecting to the machine controller again',
+                    'Force Recovery': 'Open guarded recovery for an uncertain controller state',
+                    Acknowledge: 'Dismiss this update notice without installing now',
+                    'Update Now': 'Install the available fabCNC software update now',
+                    'Software Up To Date': 'The installed fabCNC software is current',
+                    Unlock: 'Sign in to unlock the fabCNC controls',
+                    'Forgot password?': 'Open password recovery using the machine recovery code',
+                    Discard: 'Discard the interrupted job recovery record',
+                    'Reset Zoom': 'Fit the complete work area in the canvas'
+                };
+                let text = el.dataset.tooltip || el.getAttribute('aria-label')
+                    || el.getAttribute('title') || '';
+                if (!text && el.classList.contains('jog-segment')) {
+                    const parts = (el.id || '').split('-');
+                    const axis = (parts[0] || '').toUpperCase();
+                    const direction = parts[1] === 'plus' ? '+' : '−';
+                    text = `Jog ${axis} axis ${direction}${parts[2] || ''} mm`;
+                }
+                if (!text && el.classList.contains('q-field')) {
+                    text = el.querySelector('.q-field__label')?.textContent
+                        || el.querySelector('input, textarea')?.placeholder || '';
+                    const fieldDescriptions = {
+                        'Available networks': 'Select an available Wi-Fi network',
+                        'Enter G-code command': 'Enter one G-code command to send directly to the controller',
+                        'Password': 'Enter the password for the selected Wi-Fi network',
+                        'Current password': 'Enter the current fabCNC UI password',
+                        'New password': 'Enter a new fabCNC UI password',
+                        'Confirm password': 'Enter the new password again to confirm it',
+                        'X Stall': 'Set the X-axis sensorless homing sensitivity',
+                        'Y Stall': 'Set the Y-axis sensorless homing sensitivity',
+                        'Type a command…': 'Enter a shell command to run on the fabCNC computer'
+                    };
+                    text = fieldDescriptions[String(text).trim()] || text;
+                }
+                if (!text && (el.matches('input, textarea, select'))) {
+                    text = el.placeholder || el.closest('.q-field')?.querySelector('.q-field__label')?.textContent || '';
+                }
+                const visibleText = String(el.innerText || '').replace(/\\s+/g, ' ').trim();
+                if (!text && /^[+-]\\d+(?:\\.\\d+)?$/.test(visibleText)) {
+                    const rowText = String(el.parentElement?.innerText || '');
+                    const axis = rowText.match(/(?:^|\\s)([ZA])(?:\\s|$)/)?.[1];
+                    if (axis === 'Z') text = `Jog the Z axis ${visibleText} millimeters`;
+                    if (axis === 'A') text = `Rotate the A axis ${visibleText} degrees`;
+                }
+                if (!text && /^[XYZA]$/.test(visibleText)
+                        && String(el.closest('.q-column')?.innerText || '').includes('Homing')) {
+                    text = `Home the ${visibleText} axis`;
+                }
+                if (!text && visibleText && visibleText.length <= 80) {
+                    text = actionNames[visibleText] || visibleText;
+                }
+                if (!text) {
+                    const icon = el.querySelector?.('.q-icon')?.textContent?.trim();
+                    text = iconNames[icon] || (icon ? icon.replaceAll('_', ' ') : 'Control');
+                }
+                text = String(text).replace(/\\s+/g, ' ').trim();
+                return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Control';
             }
+
             window.addEventListener('load', () => {
-                installMissingControlTooltips();
-                const observer = new MutationObserver(records => records.forEach(record =>
-                    record.addedNodes.forEach(node => {
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            installMissingControlTooltips(node.matches?.('button, [role="tab"], input, textarea, select, [role="checkbox"], .q-field, .q-uploader, .jog-segment') ? node.parentElement : node);
-                        }
-                    })
-                ));
-                observer.observe(document.body, {childList: true, subtree: true});
+                const tooltip = document.createElement('div');
+                tooltip.className = 'fallback-control-tooltip';
+                tooltip.setAttribute('role', 'tooltip');
+                document.body.appendChild(tooltip);
+                let activeControl = null;
+                let showTimer = null;
+
+                function hideFallbackTooltip() {
+                    clearTimeout(showTimer);
+                    activeControl = null;
+                    tooltip.classList.remove('visible');
+                }
+
+                function showFallbackTooltip(control) {
+                    if (!control || control.querySelector?.('.q-tooltip')) return;
+                    activeControl = control;
+                    clearTimeout(showTimer);
+                    showTimer = setTimeout(() => {
+                        if (activeControl !== control) return;
+                        tooltip.textContent = fallbackControlTooltipText(control);
+                        const rect = control.getBoundingClientRect();
+                        tooltip.style.left = `${Math.max(8, Math.min(
+                            window.innerWidth - tooltip.offsetWidth - 8,
+                            rect.left + rect.width / 2 - tooltip.offsetWidth / 2
+                        ))}px`;
+                        tooltip.style.top = `${Math.min(window.innerHeight - 36, rect.bottom + 7)}px`;
+                        tooltip.classList.add('visible');
+                    }, 450);
+                }
+
+                document.addEventListener('pointerover', event => {
+                    const control = tooltipControlFrom(event.target);
+                    if (control && !control.contains(event.relatedTarget)) showFallbackTooltip(control);
+                });
+                document.addEventListener('pointerout', event => {
+                    const control = tooltipControlFrom(event.target);
+                    if (control && !control.contains(event.relatedTarget)) hideFallbackTooltip();
+                });
+                document.addEventListener('focusin', event => {
+                    const control = tooltipControlFrom(event.target);
+                    if (control) showFallbackTooltip(control);
+                });
+                document.addEventListener('focusout', hideFallbackTooltip);
             });
 
             // Reset scroll position when window is resized to normal size
@@ -3361,40 +3511,40 @@ def main_page():
                                     ui.run_javascript(js)
 
                                 # Transform tools
-                                ui.button('⬌', on_click=lambda: _run_js_logged('mirror_x', 'window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror X')
-                                ui.button('⬍', on_click=lambda: _run_js_logged('mirror_y', 'window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror Y')
+                                ui.button('⬌', on_click=lambda: _run_js_logged('mirror_x', 'window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes left-to-right across the X axis')
+                                ui.button('⬍', on_click=lambda: _run_js_logged('mirror_y', 'window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes top-to-bottom across the Y axis')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
+                                rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the rotation angle in degrees')
                                 ui.label('°').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('↻', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})', degrees=rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CW')
-                                ui.button('↺', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})', degrees=-rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate CCW')
+                                ui.button('↻', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})', degrees=rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes clockwise by the entered angle')
+                                ui.button('↺', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})', degrees=-rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes counterclockwise by the entered angle')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input')
+                                scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the selected shapes’ size as a percentage of their current size')
                                 ui.label('%').classes('text-body2').style('margin-right: 2px;')
                                 ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 # Pattern tools
-                                grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of columns in the shape grid')
                                 ui.label('×').classes('text-body2')
-                                grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input')
+                                grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of rows in the shape grid')
                                 ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;')
+                                keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;').tooltip('Keep each shape at its current rotation while nesting')
                                 nest_offset = ui.number(
                                     value=15.0,
                                     format='%.1f',
                                     min=1.0,
                                     max=100.0,
                                     step=0.1,
-                                ).props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Gap (mm)')
+                                ).props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the minimum spacing between nested shape outlines, in millimeters')
                                 
                                 async def do_nest():
                                     offset_val = float(nest_offset.value)
@@ -3750,9 +3900,9 @@ def main_page():
                     # Common commands
                     ui.label('Quick Commands:').classes('text-body2 mb-1').style('color: #888;')
                     with ui.row().classes('gap-1 mb-3'):
-                        ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Firmware')
-                        ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Position')
-                        ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Settings')
+                        ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M115 to request firmware identity and capabilities')
+                        ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M114 to report the controller’s current axis positions')
+                        ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M503 to report the controller’s active configuration')
                     
                     # Response log
                     ui.label('Response Log:').classes('text-body2 mb-1').style('color: #888;')
