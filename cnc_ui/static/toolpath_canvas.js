@@ -23,6 +23,14 @@ let notchMarkObjects = {};   // shapeName -> [fabric Line objects for V marks]
 // dropped WebSockets. Mirrored on every shapeNotches mutation.
 const _NOTCH_LS_KEY = 'fabcncNotchesSnapshot';
 
+// Measure tool state. Measurements are ephemeral UI overlays and never become
+// part of the saved canvas or generated toolpath.
+let measureMode = false;
+let measureNodeObjects = [];
+let measurementObjects = [];
+let measureStart = null;
+let lastMeasurement = null;
+
 // Unit display mode
 let currentUnit = 'mm';  // 'mm' or 'in'
 
@@ -150,6 +158,10 @@ function redrawAllShapes() {
     
     // Redraw notch marks at new scale
     redrawAllNotchMarks();
+    if (measureMode) {
+        showMeasureNodes();
+        if (lastMeasurement) drawMeasurement(lastMeasurement.start, lastMeasurement.end);
+    }
 }
 
 function initCanvas(elementId) {
@@ -702,6 +714,7 @@ function clearShapes() {
     
     // Exit notch mode and clear all notch data
     if (notchMode) disableNotchMode();
+    if (measureMode) disableMeasureMode();
     shapeNotches = {};
     notchNodeObjects.forEach(obj => canvas.remove(obj));
     notchNodeObjects = [];
@@ -829,6 +842,7 @@ function addShape(name, points, colorIndexOrColor, segmentBreaks, segmentTypes) 
 
     // If notch mode is active, show node circles for the newly added shape
     if (notchMode) showNotchNodes();
+    if (measureMode) showMeasureNodes();
 
     console.log('addShape stored:', name,
         'initialLeft:', polyline.left.toFixed(1),
@@ -1870,8 +1884,12 @@ function deleteShape() {
     // Exit notch mode if no shapes remain
     if (Object.keys(shapes).length === 0) {
         disableNotchMode();
+        if (measureMode) disableMeasureMode();
     } else if (notchMode) {
         showNotchNodes();
+    } else if (measureMode) {
+        clearMeasurement();
+        showMeasureNodes();
     }
 
     canvas.renderAll();
@@ -3056,6 +3074,7 @@ function redrawShapeFromData(shapeName) {
     syncNotchesForShape(shapeName);
     // If in notch mode, refresh the node circles
     if (notchMode) showNotchNodes();
+    if (measureMode) showMeasureNodes();
     
     // Keep ruler handles on top of everything
     ensureRulerHandlesFront();
@@ -3729,6 +3748,7 @@ function disableNotchMode() {
 }
 
 function setNotchMode(active) {
+    if (active && measureMode) disableMeasureMode();
     notchMode = active;
     if (active) {
         Object.values(shapes).forEach(shape => { shape.selectable = false; });
@@ -3736,6 +3756,127 @@ function setNotchMode(active) {
         showNotchNodes();
     } else {
         hideNotchNodes();
+        Object.values(shapes).forEach(shape => { shape.selectable = true; });
+    }
+    canvas.renderAll();
+}
+
+// ============ MEASURE TOOL ============
+
+function clearMeasurement() {
+    measurementObjects.forEach(obj => canvas.remove(obj));
+    measurementObjects = [];
+    measureStart = null;
+    lastMeasurement = null;
+    measureNodeObjects.forEach(node => {
+        node.set({ fill: 'rgba(255,255,255,0.16)', stroke: '#bdbdbd' });
+    });
+    if (canvas) canvas.requestRenderAll();
+}
+
+function hideMeasureNodes() {
+    measureNodeObjects.forEach(obj => canvas.remove(obj));
+    measureNodeObjects = [];
+    if (canvas) canvas.requestRenderAll();
+}
+
+function _measureNodesForShape(shapeName) {
+    const data = shapeData[shapeName];
+    if (!data || !data.originalMmPoints) return [];
+    const nodes = [];
+    data.originalMmPoints.forEach((point, pointIndex) => {
+        const previous = nodes[nodes.length - 1];
+        if (!previous || Math.hypot(point[0] - previous.x, point[1] - previous.y) > 1e-6) {
+            nodes.push({ x: point[0], y: point[1], shapeName, pointIndex });
+        }
+    });
+    return nodes;
+}
+
+function showMeasureNodes() {
+    hideMeasureNodes();
+    Object.keys(shapeData).forEach(shapeName => {
+        _measureNodesForShape(shapeName).forEach(node => {
+            const circle = new fabric.Circle({
+                left: toCanvasX(node.x), top: toCanvasY(node.y),
+                originX: 'center', originY: 'center', radius: 6,
+                fill: 'rgba(255,255,255,0.16)', stroke: '#bdbdbd', strokeWidth: 1.5,
+                selectable: false, evented: true, hoverCursor: 'crosshair',
+                _measureNode: true, _measurePoint: node
+            });
+            circle.on('mousedown', function() { selectMeasureNode(circle); });
+            measureNodeObjects.push(circle);
+            canvas.add(circle);
+            canvas.bringToFront(circle);
+        });
+    });
+    canvas.requestRenderAll();
+}
+
+function _formatMeasurement(mm) {
+    return currentUnit === 'in' ? `${(mm / 25.4).toFixed(3)} in` : `${mm.toFixed(2)} mm`;
+}
+
+function drawMeasurement(start, end) {
+    measurementObjects.forEach(obj => canvas.remove(obj));
+    measurementObjects = [];
+    lastMeasurement = { start: { ...start }, end: { ...end } };
+    const x1 = toCanvasX(start.x), y1 = toCanvasY(start.y);
+    const x2 = toCanvasX(end.x), y2 = toCanvasY(end.y);
+    const dx = end.x - start.x, dy = end.y - start.y;
+    const line = new fabric.Line([x1, y1, x2, y2], {
+        stroke: '#FFD54F', strokeWidth: 2, selectable: false, evented: false,
+        strokeDashArray: [7, 5], _measurement: true
+    });
+    const label = new fabric.Text(
+        `${_formatMeasurement(Math.hypot(dx, dy))}  (ΔX ${_formatMeasurement(Math.abs(dx))}, ΔY ${_formatMeasurement(Math.abs(dy))})`,
+        {
+            left: (x1 + x2) / 2, top: (y1 + y2) / 2 - 12,
+            originX: 'center', originY: 'bottom', fontSize: 14,
+            fontFamily: 'monospace', fill: '#1e1e1e', backgroundColor: '#FFD54F',
+            padding: 4, selectable: false, evented: false, _measurement: true
+        }
+    );
+    measurementObjects.push(line, label);
+    canvas.add(line, label);
+    canvas.bringToFront(line);
+    canvas.bringToFront(label);
+    measureNodeObjects.forEach(node => canvas.bringToFront(node));
+    canvas.requestRenderAll();
+}
+
+function selectMeasureNode(circle) {
+    const point = circle._measurePoint;
+    if (!measureStart) {
+        clearMeasurement();
+        measureStart = point;
+        circle.set({ fill: '#FFD54F', stroke: '#FFD54F' });
+        canvas.requestRenderAll();
+        return;
+    }
+    drawMeasurement(measureStart, point);
+    measureStart = null;
+}
+
+function disableMeasureMode() {
+    measureMode = false;
+    hideMeasureNodes();
+    clearMeasurement();
+    Object.values(shapes).forEach(shape => { shape.selectable = true; });
+    if (window.emitEvent) window.emitEvent('measure_mode_changed', { active: false });
+    canvas.renderAll();
+}
+
+function setMeasureMode(active) {
+    if (active && notchMode) disableNotchMode();
+    measureMode = active;
+    clearMeasurement();
+    if (active) {
+        Object.values(shapes).forEach(shape => { shape.selectable = false; });
+        canvas.discardActiveObject();
+        showMeasureNodes();
+    } else {
+        hideMeasureNodes();
         Object.values(shapes).forEach(shape => { shape.selectable = true; });
     }
     canvas.renderAll();
@@ -4034,6 +4175,9 @@ window.toolpathCanvas = {
     getNotches: getNotches,
     restoreNotches: restoreNotches,
     restoreNotchesFromLocalStorage: restoreNotchesFromLocalStorage,
+    // Measure tool
+    setMeasureMode: setMeasureMode,
+    clearMeasurement: clearMeasurement,
     // Rulers
     getRulerBounds: getRulerBounds,
     // Units
@@ -4057,6 +4201,7 @@ function setUnits(unit) {
     // Send grid lines to back so shapes remain on top
     gridLines.forEach(line => canvas.sendToBack(line));
     if (workAreaRect) canvas.sendToBack(workAreaRect);
+    if (lastMeasurement) drawMeasurement(lastMeasurement.start, lastMeasurement.end);
     canvas.renderAll();
 }
 
@@ -4155,11 +4300,12 @@ function showToolpath(toolpathData) {
     // Clear any existing toolpath
     clearToolpathObjects();
 
-    // Exit notch mode when toolpath is generated
+    // Exit editing/inspection modes when toolpath is generated
     if (notchMode) {
         disableNotchMode();
         // Keep shapes unselectable — lockCanvas() will enforce this
     }
+    if (measureMode) disableMeasureMode();
 
     // Lock the canvas (hides Polyline shapes)
     lockCanvas();

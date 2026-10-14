@@ -3203,13 +3203,15 @@ def main_page():
                                 
                                 ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
                             
-                            # Second toolbar row: Notch editing tool
+                            # Second toolbar row: inspection/editing tools
                             notch_mode_state = {'active': False, 'btn': None}
+                            measure_mode_state = {'active': False, 'btn': None}
 
                             def toggle_notch_mode():
                                 notch_mode_state['active'] = not notch_mode_state['active']
                                 btn = notch_mode_state['btn']
                                 if notch_mode_state['active']:
+                                    deactivate_measure_btn()
                                     btn.props('dense unelevated')
                                     btn.style('height: 36px; font-size: 13px; background-color: #FF6B35 !important; color: #1a1a1a !important; font-weight: 700;')
                                     btn.set_text('V Notch  (ON)')
@@ -3228,9 +3230,31 @@ def main_page():
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;')
                                     btn.set_text('V Notch')
 
+                            def deactivate_measure_btn():
+                                measure_mode_state['active'] = False
+                                btn = measure_mode_state['btn']
+                                if btn:
+                                    btn.props('dense flat')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;')
+                                    btn.set_text('Measure')
+
+                            def toggle_measure_mode():
+                                measure_mode_state['active'] = not measure_mode_state['active']
+                                btn = measure_mode_state['btn']
+                                if measure_mode_state['active']:
+                                    deactivate_notch_btn()
+                                    btn.props('dense unelevated')
+                                    btn.style('height: 36px; font-size: 13px; background-color: #FFD54F !important; color: #1a1a1a !important; font-weight: 700;')
+                                    btn.set_text('Measure  (ON)')
+                                else:
+                                    deactivate_measure_btn()
+                                ui.run_javascript(f"window.toolpathCanvas.setMeasureMode({str(measure_mode_state['active']).lower()})")
+
                             with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
                                 notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
+                                measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between any two shape nodes — click a start node, then an end node')
+                                measure_mode_state['btn'] = measure_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
                                 ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint')
@@ -3428,6 +3452,15 @@ def main_page():
                                           active=bool(data.get('active', False)) if isinstance(data, dict) else False)
 
                             ui.on('notch_mode_changed', on_notch_mode_changed)
+
+                            def on_measure_mode_changed(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if isinstance(data, dict) and not data.get('active', True):
+                                    deactivate_measure_btn()
+                                log_event('canvas', 'measure_mode_changed',
+                                          active=bool(data.get('active', False)) if isinstance(data, dict) else False)
+
+                            ui.on('measure_mode_changed', on_measure_mode_changed)
 
                             # Persist notch toggles server-side so they survive a
                             # browser refresh / Socket.IO reconnect. The JS emits
