@@ -27,6 +27,7 @@ from auth import set_password, verify_password, verify_recovery_code
 setup_logging()
 
 from nicegui import ui, app
+from nicegui.element import Element
 from cnc.state import machine_state
 from cnc.controller import cnc_controller
 from cnc.controller import parse_homing_sensitivity_response
@@ -64,8 +65,15 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Require a deliberate hover before showing any explicit NiceGUI tooltip.
-ui.tooltip.default_props('delay=1000')
+# Keep tooltip content on each control, but render it through the single
+# delegated tooltip below. Mixing Quasar and delegated tooltips causes races
+# and duplicate overlays when moving between tightly packed controls.
+def _attach_control_tooltip(element: Element, text: str) -> Element:
+    element.props['data-tooltip'] = text
+    return element
+
+
+Element.tooltip = _attach_control_tooltip
 
 _APP_PASSWORD = os.environ.get('FABCNC_APP_PASSWORD', '2026')
 _STORAGE_SECRET = os.environ.get('FABCNC_STORAGE_SECRET') or secrets.token_urlsafe(32)
@@ -830,7 +838,7 @@ def create_header():
     
     with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap; padding-top: 8px;'):
         # Left side: App name with icon + Tabs
-        with ui.row().classes('items-center gap-4').style('flex-shrink: 0;'):
+        with ui.row().classes('items-center gap-2').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
                 ui.image('/static/favicon.svg').style('width: 24px; height: 24px;')
                 ui.label('fabCNC').classes('text-h6 font-bold')
@@ -2786,7 +2794,7 @@ def main_page():
                 padding: 0 10px !important;
                 border: 1px solid transparent;
                 border-radius: var(--radius-md) !important;
-                margin: 0 2px !important;
+                margin: 0 !important;
                 color: var(--md-text-secondary) !important;
                 opacity: 0.82;
                 transition: background 0.15s ease, border-color 0.15s ease,
@@ -2840,7 +2848,7 @@ def main_page():
             }
             
             .header-tabs .q-tabs__content {
-                gap: 4px;
+                gap: 0;
                 align-items: center;
             }
             
@@ -3094,26 +3102,12 @@ def main_page():
                     tooltip.classList.remove('visible');
                 }
 
-                function hasVisibleExplicitTooltip() {
-                    return [...document.querySelectorAll('.q-tooltip')].some(candidate => {
-                        const style = window.getComputedStyle(candidate);
-                        const rect = candidate.getBoundingClientRect();
-                        return candidate !== tooltip
-                            && style.display !== 'none'
-                            && style.visibility !== 'hidden'
-                            && Number(style.opacity || 1) > 0
-                            && rect.width > 0
-                            && rect.height > 0;
-                    });
-                }
-
                 function showFallbackTooltip(control) {
-                    if (!control || control.querySelector?.('.q-tooltip')
-                            || hasVisibleExplicitTooltip()) return;
+                    if (!control) return;
                     activeControl = control;
                     clearTimeout(showTimer);
                     showTimer = setTimeout(() => {
-                        if (activeControl !== control || hasVisibleExplicitTooltip()) return;
+                        if (activeControl !== control) return;
                         tooltip.textContent = fallbackControlTooltipText(control);
                         const rect = control.getBoundingClientRect();
                         tooltip.style.left = `${Math.max(8, Math.min(
