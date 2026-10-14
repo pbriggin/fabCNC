@@ -2951,6 +2951,10 @@ def main_page():
 
             .header-tabs .q-tab--active {
                 z-index: 1;
+                /* Bleed one pixel into the workspace to prevent a rasterized seam. */
+                height: 49px !important;
+                min-height: 49px !important;
+                max-height: 49px !important;
                 background: var(--workspace-surface) !important;
                 border-color: #414141;
                 border-bottom-color: var(--workspace-surface) !important;
