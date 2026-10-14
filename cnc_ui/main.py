@@ -163,6 +163,13 @@ class _ClientDict(MutableMapping):
 
 # Repository root (one level above cnc_ui/)
 REPO_DIR = Path(__file__).parent.parent
+_TOOLPATH_CANVAS_PATH = Path(__file__).parent / 'static' / 'toolpath_canvas.js'
+# Cache-bust the browser asset whenever its contents change. APP_VERSION is not
+# bumped for every frontend-only commit, which can otherwise leave a new Python
+# toolbar calling functions from an older cached canvas script.
+TOOLPATH_CANVAS_ASSET_VERSION = hashlib.sha256(
+    _TOOLPATH_CANVAS_PATH.read_bytes()
+).hexdigest()[:12]
 
 # Update check state
 update_state = {'available': False, 'acknowledged': False}
@@ -3285,7 +3292,9 @@ def main_page():
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
-                            ui.add_head_html(f'<script src="/static/toolpath_canvas.js?v={APP_VERSION}"></script>')
+                            ui.add_head_html(
+                                f'<script src="/static/toolpath_canvas.js?v={TOOLPATH_CANVAS_ASSET_VERSION}"></script>'
+                            )
                             
                             # Create canvas container - flex fills space
                             toolpath_canvas = ui.html('''
