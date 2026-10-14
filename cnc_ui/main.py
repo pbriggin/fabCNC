@@ -832,22 +832,15 @@ def _get_current_wifi_status():
 
 
 def create_header():
-    """Create the application header with tabs, position, status, and controls."""
+    """Create the application header with position, status, and controls."""
     pos_labels = {}
-    tabs = None
     
     with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap; padding-top: 8px;'):
-        # Left side: App name with icon + Tabs
+        # Left side: App name
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
                 ui.image('/static/favicon.svg').style('width: 24px; height: 24px;')
                 ui.label('fabCNC').classes('text-h6 font-bold')
-            
-            # Tabs in header
-            with ui.tabs().props('dense inline-label').classes('header-tabs no-tooltips').style('background: transparent;') as tabs:
-                job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath')
-                gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
-                wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
         
         # Center: Status pill + time estimate
         with ui.row().classes('items-center justify-center').style('flex: 1; min-width: 0;'):
@@ -879,7 +872,7 @@ def create_header():
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
     
-    return (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
+    return (pos_labels, status_label, update_btn,
             status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget)
 
 
@@ -2690,7 +2683,7 @@ def main_page():
             
             /* Single source of truth for tab content spacing */
             .tab-content {
-                padding: 8px 8px 35px 8px !important;
+                padding: 0 0 35px 0 !important;
                 height: 100% !important;
                 box-sizing: border-box !important;
             }
@@ -2854,15 +2847,48 @@ def main_page():
                 background: var(--md-border) !important;
             }
             
-            /* Browser-style tabs in the application header */
+            /* Browser-style tabs joined to the shared workspace surface */
             .header-tabs {
                 background: transparent !important;
                 padding: 0 !important;
                 border-radius: 0 !important;
+                border: 0 !important;
+                width: 100% !important;
+                flex: 0 0 42px;
                 height: 42px !important;
                 min-height: 42px !important;
-                align-self: stretch;
                 overflow: visible !important;
+            }
+
+            .workspace-frame {
+                box-sizing: border-box !important;
+                border: 0 solid var(--md-border);
+                border-left-width: 1px;
+                border-right-width: 1px;
+                border-bottom-width: 1px;
+                border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+                background: var(--md-bg-card);
+            }
+
+            .workspace-tab-panels {
+                display: flex !important;
+                flex: 1 1 auto !important;
+                min-height: 0 !important;
+                height: auto !important;
+                overflow: hidden !important;
+            }
+
+            .workspace-tab-panels > .q-tab-panel {
+                flex: 1 1 auto !important;
+                min-height: 0 !important;
+                height: 100% !important;
+                overflow: hidden !important;
+            }
+
+            .workspace-panel-card {
+                border: 0 !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
             }
             
             .header-tabs .q-tab {
@@ -2892,11 +2918,11 @@ def main_page():
 
             .header-tabs .q-tab--active {
                 z-index: 1;
-                background: #363636 !important;
+                background: var(--md-bg-card) !important;
                 border-color: #4a4a4a;
                 color: #fff !important;
                 opacity: 1;
-                box-shadow: 0 1px #363636;
+                box-shadow: 0 1px var(--md-bg-card);
             }
 
             .header-tabs .q-tab--active::before {
@@ -2957,6 +2983,9 @@ def main_page():
                 align-items: stretch;
                 border-bottom: 1px solid #414141;
             }
+
+            .header-tabs .q-tab:first-child { border-left: 0; }
+            .header-tabs .q-tab:last-child { border-right: 0; }
             
             /* Labels styling */
             .text-h5, .text-h6 {
@@ -3274,8 +3303,8 @@ def main_page():
         </script>
     ''')
     
-    (pos_labels, status_label, tabs, job_tab, gcode_tab, wifi_tab, update_btn,
-     status_pill, status_icon, wifi_status_icon, wifi_status_text, wifi_widget) = create_header()
+    (pos_labels, status_label, update_btn, status_pill, status_icon,
+     wifi_status_icon, wifi_status_text, wifi_widget) = create_header()
     
     # Update button click handler
     async def do_software_update():
@@ -3607,13 +3636,20 @@ def main_page():
         };
     ''')
     
-    # Match the fixed 56px header so the content card keeps equal outer margins.
-    with ui.column().classes('w-full mx-auto').style('height: calc(100vh - 56px); min-height: 600px; overflow: hidden;'):
-        with ui.tab_panels(tabs, value=job_tab).classes('w-full').style('height: 100%;'):
+    # Keep the tab strip on the workspace frame so the selected tab joins its content.
+    with ui.column().classes('w-full mx-auto workspace-frame').style(
+        'height: calc(100vh - 56px); min-height: 600px; overflow: hidden; gap: 0;'
+    ):
+        with ui.tabs().props('dense inline-label').classes('header-tabs no-tooltips') as tabs:
+            job_tab = ui.tab('Toolpath', icon='route').classes('nav-tab nav-toolpath')
+            gcode_tab = ui.tab('GCODE', icon='terminal').classes('nav-tab nav-gcode')
+            wifi_tab = ui.tab('System', icon='settings').classes('nav-tab nav-system')
+
+        with ui.tab_panels(tabs, value=job_tab).classes('w-full workspace-tab-panels'):
             # Job tab - File loading, job execution, and toolpath visualization
             with ui.tab_panel(job_tab).classes('tab-content'):
                 # Card: full height
-                with ui.card().classes('w-full h-full').style('padding: 10px; box-sizing: border-box;'):
+                with ui.card().classes('workspace-panel-card w-full h-full').style('padding: 10px; box-sizing: border-box;'):
                     with ui.row().classes('gap-2 w-full').style('height: 100%; flex-wrap: nowrap;'):
                         # Left column: Job file and controls (fixed width, scrollable)
                         with ui.column().classes('gap-2').style('flex: 0 0 200px; max-height: 100%; overflow-y: auto;'):
@@ -3994,7 +4030,7 @@ def main_page():
             
             # GCODE tab - Manual G-code command interface
             with ui.tab_panel(gcode_tab).classes('tab-content remote-control-lock no-tooltips'):
-                with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
+                with ui.card().classes('workspace-panel-card w-full h-full').style('padding: 12px; box-sizing: border-box;'):
                     ui.label('Manual G-code Commands').classes('text-body1 font-bold mb-2').style('color: #aaa;')
                     
                     # Command input
@@ -4033,7 +4069,7 @@ def main_page():
             
             # System tab - WiFi, connection info, and system controls
             with ui.tab_panel(wifi_tab).classes('tab-content no-tooltips'):
-                with ui.card().classes('w-full h-full').style('padding: 12px; box-sizing: border-box;'):
+                with ui.card().classes('workspace-panel-card w-full h-full').style('padding: 12px; box-sizing: border-box;'):
                     with ui.row().classes('w-full gap-6'):
                         # Left column: Connection info
                         with ui.column().classes('gap-3').style('flex: 1;'):
