@@ -64,6 +64,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Require a deliberate hover before showing any explicit NiceGUI tooltip.
+ui.tooltip.default_props('delay=1000')
+
 _APP_PASSWORD = os.environ.get('FABCNC_APP_PASSWORD', '2026')
 _STORAGE_SECRET = os.environ.get('FABCNC_STORAGE_SECRET') or secrets.token_urlsafe(32)
 _BOOT_TOKEN = secrets.token_hex(16)
@@ -1185,16 +1188,14 @@ def create_jog_controls():
                     ui.button('-90', on_click=lambda: jog_axis('A', -90)).props('flat dense').style('background: #2a2a2a; color: #ff9800; font-size: 14px; width: 44px; height: 44px;') \
                         .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
                 
-                # XY Zero button - spans full width (5 * 44px + 4 gaps * 4px = 236px)
-                ui.button('XY Zero', on_click=xy_zero).props('flat dense').style('background: #2a2a2a; color: #4a9eff; font-size: 14px; width: 236px; height: 36px; margin-top: 4px;') \
-                    .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
-
                 # Tape Fabric button — homes then moves to center of work area
                 ui.button('Tape Fabric', icon='straighten', on_click=tape_fabric).props('flat dense').style('background: #2a2a2a; color: #ce93d8; font-size: 13px; width: 236px; height: 36px; margin-top: 4px;') \
+                    .tooltip('Home the machine, then move to the fabric-taping position') \
                     .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
 
                 # Change Cutting Wheel button — homes then lowers Z to wheel-change position
                 ui.button('Change Cutting Wheel', icon='build', on_click=change_cutting_wheel).props('flat dense').style('background: #2a2a2a; color: #FFB300; font-size: 13px; width: 236px; height: 36px; margin-top: 4px;') \
+                    .tooltip('Home the machine, then lower Z to the cutting-wheel change position') \
                     .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle())
     
 
@@ -1351,22 +1352,6 @@ def create_job_controls():
 
 
 # Event handlers
-
-async def xy_zero():
-    """Handle XY Zero button click."""
-    if not _require_controller_connected():
-        return
-    if not machine_state.is_idle():
-        ui.notify('Cannot change XY zero while the machine is active.', type='warning')
-        return
-    log_event('control', 'xy_zero')
-    response = await asyncio.to_thread(
-        cnc_controller.send_manual_command, "G92 X0 Y0", timeout=10.0
-    )
-    if not any(line.strip().lower().startswith('ok') for line in response.splitlines()):
-        logger.warning('XY zero was not accepted: %s', response)
-        ui.notify('The controller did not accept XY Zero. Verify the controller, then try again.', type='negative', timeout=8000)
-
 
 async def jog_axis(axis: str, distance: float):
     """Handle jog button click."""
@@ -2796,9 +2781,9 @@ def main_page():
             }
             
             .header-tabs .q-tab {
-                min-height: 40px !important;
-                height: 40px !important;
-                padding: 0 14px !important;
+                min-height: 36px !important;
+                height: 36px !important;
+                padding: 0 10px !important;
                 border: 1px solid transparent;
                 border-radius: var(--radius-md) !important;
                 margin: 0 2px !important;
@@ -2856,6 +2841,7 @@ def main_page():
             
             .header-tabs .q-tabs__content {
                 gap: 4px;
+                align-items: center;
             }
             
             /* Labels styling */
@@ -3022,7 +3008,6 @@ def main_page():
                     'Outline Job': 'Move around the job boundary without lowering the cutting wheel',
                     Scale: 'Resize the selected shapes using the entered percentage',
                     Grid: 'Duplicate the selected shapes into the specified rows and columns',
-                    'XY Zero': 'Set the current X and Y positions as zero without moving the machine',
                     'Tape Fabric': 'Home the machine, then move to the fabric-taping position',
                     'Change Cutting Wheel': 'Home the machine, then lower Z to the cutting-wheel change position',
                     'Home All': 'Home every machine axis',
@@ -3137,7 +3122,7 @@ def main_page():
                         ))}px`;
                         tooltip.style.top = `${Math.min(window.innerHeight - 36, rect.bottom + 7)}px`;
                         tooltip.classList.add('visible');
-                    }, 650);
+                    }, 1000);
                 }
 
                 document.addEventListener('pointerover', event => {
@@ -3537,7 +3522,7 @@ def main_page():
                                 
                                 scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the selected shapes’ size as a percentage of their current size')
                                 ui.label('%').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Resize the selected shapes using the entered percentage')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
@@ -3545,7 +3530,7 @@ def main_page():
                                 grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of columns in the shape grid')
                                 ui.label('×').classes('text-body2')
                                 grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of rows in the shape grid')
-                                ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Duplicate the selected shapes into the specified rows and columns')
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
@@ -3591,7 +3576,7 @@ def main_page():
                                                   height=result.get('height'),
                                                   error=result.get('error'))
                                 
-                                ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;')
+                                ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Arrange shapes automatically using the entered gap and orientation settings')
                             
                             # Second toolbar row: inspection/editing tools
                             notch_mode_state = {'active': False, 'btn': None}
