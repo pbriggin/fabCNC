@@ -1402,6 +1402,28 @@ class CNCController:
         with self.operation_lock:
             self._start_job_locked(gcode_lines, piece_count, source_filename)
 
+    @staticmethod
+    def _job_starts_with_full_home(gcode_lines: list[str]) -> bool:
+        """Return whether XYZ and A are homed before the job's first motion."""
+        homed_axes: set[str] = set()
+        for raw_line in gcode_lines:
+            command = raw_line.split(";", 1)[0].strip().upper()
+            if not command:
+                continue
+            opcode = command.split(maxsplit=1)[0]
+            if opcode in {"G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03", "G5", "G05"}:
+                break
+            if opcode == "G28":
+                parameters = command[len(opcode):].strip()
+                if not parameters:
+                    homed_axes.update({"X", "Y", "Z", "A"})
+                else:
+                    homed_axes.update(
+                        axis for axis in ("X", "Y", "Z", "A")
+                        if re.search(rf"(?:^|\s){axis}(?:\s|$|[-+0-9.])", parameters)
+                    )
+        return {"X", "Y", "Z", "A"}.issubset(homed_axes)
+
     def _start_job_locked(
         self,
         gcode_lines: list[str],
@@ -1416,13 +1438,18 @@ class CNCController:
             piece_count: Number of pieces this job is expected to cut.
         """
         state = machine_state.snapshot()
+        homes_before_motion = self._job_starts_with_full_home(gcode_lines)
         if (not machine_state.is_idle() or not gcode_lines or not self.connected
-                or self.serial_uncertain or self.rehome_required):
+                or self.serial_uncertain
+                or ((not self.homed or self.rehome_required) and not homes_before_motion)):
             log_controller_event(
                 "job_start_rejected",
                 idle=machine_state.is_idle(),
                 has_gcode=bool(gcode_lines),
                 connected=self.connected,
+                homed=self.homed,
+                rehome_required=self.rehome_required,
+                homes_before_motion=homes_before_motion,
             )
             return
         

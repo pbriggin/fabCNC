@@ -173,6 +173,31 @@ class ControllerSafetyTests(unittest.TestCase):
 
         self.assertEqual("M400", captured[-1])
 
+    def test_unhomed_controller_accepts_job_that_fully_homes_before_motion(self):
+        controller = connected_controller()
+        controller.homed = False
+        controller.rehome_required = True
+        captured = []
+        controller._execute_sd_job = lambda lines: captured.extend(lines)
+
+        controller.start_job([
+            "G21", "G90", "M17", "G28 X Y Z", "G28 A", "G0 Z-15"
+        ])
+        controller.job_thread.join(timeout=1)
+
+        self.assertIn("G28 X Y Z", captured)
+        self.assertIn("G0 Z-15", captured)
+
+    def test_unhomed_controller_rejects_job_that_moves_before_full_home(self):
+        controller = connected_controller()
+        controller.homed = False
+        controller.rehome_required = True
+
+        controller.start_job(["G90", "G28 Z", "G0 X10", "G28 X Y A"])
+
+        self.assertIsNone(controller.job_thread)
+        self.assertFalse(controller.sd_uploading)
+
     def test_error_burst_trailing_ok_does_not_credit_stream_progress(self):
         controller = connected_controller()
         controller.streaming_mode = True

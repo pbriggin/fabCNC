@@ -406,7 +406,6 @@ z_cut_height = _ClientDict('z_cut_height', {'value': -35.0})
 PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5}
 SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
 cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medium'})
-home_before_toolpath = _ClientDict('home_before_toolpath', {'enabled': True})
 def apply_cut_pressure(name: str) -> None:
     """Apply a named pressure setting and record it in cut_settings."""
     z_cut_height.update({'value': PRESSURE_MAP[name]})
@@ -1246,13 +1245,6 @@ def create_job_controls():
         apply_cut_pressure(cut_settings['pressure'])
         apply_cut_speed(cut_settings['speed'])
         
-        # Home Before Toolpath toggle
-        with ui.row().classes('w-full items-center justify-between').style('padding: 4px 0;'):
-            ui.label('Home Before Toolpath').style('color: #aaa; font-size: 13px;')
-            ui.switch(value=home_before_toolpath['enabled'],
-                      on_change=lambda e: home_before_toolpath.update({'enabled': e.value})) \
-                .props('dense color=orange')
-
         # Generate Toolpath / Clear Toolpath toggle button
         toolpath_btn = ui.button('Generate Toolpath', icon='route', on_click=lambda: toggle_toolpath(toolpath_btn)) \
             .props('dense flat') \
@@ -1941,7 +1933,6 @@ async def toggle_toolpath(button):
             min_curve_feed_rate=toolpath_generator.min_curve_feed_rate,
             curve_slowdown_radius=toolpath_generator.curve_slowdown_radius,
         )
-        generator.home_all = home_before_toolpath['enabled']
         generator.stealthchop = cut_settings['speed'] in ('Slow', 'Medium')
         
         # Fetch notch data from canvas (in mm coords, geometry pre-computed)
@@ -2029,8 +2020,7 @@ async def toggle_toolpath(button):
                      gcode_lines=len(current_gcode),
                      z_cut_height=z_cut_height['value'],
                      cut_settings=cut_settings.copy(),
-                     notch_count=sum(len(v) for v in notches.values()) if notches else 0,
-                     home_before_toolpath=home_before_toolpath['enabled'])
+                     notch_count=sum(len(v) for v in notches.values()) if notches else 0)
         ui.notify(f'Toolpath generated: {total_segments} segments, {total_corners} corners', type='positive')
 
 
@@ -2112,7 +2102,7 @@ async def outline_job():
         return
 
     if not cnc_controller.homed:
-        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
+        ui.notify('Machine not homed — click Home All before outlining a job.', type='warning')
         return
 
     if not await safety_confirm():
@@ -2178,10 +2168,6 @@ async def start_job():
     job_gcode = list(generated_job.get('gcode', [])) if generated_job else []
     if not job_gcode:
         ui.notify('No toolpath generated', type='warning')
-        return
-
-    if not cnc_controller.homed:
-        ui.notify('Machine not homed — click Home All before running a job.', type='warning')
         return
 
     if not await safety_confirm():

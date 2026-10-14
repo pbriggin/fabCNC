@@ -27,6 +27,8 @@ class ToolpathRegressionTests(unittest.TestCase):
         self.assertLess(executable.index("G21"), executable.index("G90"))
         self.assertIn("G28 X Y Z", executable)
         self.assertIn("G28 A", executable)
+        self.assertLess(executable.index("M18 Y"), executable.index("G28 X Y Z"))
+        self.assertLess(executable.index("M17 Y"), executable.index("G28 X Y Z"))
         self.assertIn("M400", executable)
         self.assertLess(executable.index("M400"), executable.index("M18"))
 
