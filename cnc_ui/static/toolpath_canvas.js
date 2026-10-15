@@ -3175,46 +3175,93 @@ function undo() {
     return true;
 }
 
-// Copy selected shape to clipboard
+// Copy selected shape(s) to clipboard
 function copyShape() {
-    const shape = getSelectedShape();
-    if (!shape || !shapeData[shape.shapeName]) return false;
-    
-    const data = shapeData[shape.shapeName];
-    if (!data.originalMmPoints) return false;
-    
-    // Deep copy the points
+    const selectedShapes = getSelectedShapes();
+    if (selectedShapes.length === 0) return false;
+
+    const copiedShapes = selectedShapes.map(shape => {
+        const data = shapeData[shape.shapeName];
+        if (!data || !data.originalMmPoints) return null;
+
+        return {
+            points: data.originalMmPoints.map(p => [p[0], p[1]]),
+            segmentBreaks: (data.segmentBreaks || [0]).slice(),
+            segmentTypes: (data.segmentTypes || []).slice(),
+            stroke: shape.stroke,
+            notches: shapeNotches[shape.shapeName]
+                ? [...shapeNotches[shape.shapeName].values()].map(n => ({ ...n }))
+                : []
+        };
+    }).filter(Boolean);
+
+    if (copiedShapes.length === 0) return false;
+
     clipboard = {
-        points: data.originalMmPoints.map(p => [p[0], p[1]]),
-        segmentBreaks: (data.segmentBreaks || [0]).slice(),
-        segmentTypes: (data.segmentTypes || []).slice(),
-        stroke: shape.stroke
-        // lastPastePoints intentionally absent — first paste starts from clipboard.points
+        shapes: copiedShapes,
+        pasteCount: 0
     };
-    console.log('Copied shape to clipboard');
+    console.log('Copied', copiedShapes.length, 'shape(s) to clipboard');
     return true;
 }
 
-// Paste shape from clipboard
+// Paste copied shape(s) as a group, preserving their relative positions and notches.
 function pasteShape() {
-    if (!clipboard || !clipboard.points) return null;
-    
-    const newName = 'pasted_' + Date.now();
-    
-    // Each paste cascades 10mm off the previous paste's position so repeated
-    // pastes don't stack on top of each other.
-    const basePoints = clipboard.lastPastePoints || clipboard.points;
-    const newPoints = basePoints.map(p => [p[0] + 10, p[1] + 10]);
-    
-    // Pass the original stroke color, segment breaks, and entity types so
-    // pasted shapes get the same per-segment notch nodes as the original.
-    addShape(newName, newPoints, clipboard.stroke, clipboard.segmentBreaks, clipboard.segmentTypes);
-    
-    // Update the cascade origin for the next paste
-    clipboard.lastPastePoints = newPoints;
-    
-    console.log('Pasted shape:', newName);
-    return newName;
+    if (!clipboard || !Array.isArray(clipboard.shapes) || clipboard.shapes.length === 0) return null;
+
+    // Each paste moves the complete copied group 10mm so repeated pastes do not
+    // stack directly on top of one another.
+    const delta = 10 * ((clipboard.pasteCount || 0) + 1);
+    const allPoints = clipboard.shapes.flatMap(item => item.points);
+    const minX = Math.min(...allPoints.map(p => p[0] + delta));
+    const maxX = Math.max(...allPoints.map(p => p[0] + delta));
+    const minY = Math.min(...allPoints.map(p => p[1] + delta));
+    const maxY = Math.max(...allPoints.map(p => p[1] + delta));
+    let offsetX = 0, offsetY = 0;
+    if (minX < 0) offsetX = -minX;
+    else if (maxX > rulerRightMm) offsetX = rulerRightMm - maxX;
+    if (minY < 0) offsetY = -minY;
+    else if (maxY > rulerTopMm) offsetY = rulerTopMm - maxY;
+
+    saveUndoState();
+    const newNames = [];
+    clipboard.shapes.forEach((item, index) => {
+        const newName = `pasted_${Date.now()}_${index + 1}`;
+        const newPoints = item.points.map(p => [p[0] + delta + offsetX, p[1] + delta + offsetY]);
+        addShape(newName, newPoints, item.stroke, item.segmentBreaks, item.segmentTypes);
+        const actualName = shapes[newName] ? newName : Object.keys(shapes).find(name => name.startsWith(newName + '_'));
+        if (!actualName) return;
+        newNames.push(actualName);
+
+        if (item.notches.length > 0) {
+            const availableNodes = new Map(computeCardinalNodes(actualName).map(node => [node.edgeIdx, node]));
+            const copiedNotches = item.notches
+                .map(notch => availableNodes.get(notch.edgeIdx))
+                .filter(Boolean)
+                .map(node => [node.edgeIdx, { ...node }]);
+            if (copiedNotches.length > 0) {
+                shapeNotches[actualName] = new Map(copiedNotches);
+                drawNotchMarksForShape(actualName);
+                emitNotchesChanged(actualName);
+            }
+        }
+    });
+
+    if (newNames.length === 0) return null;
+    clipboard.pasteCount = (clipboard.pasteCount || 0) + 1;
+    persistNotchesToLocalStorage();
+
+    // Select the pasted group so it can be moved or copied together.
+    canvas.discardActiveObject();
+    if (newNames.length > 1) {
+        const selection = new fabric.ActiveSelection(newNames.map(name => shapes[name]), { canvas });
+        canvas.setActiveObject(selection);
+    } else {
+        canvas.setActiveObject(shapes[newNames[0]]);
+    }
+    canvas.renderAll();
+    console.log('Pasted', newNames.length, 'shape(s):', newNames);
+    return newNames;
 }
 
 // Rotate shape(s) by exact degrees - supports multi-select
