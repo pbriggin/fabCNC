@@ -878,7 +878,7 @@ def create_header():
         # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
             for axis in ['X', 'Y', 'Z', 'A']:
-                with ui.element('div').classes('header-position-indicator flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+                with ui.element('div').classes('header-position-indicator flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a; height: 32px; box-sizing: border-box; padding-top: 0; padding-bottom: 0;'):
                     ui.label(f'{axis}').classes('text-caption font-bold').style('color: #888; width: 12px;')
                     unit = '°' if axis == 'A' else ''
                     pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
@@ -1315,6 +1315,21 @@ def create_file_controls():
         ui.context.client.storage['canvas_name_label'] = canvas_name_label
 
 
+def _sync_toolpath_button(generated: bool) -> None:
+    """Keep the visible action in sync with the persisted preview state."""
+    button = ui.context.client.storage.get('toolpath_button')
+    if button is None:
+        return
+    if generated:
+        button.props('icon=close')
+        button.set_text('Clear Toolpath')
+        button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
+    else:
+        button.props('icon=route')
+        button.set_text('Generate Toolpath')
+        button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
+
+
 def create_job_controls():
     """Create the compact job execution control panel."""
     with ui.column().classes('w-full gap-1'):
@@ -1346,6 +1361,8 @@ def create_job_controls():
             .props('dense flat') \
             .classes('w-full remote-control-lock') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
+        ui.context.client.storage['toolpath_button'] = toolpath_btn
+        _sync_toolpath_button(bool(client_job_state.get('toolpath_generated', False)))
 
         ui.button('Outline Job', icon='crop_free', on_click=outline_job) \
             .props('dense flat') \
@@ -1680,6 +1697,7 @@ async def _import_dxf_path(saved_path, filename):
         # Update visualization without clearing existing shapes
         # This allows importing multiple DXF files
         # Offset color index by current shape count so each file gets distinct colors
+        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
         add_shapes_to_canvas(unique_shapes, start_color_index=existing_shape_count,
                              breaks=unique_breaks, entity_types=unique_types)
         
@@ -1689,6 +1707,7 @@ async def _import_dxf_path(saved_path, filename):
         machine_state.set_toolpath_generated(False)
         _mark_canvas_dirty()
         client_job_state['toolpath_generated'] = False
+        _sync_toolpath_button(False)
         machine_state.set_job_loaded(True, _canvas_job_label())
         
         ui.notify(f'File added: {filename} ({len(unique_shapes)} shapes)', type='positive')
@@ -2008,6 +2027,7 @@ async def _show_load_canvas_dialog():
                         client_job_state['loaded_filename'] = os.path.basename(fp)
                         client_job_state['canvas_dirty'] = False
                         client_job_state['toolpath_generated'] = False
+                        _sync_toolpath_button(False)
                         _refresh_canvas_name_label()
                         ui.notify(f'Canvas loaded: {os.path.basename(fp)}', type='positive')
                         log_event('canvas', 'canvas_loaded', filename=os.path.basename(fp),
@@ -2070,6 +2090,7 @@ def _clear_canvas_now():
     client_job_state['loaded_filename'] = None
     client_job_state['canvas_dirty'] = False
     client_job_state['toolpath_generated'] = False
+    _sync_toolpath_button(False)
     _refresh_canvas_name_label()
     ui.notify('Canvas cleared.', type='info')
 
@@ -2083,9 +2104,7 @@ async def toggle_toolpath(button):
         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
         machine_state.set_toolpath_generated(False)
         client_job_state['toolpath_generated'] = False
-        button.props('icon=route')
-        button.set_text('Generate Toolpath')
-        button.style('font-size: 14px; background-color: #2a2a2a; color: #66BB6A;')
+        _sync_toolpath_button(False)
         current_gcode = []
         try:
             app.storage.user.pop('generated_job', None)
@@ -2232,9 +2251,7 @@ async def toggle_toolpath(button):
         
         machine_state.set_toolpath_generated(True)
         client_job_state['toolpath_generated'] = True
-        button.props('icon=close')
-        button.set_text('Clear Toolpath')
-        button.style('font-size: 14px; background-color: #2a2a2a; color: #FF6600;')
+        _sync_toolpath_button(True)
         
         log_toolpath('toolpath_generated',
                      shape_count=len(current_toolpath_shapes),
@@ -4122,6 +4139,7 @@ def main_page():
                                         machine_state.set_toolpath_generated(False)
                                         client_job_state['toolpath_generated'] = False
                                         ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+                                        _sync_toolpath_button(False)
                                         ui.notify('Toolpath cleared because a shape was deleted.', type='info')
                             
                             ui.on('shape_deleted', on_shape_deleted)

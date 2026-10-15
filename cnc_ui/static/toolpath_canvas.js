@@ -12,6 +12,7 @@ const MAX_UNDO = 50;
 // Toolpath visualization state
 let toolpathLocked = false;
 let toolpathObjects = [];  // Store toolpath visualization objects (lines, markers, labels)
+let activeToolpathData = null;  // Retain preview data so it can be redrawn after a canvas resize
 let toolheadIndicator = null;  // Realtime toolhead position indicator
 
 // Notch tool state
@@ -109,6 +110,9 @@ function updateCanvasSize() {
     redrawAllShapes();
     
     canvas.renderAll();
+    if (toolpathLocked && activeToolpathData) {
+        showToolpath(activeToolpathData);
+    }
     console.log('Canvas resized:', canvasWidth, 'x', canvasHeight, 'scale:', scale);
 }
 
@@ -135,9 +139,11 @@ function redrawAllShapes() {
                 fill: 'transparent',
                 stroke: shape.stroke || '#42A5F5',
                 strokeWidth: 1,
-                selectable: true,
-                hasControls: true,
-                hasBorders: true,
+                selectable: !toolpathLocked,
+                evented: !toolpathLocked,
+                hasControls: !toolpathLocked,
+                hasBorders: !toolpathLocked,
+                visible: !toolpathLocked,
                 lockRotation: true,
                 lockScalingX: true,
                 lockScalingY: true,
@@ -703,6 +709,9 @@ function constrainShapeToWorkArea(points) {
 }
 
 function clearShapes() {
+    // A loaded/replaced canvas must not inherit a preview or its lock state.
+    clearToolpath();
+
     // Remove all shape objects from canvas
     Object.values(shapes).forEach(shape => {
         canvas.remove(shape);
@@ -4361,6 +4370,7 @@ function clearToolpath() {
         canvas.remove(obj);
     });
     toolpathObjects = [];
+    activeToolpathData = null;
     
     // Unlock canvas
     unlockCanvas();
@@ -4401,6 +4411,8 @@ function showToolpath(toolpathData) {
         console.error('Invalid toolpath data');
         return false;
     }
+
+    activeToolpathData = toolpathData;
     
     // Clear any existing toolpath
     clearToolpathObjects();
