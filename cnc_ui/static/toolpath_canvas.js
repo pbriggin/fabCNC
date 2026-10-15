@@ -3169,10 +3169,7 @@ function undo() {
     // Restore notch edge keys and redraw marks
     Object.keys(notchState).forEach(name => {
         if (notchState[name] && notchState[name].length > 0) {
-            shapeNotches[name] = new Map(notchState[name].map(k => {
-                const node = normalizeNotchNode(name, k);
-                return [node.edgeIdx, node];
-            }));
+            shapeNotches[name] = buildNotchMap(name, notchState[name]);
             drawNotchMarksForShape(name);
         }
     });
@@ -3470,10 +3467,7 @@ function loadCanvasState(jsonString) {
         if (state.notches) {
             Object.keys(state.notches).forEach(name => {
                 if (state.notches[name] && state.notches[name].length > 0) {
-                    shapeNotches[name] = new Map(state.notches[name].map(k => {
-                        const node = normalizeNotchNode(name, k);
-                        return [node.edgeIdx, node];
-                    }));
+                    shapeNotches[name] = buildNotchMap(name, state.notches[name]);
                     drawNotchMarksForShape(name);
                 }
             });
@@ -3712,13 +3706,37 @@ function computeCardinalNodes(shapeName) {
     return nodes;
 }
 
-// Older saved notch snapshots only contain edgeIdx/x/y. Recover the node kind
-// from the current shape so fractional midpoint indices are not mistaken for
-// junctions when restoring those snapshots.
-function normalizeNotchNode(shapeName, savedNode) {
-    if (savedNode.isJunction !== undefined) return savedNode;
-    const freshNode = computeCardinalNodes(shapeName).find(n => n.edgeIdx === savedNode.edgeIdx);
-    return { ...savedNode, isJunction: freshNode ? freshNode.isJunction : false };
+// A saved notch's edge index identifies its position on a shape. Its saved x/y
+// can become stale when shape state is restored from a different snapshot, so
+// always take the anchor and node kind from the current shape geometry.
+function normalizeNotchNode(shapeName, savedNode, freshNodes = null) {
+    if (!savedNode || !Number.isFinite(Number(savedNode.edgeIdx))) return null;
+    const nodes = freshNodes || computeCardinalNodes(shapeName);
+    const freshNode = nodes.find(n => n.edgeIdx === Number(savedNode.edgeIdx));
+    if (!freshNode) return null;
+    return {
+        ...savedNode,
+        edgeIdx: freshNode.edgeIdx,
+        x: freshNode.x,
+        y: freshNode.y,
+        isJunction: freshNode.isJunction === true
+    };
+}
+
+function buildNotchMap(shapeName, savedNodes) {
+    if (!Array.isArray(savedNodes)) return new Map();
+    const freshNodes = computeCardinalNodes(shapeName);
+    const restored = new Map();
+    let skipped = 0;
+    savedNodes.forEach(savedNode => {
+        const node = normalizeNotchNode(shapeName, savedNode, freshNodes);
+        if (node) restored.set(node.edgeIdx, node);
+        else skipped++;
+    });
+    if (skipped > 0) {
+        console.warn(`Skipped ${skipped} stale notch(es) for ${shapeName}; no matching edge exists`);
+    }
+    return restored;
 }
 
 // Recompute the (x,y) anchor of every active notch on a shape from the current
@@ -4051,21 +4069,19 @@ function restoreNotchesFromLocalStorage() {
             if (!shapeData[name]) return;  // shape no longer exists
             const arr = snapshot[name];
             if (!Array.isArray(arr) || arr.length === 0) return;
-            shapeNotches[name] = new Map(arr.map(k => {
-                const node = normalizeNotchNode(name, k);
-                return [node.edgeIdx, node];
-            }));
+            shapeNotches[name] = buildNotchMap(name, arr);
+            if (shapeNotches[name].size === 0) return;
             drawNotchMarksForShape(name);
-            restored += arr.length;
+            restored += shapeNotches[name].size;
         });
+        // Rewrite even when every saved edge was stale, so obsolete anchors
+        // cannot be retried on the next load.
+        persistNotchesToLocalStorage();
+        Object.keys(shapeNotches).forEach(emitNotchesChanged);
         if (restored > 0) {
             console.log('Restored', restored, 'notch(es) from localStorage');
             if (notchMode) showNotchNodes();
             canvas.renderAll();
-            // Rewrite snapshot to drop entries for shapes that no longer exist,
-            // and re-emit to the server so its in-memory mirror catches up.
-            persistNotchesToLocalStorage();
-            Object.keys(shapeNotches).forEach(emitNotchesChanged);
         }
     } catch (e) {
         console.warn('restoreNotchesFromLocalStorage failed:', e);
@@ -4106,10 +4122,9 @@ function restoreNotches(notchesDict) {
     Object.keys(notchesDict).forEach(name => {
         const arr = notchesDict[name];
         if (!Array.isArray(arr) || arr.length === 0) return;
-        shapeNotches[name] = new Map(arr.map(k => {
-            const node = normalizeNotchNode(name, k);
-            return [node.edgeIdx, node];
-        }));
+        if (!shapeData[name]) return;
+        shapeNotches[name] = buildNotchMap(name, arr);
+        if (shapeNotches[name].size === 0) return;
         drawNotchMarksForShape(name);
     });
     if (notchMode) showNotchNodes();

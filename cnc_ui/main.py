@@ -4043,7 +4043,7 @@ def main_page():
                                         await asyncio.sleep(0.1)
                                         try:
                                             await ui.run_javascript(
-                                                f'window.toolpathCanvas.restoreNotches({json.dumps(current_toolpath_notches)})',
+                                                f'window.toolpathCanvas.restoreNotches({json.dumps(dict(current_toolpath_notches))})',
                                                 timeout=5.0,
                                             )
                                         except Exception as exc:
