@@ -878,7 +878,7 @@ def create_header():
         # Right side: Position display + Update button + Version
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0; overflow-x: auto;'):
             for axis in ['X', 'Y', 'Z', 'A']:
-                with ui.element('div').classes('flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
+                with ui.element('div').classes('header-position-indicator flex items-center gap-1 px-2 py-1 rounded').style('background: #3a3a3a; border: 1px solid #4a4a4a;'):
                     ui.label(f'{axis}').classes('text-caption font-bold').style('color: #888; width: 12px;')
                     unit = '°' if axis == 'A' else ''
                     pos_labels[axis] = ui.label(f'0.00{unit}').classes('text-body2 font-bold').style('min-width: 65px;')
@@ -887,10 +887,10 @@ def create_header():
                 .props('dense flat no-caps color=grey-6') \
                 .classes('no-tooltips').style('font-size: 11px; min-width: 140px;')
             
-            with ui.element('div').classes('flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
+            with ui.element('div').classes('header-wifi-widget flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
-                ui.element('div').style('width: 10px; flex-shrink: 0;')
-                wifi_status_text = ui.label('Wi-Fi: —').classes('text-caption').style('color: #aaa; white-space: nowrap;')
+                ui.element('div').classes('header-wifi-spacer').style('width: 10px; flex-shrink: 0;')
+                wifi_status_text = ui.label('Wi-Fi: —').classes('header-wifi-label text-caption').style('color: #aaa; white-space: nowrap;')
             wifi_widget.tooltip('View Wi-Fi status, scan for networks, or manage saved connections')
 
             ui.label(APP_VERSION).classes('text-caption ml-2').style('color: #666;')
@@ -2773,6 +2773,20 @@ def main_page():
                 overflow: hidden !important;
             }
 
+            /* Keep the machine readout from crowding navigation on narrower screens. */
+            @media (max-width: 1800px) {
+                .header-position-indicator,
+                .header-wifi-label,
+                .header-wifi-spacer {
+                    display: none !important;
+                }
+                .header-wifi-widget {
+                    padding-left: 6px !important;
+                    padding-right: 6px !important;
+                    margin-left: 0 !important;
+                }
+            }
+
             /* NiceGUI nests page content in an extra wrapper; remove its default gutters too. */
             .q-page-container {
                 padding-right: 0 !important;
@@ -3927,7 +3941,7 @@ def main_page():
                                     deactivate_measure_btn()
                                 ui.run_javascript(f"window.toolpathCanvas.setMeasureMode({str(measure_mode_state['active']).lower()})")
 
-                            with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; flex-shrink: 0;'):
+                            with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; min-width: 0; box-sizing: border-box; flex-wrap: nowrap; flex-shrink: 0; overflow-x: auto; overflow-y: hidden;'):
                                 notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
                                 notch_mode_state['btn'] = notch_btn
                                 measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point')
@@ -3941,7 +3955,6 @@ def main_page():
                                 spread_spacing = ui.number(value=15, format='%.0f', min=1, max=200).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Min gap between shape outlines (mm)')
                                 ui.button('Spread', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.ensureSpacing({int(spread_spacing.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Push shapes apart so every outline gap ≥ spacing value')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.element('div').style('flex: 1;')
                                 ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
 
