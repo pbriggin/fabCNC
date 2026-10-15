@@ -853,7 +853,7 @@ def create_header():
     pos_labels = {}
     tabs = None
     
-    with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 48px; flex-wrap: nowrap; padding-top: 8px;'):
+    with ui.header().classes('items-center justify-between py-1 px-3').style('background: linear-gradient(180deg, #2a2a2a 0%, #232323 100%); min-height: 52px; flex-wrap: nowrap; padding-top: 4px;'):
         # Left side: App name with navigation tabs
         with ui.row().classes('items-center gap-2').style('flex-shrink: 0;'):
             with ui.row().classes('items-center gap-2'):
@@ -885,9 +885,9 @@ def create_header():
             
             update_btn = ui.button('Software Up To Date', icon='check_circle') \
                 .props('dense flat no-caps color=grey-6') \
-                .classes('no-tooltips').style('font-size: 11px; min-width: 140px;')
+                .classes('no-tooltips').style('font-size: 11px; min-width: 140px; height: 32px;')
             
-            with ui.element('div').classes('header-wifi-widget flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer;') as wifi_widget:
+            with ui.element('div').classes('header-wifi-widget flex items-center px-2 py-1 rounded ml-2').style('background: #3a3a3a; border: 1px solid #4a4a4a; cursor: pointer; height: 32px; box-sizing: border-box; padding-top: 0; padding-bottom: 0;') as wifi_widget:
                 wifi_status_icon = ui.icon('signal_wifi_off', size='16px').style('color: #888;')
                 ui.element('div').classes('header-wifi-spacer').style('width: 10px; flex-shrink: 0;')
                 wifi_status_text = ui.label('Wi-Fi: —').classes('header-wifi-label text-caption').style('color: #aaa; white-space: nowrap;')
@@ -2761,7 +2761,7 @@ def main_page():
                     overflow: auto !important;
                 }
             }
-            @media (max-width: 1440px) {
+            @media (max-width: 1439px) {
                 html, body {
                     overflow-x: auto !important;
                 }
@@ -2774,7 +2774,7 @@ def main_page():
             }
 
             /* Keep the machine readout from crowding navigation on narrower screens. */
-            @media (max-width: 1800px) {
+            @media (max-width: 1440px) {
                 .header-position-indicator,
                 .header-wifi-label,
                 .header-wifi-spacer {
@@ -2870,10 +2870,10 @@ def main_page():
                 background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%) !important;
                 border-bottom: 0 !important;
                 box-shadow: none !important;
-                min-height: 56px !important;
-                max-height: 56px !important;
-                height: 56px !important;
-                padding: 7px 16px 0 !important;
+                min-height: 52px !important;
+                max-height: 52px !important;
+                height: 52px !important;
+                padding: 4px 12px 0 !important;
             }
 
             header.q-header .q-layout__shadow {
@@ -3572,12 +3572,12 @@ def main_page():
 
     # Wi-Fi settings dropdown, anchored to the header Wi-Fi widget
     with wifi_widget:
-        with ui.menu() as wifi_menu:
-            with ui.column().classes('gap-2 p-3').style('min-width: 300px;'):
+        with ui.menu().props('anchor="bottom right" self="top right"') as wifi_menu:
+            with ui.column().classes('gap-2 p-3').style('width: 300px; max-width: calc(100vw - 24px); box-sizing: border-box;'):
                 ui.label('Wi-Fi').classes('text-body1 font-bold').style('color: #aaa;')
                 wifi_status_label = ui.label('Click to scan…').classes('text-caption').style('color: #888;')
                 wifi_select = ui.select(options={}, label='Available networks') \
-                    .props('dense').style('min-width: 260px;')
+                    .props('dense').style('width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box;')
 
                 def _parse_wifi_networks():
                     """Return (networks_list, raw_output) using multiline nmcli mode."""
@@ -3800,7 +3800,7 @@ def main_page():
     
     # Full-bleed panels meet the header tab strip without an outer gutter or frame.
     with ui.column().classes('w-full workspace-content').style(
-        'height: calc(100vh - 56px); min-height: 600px; overflow: hidden;'
+        'height: calc(100vh - 52px); min-height: 600px; overflow: hidden;'
     ):
         with ui.tab_panels(tabs, value=job_tab, animated=False).classes('w-full workspace-tab-panels'):
             # Job tab - File loading, job execution, and toolpath visualization
