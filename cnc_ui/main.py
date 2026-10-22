@@ -41,6 +41,7 @@ from dxf_processing.dxf_processor import DXFProcessor
 from toolpath_planning.toolpath_generator import ToolpathGenerator
 from toolpath_planning.gcode_visualizer import GCodeVisualizer
 from toolpath_planning.overlap_detector import find_overlapping_pairs
+from toolpath_planning.shape_metadata import store_shape_snapshot
 import logging
 import socket
 import subprocess
@@ -4082,9 +4083,12 @@ def main_page():
                                 new_points = data.get('newPoints')
                                 if not shape_name or not isinstance(new_points, list) or len(new_points) < 2:
                                     return
-                                current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
-                                current_toolpath_breaks[shape_name] = list(data.get('segmentBreaks') or [0])
-                                current_toolpath_types[shape_name] = list(data.get('segmentTypes') or [])
+                                store_shape_snapshot(
+                                    shape_name, new_points, data,
+                                    current_toolpath_shapes,
+                                    current_toolpath_breaks,
+                                    current_toolpath_types,
+                                )
                                 _mark_canvas_dirty()
                                 log_event('canvas', 'shape_added', shape=shape_name,
                                           point_count=len(new_points))
@@ -4108,10 +4112,13 @@ def main_page():
                                 
                                 if shape_name and new_points:
                                     # Update the stored shapes with new positions
-                                    current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
-                                    if isinstance(data, dict):
-                                        current_toolpath_breaks[shape_name] = list(data.get('segmentBreaks') or [0])
-                                        current_toolpath_types[shape_name] = list(data.get('segmentTypes') or [])
+                                    store_shape_snapshot(
+                                        shape_name, new_points, data,
+                                        current_toolpath_shapes,
+                                        current_toolpath_breaks,
+                                        current_toolpath_types,
+                                        preserve_missing_metadata=True,
+                                    )
                                     _mark_canvas_dirty()
                                     logger.info(f"Shape '{shape_name}' moved to new position")
                                     try:
@@ -4124,6 +4131,36 @@ def main_page():
                                         log_event('canvas', 'shape_moved', shape=shape_name)
                             
                             ui.on('shape_moved', on_shape_moved)
+
+                            # Nesting can reposition many shapes at once; send
+                            # one snapshot event so reconnect restores both
+                            # geometry and its per-segment notch metadata.
+                            def on_shapes_updated(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                updates = data.get('shapes', []) if isinstance(data, dict) else []
+                                updated_names = []
+                                for update in updates:
+                                    if not isinstance(update, dict):
+                                        continue
+                                    shape_name = update.get('shapeName')
+                                    new_points = update.get('newPoints')
+                                    if not shape_name or not isinstance(new_points, list) or len(new_points) < 2:
+                                        continue
+                                    store_shape_snapshot(
+                                        shape_name, new_points, update,
+                                        current_toolpath_shapes,
+                                        current_toolpath_breaks,
+                                        current_toolpath_types,
+                                        preserve_missing_metadata=True,
+                                    )
+                                    updated_names.append(shape_name)
+                                if updated_names:
+                                    _mark_canvas_dirty()
+                                    log_event('canvas', 'shapes_updated',
+                                              shape_count=len(updated_names),
+                                              shapes=updated_names)
+
+                            ui.on('shapes_updated', on_shapes_updated)
                             
                             # Handle nest diagnostic events from JavaScript (timing checkpoints,
                             # uncaught errors, etc.). All logged to app.log for post-mortem.

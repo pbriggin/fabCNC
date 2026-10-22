@@ -1116,13 +1116,8 @@ function onShapeMoved(e) {
     syncNotchesForShape(name);
     if (notchMode) showNotchNodes();
 
-    // Send update to Python backend
-    if (window.emitEvent) {
-        window.emitEvent('shape_moved', {
-            shapeName: name,
-            newPoints: newPoints
-        });
-    }
+    // Keep the server snapshot, including DXF segment boundaries, in sync.
+    emitShapeUpdate(name);
 }
 
 // Handle shape scaling via handles
@@ -1859,6 +1854,8 @@ function duplicateShape() {
     const newPoints = points.map(p => [p[0] + 20, p[1] + 20]);
     
     addShape(newName, newPoints, shape.stroke, data.segmentBreaks, data.segmentTypes);
+    copyNotchesToShape(shape.shapeName, newName);
+    emitShapeAdded(newName);
     return newName;
 }
 
@@ -1950,6 +1947,8 @@ function linearArray(axis, count, spacing) {
         ]);
         
         addShape(newName, newPoints, strokeColor, segBreaks, segTypes);
+        copyNotchesToShape(shape.shapeName, newName);
+        emitShapeAdded(newName);
         newNames.push(newName);
     }
     
@@ -2011,6 +2010,8 @@ function gridArray(countX, countY) {
             ]);
             
             addShape(newName, newPoints, strokeColor, segBreaks, segTypes);
+            copyNotchesToShape(shape.shapeName, newName);
+            emitShapeAdded(newName);
             newNames.push(newName);
         }
     }
@@ -2331,9 +2332,6 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                     // Update shape with new points from Packaide
                     data.originalMmPoints = placement.points;
                     redrawShapeFromData(placement.name);
-                    // Note: emitShapeUpdate intentionally skipped here — emitting one event
-                    // per shape floods the WebSocket on large layouts. Python re-fetches
-                    // all positions via getPositions() before toolpath generation.
                     
                     // Track bounds
                     for (const pt of placement.points) {
@@ -2346,6 +2344,7 @@ async function nestShapesPackaide(shapeInfos, keepOrientation, spacing) {
                 canvas.renderOnAddRemove = true;
                 canvas.renderAll();  // single render for all placement updates
             }
+            emitShapesUpdate(result.placements.map(placement => placement.name));
             _nestDiag('redraw_done', {
                 ms: (performance.now() - _tRedraw).toFixed(1),
                 placed: result.placed,
@@ -2480,13 +2479,13 @@ async function nestShapesLocal(shapeInfos, keepOrientation, spacing) {
             }
             data.originalMmPoints = p.full;
             redrawShapeFromData(p.info.name);
-            // Note: emitShapeUpdate intentionally skipped — see nestShapesPackaide comment.
         }
     } finally {
         _batchRedrawMode = false;
         canvas.renderOnAddRemove = true;
         canvas.renderAll();  // single render for all local nest updates
     }
+    emitShapesUpdate(bestResult.placements.map(placement => placement.info.name));
     _nestDiag('local_redraw_done', {
         ms: (performance.now() - _tRedraw).toFixed(1),
         totalMs: (performance.now() - _tLocalStart).toFixed(1),
@@ -2836,7 +2835,10 @@ function mirrorCopy(axis) {
         ]);
     }
     
-    addShape(newName, newPoints, strokeColor);
+    const data = shapeData[shape.shapeName];
+    addShape(newName, newPoints, strokeColor, data.segmentBreaks, data.segmentTypes);
+    copyNotchesToShape(shape.shapeName, newName);
+    emitShapeAdded(newName);
     return newName;
 }
 
@@ -3092,22 +3094,49 @@ function redrawShapeFromData(shapeName) {
     if (!_batchRedrawMode) canvas.renderAll();
 }
 
-// Helper: Emit shape update to Python
-function emitShapeUpdate(shapeName) {
+// Build a detached snapshot so event handlers cannot mutate canvas state.
+function getShapeSnapshot(shapeName) {
     if (!shapeData[shapeName]) return;
-    
     const data = shapeData[shapeName];
-    const points = data.originalMmPoints;
-    if (!points) return;
-    
-    if (window.emitEvent) {
-        window.emitEvent('shape_moved', {
-            shapeName: shapeName,
-            newPoints: points,
-            segmentBreaks: data.segmentBreaks || [0],
-            segmentTypes: data.segmentTypes || []
-        });
-    }
+    if (!data.originalMmPoints) return;
+    return {
+        shapeName: shapeName,
+        newPoints: data.originalMmPoints.map(point => [point[0], point[1]]),
+        segmentBreaks: (data.segmentBreaks || [0]).slice(),
+        segmentTypes: (data.segmentTypes || []).slice()
+    };
+}
+
+// Helpers: all geometry events carry segment data for reliable reconnects.
+function emitShapeUpdate(shapeName) {
+    const snapshot = getShapeSnapshot(shapeName);
+    if (snapshot && window.emitEvent) window.emitEvent('shape_moved', snapshot);
+}
+
+function emitShapeAdded(shapeName) {
+    const snapshot = getShapeSnapshot(shapeName);
+    if (snapshot && window.emitEvent) window.emitEvent('shape_added', snapshot);
+}
+
+function emitShapesUpdate(shapeNames) {
+    if (!window.emitEvent) return;
+    const updates = shapeNames.map(getShapeSnapshot).filter(Boolean);
+    if (updates.length) window.emitEvent('shapes_updated', { shapes: updates });
+}
+
+function copyNotchesToShape(sourceName, targetName) {
+    const source = shapeNotches[sourceName];
+    if (!source || source.size === 0) return;
+    const availableNodes = new Map(computeCardinalNodes(targetName).map(node => [node.edgeIdx, node]));
+    const copied = Array.from(source.keys())
+        .map(edgeIdx => availableNodes.get(edgeIdx))
+        .filter(Boolean)
+        .map(node => [node.edgeIdx, { ...node }]);
+    if (!copied.length) return;
+    shapeNotches[targetName] = new Map(copied);
+    drawNotchMarksForShape(targetName);
+    persistNotchesToLocalStorage();
+    emitNotchesChanged(targetName);
 }
 
 // Clipboard for copy/paste
@@ -3257,14 +3286,7 @@ function pasteShape() {
         // Keep the server-side canvas snapshot in sync so a page refresh can
         // rebuild this pasted shape with the same segment boundaries. Notch
         // edge indices depend on those boundaries when the canvas is restored.
-        if (window.emitEvent && shapeData[actualName]) {
-            window.emitEvent('shape_added', {
-                shapeName: actualName,
-                newPoints: shapeData[actualName].originalMmPoints,
-                segmentBreaks: shapeData[actualName].segmentBreaks,
-                segmentTypes: shapeData[actualName].segmentTypes
-            });
-        }
+        emitShapeAdded(actualName);
     });
 
     if (newNames.length === 0) return null;

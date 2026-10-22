@@ -8,9 +8,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cnc_ui"))
 
 from toolpath_planning.toolpath_generator import ToolpathGenerator  # noqa: E402
+from toolpath_planning.shape_metadata import store_shape_snapshot  # noqa: E402
 
 
 class ToolpathRegressionTests(unittest.TestCase):
+    def test_shape_move_without_segment_fields_preserves_notch_segmentation(self):
+        shapes = {'part': [(0, 0), (10, 0), (10, 10)]}
+        breaks = {'part': [0, 1, 2]}
+        types = {'part': ['line', 'arc', 'line']}
+
+        store_shape_snapshot(
+            'part', [(5, 5), (15, 5), (15, 15)], {'shapeName': 'part'},
+            shapes, breaks, types, preserve_missing_metadata=True,
+        )
+
+        self.assertEqual(breaks['part'], [0, 1, 2])
+        self.assertEqual(types['part'], ['line', 'arc', 'line'])
+        self.assertEqual(shapes['part'], [(5, 5), (15, 5), (15, 15)])
+
+    def test_shape_snapshot_updates_segment_data_or_defaults_new_shape(self):
+        shapes, breaks, types = {}, {}, {}
+        points = [(0, 0), (10, 0), (10, 10)]
+        metadata = {'segmentBreaks': [0, 2], 'segmentTypes': ['line', 'arc']}
+
+        store_shape_snapshot('part', points, metadata, shapes, breaks, types)
+        self.assertEqual(breaks['part'], [0, 2])
+        self.assertEqual(types['part'], ['line', 'arc'])
+
+        store_shape_snapshot('legacy', points, {}, shapes, breaks, types)
+        self.assertEqual(breaks['legacy'], [0])
+        self.assertEqual(types['legacy'], [])
+
     def make_generator(self, output_dir: str) -> ToolpathGenerator:
         generator = ToolpathGenerator()
         generator.output_dir = output_dir
