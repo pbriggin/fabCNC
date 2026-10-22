@@ -207,7 +207,7 @@ class CNCController:
         if auto_connect:
             connected = self._auto_connect()
             if self.connected and self.sd_job_disconnected:
-                self._reconcile_sd_job_after_reconnect()
+                self._start_sd_job_reconciliation()
             elif not connected and self.sd_job_disconnected:
                 # A restarted Pi can inherit an active SD-job marker while
                 # Marlin is still cutting. Enter the same automatic recovery
@@ -525,6 +525,27 @@ class CNCController:
         # create competing reconnect loops.
         self.reconnect_thread_active = True
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
+
+    def _start_sd_job_reconciliation(self) -> None:
+        """Query Marlin in the background when startup restores an SD-job marker."""
+        if self.reconnect_thread_active:
+            return
+        self.reconnect_thread_active = True
+
+        def _worker():
+            try:
+                self._reconcile_sd_job_after_reconnect()
+            finally:
+                disconnected_during_check = not self.connected and self.sd_job_disconnected
+                self.reconnect_thread_active = False
+                if disconnected_during_check:
+                    self._start_reconnect_loop(pulse_dtr=True)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="sd-job-status-reconciliation",
+        ).start()
 
     def attempt_reconnect(self, *, pulse_dtr: bool = False) -> None:
         """Retry Marlin discovery, optionally pulsing USB CDC DTR immediately."""
@@ -2171,76 +2192,67 @@ class CNCController:
             logger.warning(f"Could not remove saved SD job state: {exc}")
 
     def _reconcile_sd_job_after_reconnect(self) -> None:
-        responses: list[str] = []
-        progress = None
-        explicitly_idle = False
-        for _ in range(3):
+        """Keep asking Marlin for SD state until it reports active or idle."""
+        machine_state.set_status("Checking Marlin SD job status...", busy=True)
+        attempt = 0
+        while self.connected and self.sd_job_disconnected:
+            attempt += 1
             response = self.send_command_with_response("M27", timeout=5.0)
             if not self.connected:
                 return
-            responses.append(response)
             progress = _parse_sd_progress(response)
             if progress:
-                break
-            if "not sd printing" in response.lower():
-                explicitly_idle = True
-                break
-            if not self.connected:
+                position, total_bytes = progress
+                self.sd_job_active = True
+                self.sd_job_disconnected = False
+                self.stop_requested = False
+                self.pause_requested = False
+                machine_state.update_job_progress(position / total_bytes if total_bytes else 0.0)
+                machine_state.set_status("Running", busy=True, paused=False)
+                log_controller_event(
+                    "sd_job_reconnected",
+                    filename=_SD_FILENAME,
+                    position=position,
+                    total_bytes=total_bytes,
+                    status_query_attempts=attempt,
+                )
+                self.job_thread = threading.Thread(
+                    target=self._monitor_sd_job,
+                    kwargs={"total_bytes": total_bytes, "initially_active": True, "reconnected": True},
+                    daemon=True,
+                    name="sd-job-monitor-reconnected",
+                )
+                self.job_thread.start()
                 return
-            time.sleep(0.25)
+            if "not sd printing" in response.lower():
+                self.stop_requested = False
+                self.pause_requested = False
+                self._clear_sd_job_state()
+                self.homed = False
+                self.rehome_required = True
+                machine_state.set_status(
+                    "SD job ended while disconnected — re-home required",
+                    busy=False,
+                )
+                log_controller_event(
+                    "sd_job_ended_while_disconnected",
+                    filename=_SD_FILENAME,
+                    response=response[:500],
+                    status_query_attempts=attempt,
+                )
+                return
 
-        response_summary = "\n".join(responses)
-        if not progress and explicitly_idle:
-            self._clear_sd_job_state()
-            machine_state.set_status(
-                "SD job ended while disconnected — re-home required",
-                busy=False,
-            )
-            log_controller_event(
-                "sd_job_ended_while_disconnected",
-                filename=_SD_FILENAME,
-                response=response_summary[:500],
-            )
-            return
-        if not progress:
-            # A timeout, malformed reply, or unrelated response is not proof
-            # that autonomous playback stopped. Keep the on-disk marker so a
-            # later recovery attempt can reconcile it safely.
-            self.serial_uncertain = True
-            self.homed = False
-            self.rehome_required = True
-            machine_state.set_status(
-                "SD job status uncertain — use physical E-stop and verify machine",
-                busy=True,
-            )
-            log_controller_event(
-                "sd_job_reconnect_status_uncertain",
-                filename=_SD_FILENAME,
-                response=response_summary[:500],
-            )
-            return
-
-        if not self.connected:
-            return
-        position, total_bytes = progress
-        self.sd_job_active = True
-        self.sd_job_disconnected = False
-        self.stop_requested = False
-        machine_state.update_job_progress(position / total_bytes if total_bytes else 0.0)
-        machine_state.set_status("Running", busy=True, paused=False)
-        log_controller_event(
-            "sd_job_reconnected",
-            filename=_SD_FILENAME,
-            position=position,
-            total_bytes=total_bytes,
-        )
-        self.job_thread = threading.Thread(
-            target=self._monitor_sd_job,
-            kwargs={"total_bytes": total_bytes, "initially_active": True, "reconnected": True},
-            daemon=True,
-            name="sd-job-monitor-reconnected",
-        )
-        self.job_thread.start()
+            # A timeout, malformed reply, or unrelated response is not a
+            # machine-state result. Leave the serial link connected and ask
+            # again; only Marlin's M27 answer decides whether playback runs.
+            if attempt == 1 or attempt % 10 == 0:
+                log_controller_event(
+                    "sd_job_reconnect_status_pending",
+                    filename=_SD_FILENAME,
+                    attempt=attempt,
+                    response=response[:500],
+                )
+            time.sleep(1.0)
 
     def _execute_job(self, gcode_lines: list[str], is_job: bool = True) -> None:
         """
