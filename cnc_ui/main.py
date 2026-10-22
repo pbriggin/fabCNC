@@ -2505,7 +2505,7 @@ async def retry_controller_connection():
 
 
 async def force_controller_recovery():
-    """Recover a stopped machine using M999 or one deliberate USB DTR reset."""
+    """Recover a stopped machine with M999 or reconnect using a USB CDC DTR pulse."""
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
@@ -2526,8 +2526,8 @@ async def force_controller_recovery():
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    ui.notify('Trying one USB reset, then reconnecting…', type='warning', timeout=6000)
-    await asyncio.to_thread(cnc_controller.attempt_reconnect, force_dtr_reset=True)
+    ui.notify('Trying USB reconnect with a CDC DTR pulse…', type='info', timeout=6000)
+    await asyncio.to_thread(cnc_controller.attempt_reconnect, pulse_dtr=True)
 
 
 async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None):
@@ -2550,7 +2550,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     # Update status
     current_status = state.status_text
     display_status = current_status
-    sd_verification_status = 'SD job ended while disconnected — verify machine'
+    sd_ended_status = 'SD job ended while disconnected — re-home required'
     if (
         cnc_controller.sd_job_active
         and not state.paused
@@ -2559,9 +2559,9 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     ):
         canvas_name = Path(state.loaded_filename).name
         display_status = f'{current_status}: {canvas_name}'
-    if current_status == sd_verification_status:
-        display_status = 'Verify SD job'
-    elif current_status == 'Retrying connection...':
+    if current_status == sd_ended_status:
+        display_status = 'SD job ended — re-home required'
+    elif current_status.startswith('Retrying connection'):
         display_status = 'Reconnecting…'
     elif current_status == 'Disconnected':
         display_status = 'Controller disconnected'
@@ -3337,7 +3337,7 @@ def main_page():
                     'Send Logs to Dev': 'Package and securely send diagnostic logs to the developer',
                     'Download Logs': 'Download a diagnostic log bundle to this computer',
                     'Retry Connection': 'Try connecting to the machine controller again',
-                    'Force Recovery': 'Open guarded recovery for an uncertain controller state',
+                    'Force Recovery': 'Recover an uncertain controller state or reconnect with a USB CDC DTR pulse',
                     Acknowledge: 'Dismiss this update notice without installing now',
                     'Update Now': 'Install the available fabCNC software update now',
                     Unlock: 'Sign in to unlock the fabCNC controls',
@@ -4072,9 +4072,27 @@ def main_page():
                             # Schedule initialization
                             ui.timer(0.5, init_canvas_after_load, once=True)
                             
+                            # Persist pasted shapes with their segmentation so
+                            # saved notch edge indices still resolve on refresh.
+                            def on_shape_added(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                if not isinstance(data, dict):
+                                    return
+                                shape_name = data.get('shapeName')
+                                new_points = data.get('newPoints')
+                                if not shape_name or not isinstance(new_points, list) or len(new_points) < 2:
+                                    return
+                                current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
+                                current_toolpath_breaks[shape_name] = list(data.get('segmentBreaks') or [0])
+                                current_toolpath_types[shape_name] = list(data.get('segmentTypes') or [])
+                                _mark_canvas_dirty()
+                                log_event('canvas', 'shape_added', shape=shape_name,
+                                          point_count=len(new_points))
+
+                            ui.on('shape_added', on_shape_added)
+
                             # Handle shape moved events from JavaScript
                             def on_shape_moved(e):
-                                global current_toolpath_shapes
                                 # e.args contains the data passed from emitEvent
                                 data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
                                 shape_name = data.get('shapeName') if isinstance(data, dict) else None
@@ -4091,6 +4109,9 @@ def main_page():
                                 if shape_name and new_points:
                                     # Update the stored shapes with new positions
                                     current_toolpath_shapes[shape_name] = [tuple(p) for p in new_points]
+                                    if isinstance(data, dict):
+                                        current_toolpath_breaks[shape_name] = list(data.get('segmentBreaks') or [0])
+                                        current_toolpath_types[shape_name] = list(data.get('segmentTypes') or [])
                                     _mark_canvas_dirty()
                                     logger.info(f"Shape '{shape_name}' moved to new position")
                                     try:
@@ -4741,7 +4762,9 @@ def main_page():
                             .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'This may reset Marlin and abort any SD-card job still in progress.'
+                            'If the USB link is disconnected, this briefly toggles USB CDC DTR and '
+                            'it does not issue a Marlin reset or stop command. If Marlin is connected '
+                            'but halted, recovery may send M999.'
                         ).classes('text-body2').style('color:#ccc; white-space:normal;')
                         with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
                             ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
@@ -4805,7 +4828,7 @@ def main_page():
             if cnc_controller.connected and cnc_controller.serial_uncertain:
                 connection_alert_icon.props('name=warning color=orange-4')
                 connection_alert_title.set_text('Machine state uncertain')
-                connection_alert_subtitle.set_text('Automatic Stop verification did not complete:')
+                connection_alert_subtitle.set_text('Controller status could not be confirmed:')
                 connection_alert_steps.set_text(
                     '1. Confirm the cutter is fully stopped.\n'
                     '2. Click "Verify Controller" below.\n'
@@ -4816,13 +4839,29 @@ def main_page():
             elif cnc_controller.sd_job_disconnected:
                 connection_alert_icon.props('name=usb_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
-                connection_alert_subtitle.set_text('The SD-card job may still be running:')
-                connection_alert_steps.set_text(
-                    'Do not power-cycle the controller while the cutter may be moving.\n'
-                    'Check the machine, restore the USB connection when safe, then verify the job state.'
-                )
-                retry_connection_button.set_visibility(True)
-                force_recovery_button.set_text('Force Reconnect')
+                if cnc_controller.reconnect_thread_active:
+                    connection_alert_subtitle.set_text(
+                        'Trying normal M115 probes, then a CDC DTR pulse if needed.'
+                    )
+                    connection_alert_steps.set_text(
+                        'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
+                        'If USB is present but Marlin does not answer, fabCNC briefly toggles USB CDC DTR '
+                        'once, then keeps it asserted and asks M27 before restoring progress monitoring.'
+                    )
+                else:
+                    connection_alert_subtitle.set_text(
+                        'Automatic USB handshake and CDC DTR recovery did not reconnect.'
+                    )
+                    connection_alert_steps.set_text(
+                        'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
+                        'Restore USB when safe, then click Retry Connection. fabCNC will ask M27 '
+                        'before deciding whether the job is still active.'
+                    )
+                retry_connection_button.set_visibility(not cnc_controller.reconnect_thread_active)
+                # Keep manual controller recovery unavailable while autonomous
+                # SD playback may still be active; automatic DTR recovery only
+                # changes the USB CDC host-ready state, then verifies with M27.
+                force_recovery_button.set_visibility(False)
             else:
                 connection_alert_icon.props('name=usb_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
@@ -4834,9 +4873,14 @@ def main_page():
                 )
                 retry_connection_button.set_visibility(True)
                 force_recovery_button.set_text(
-                    'Reset Controller' if cnc_controller.reset_required else 'Force Reconnect'
+                    'Reset Controller' if cnc_controller.connected and cnc_controller.reset_required
+                    else 'Verify Controller' if cnc_controller.connected and cnc_controller.serial_uncertain
+                    else 'Reconnect with DTR Pulse'
                 )
-            force_recovery_button.set_visibility(True)
+            if not cnc_controller.sd_job_disconnected or (
+                cnc_controller.connected and cnc_controller.serial_uncertain
+            ):
+                force_recovery_button.set_visibility(True)
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
             # and file controls remain usable until the alert is dismissed.
@@ -4845,12 +4889,13 @@ def main_page():
         def _reopen_connection_alert():
             """Let the operator bring back a dismissed disconnect popup via the status pill."""
             current_status = machine_state.snapshot().status_text
-            if current_status == 'SD job ended while disconnected — verify machine':
+            if current_status == 'SD job ended while disconnected — re-home required':
                 ui.notify(current_status, type='warning', timeout=8000)
                 return
             if (
                 not cnc_controller.connected
-                or current_status in ('Disconnected', 'Retrying connection...')
+                or current_status == 'Disconnected'
+                or current_status.startswith('Retrying connection')
                 or cnc_controller.reset_required
                 or cnc_controller.serial_uncertain
                 or current_status == 'E-Stop Reset Required'
@@ -4899,7 +4944,8 @@ def main_page():
             prev = _prev_status_local[0]
             needs_disconnect_alert = (
                 (not cnc_controller.connected)
-                or current_status in ('Disconnected', 'Retrying connection...')
+                or current_status == 'Disconnected'
+                or current_status.startswith('Retrying connection')
                 or cnc_controller.reset_required
                 or cnc_controller.serial_uncertain
                 or current_status == 'E-Stop Reset Required'

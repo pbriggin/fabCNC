@@ -598,5 +598,14 @@ multi-client job identity.
 
 Passing mocked tests does not replace supervised hardware validation. Before
 deployment, verify the flashed Marlin configuration, sensorless homing,
-steps-per-unit, SD pause/resume/stop semantics, USB/DTR reset behavior, and
-physical E-stop operation on the actual SKR Pro machine.
+steps-per-unit, SD pause/resume/stop semantics, USB CDC/DTR reconnect behavior,
+controller reset behavior, and physical E-stop operation on the actual SKR Pro
+machine.
+
+---
+
+# Commit and Push Workflow
+
+Whenever committing and pushing repository changes, increment the application
+revision number in `cnc_ui/logging_setup.py` (`APP_VERSION`) and include that
+revision bump in the same commit.

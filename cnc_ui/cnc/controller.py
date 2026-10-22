@@ -127,8 +127,9 @@ class CNCController:
         self.read_thread: Optional[threading.Thread] = None
         self.connected = False
         self.reconnect_thread_active = False
-        self._reconnect_force_lock = threading.Lock()
-        self._force_reconnect_requested = False
+        self._dtr_recovery_lock = threading.Lock()
+        self._dtr_pulse_requested = False
+        self.dtr_recovery_active = False
         self.reset_required = False
         self.last_controller_error = ""
         self.last_serial_device = ""
@@ -203,14 +204,24 @@ class CNCController:
             except Exception as exc:
                 logger.warning(f"Could not read saved SD job state: {exc}")
         if auto_connect:
-            self._auto_connect()
+            connected = self._auto_connect()
             if self.connected and self.sd_job_disconnected:
                 self._reconcile_sd_job_after_reconnect()
+            elif not connected and self.sd_job_disconnected:
+                # A restarted Pi can inherit an active SD-job marker while
+                # Marlin is still cutting. Enter the same automatic recovery
+                # path used for a live USB disconnect.
+                log_controller_event(
+                    "serial_auto_reconnect_started",
+                    reason="restored_sd_job_state",
+                )
+                self._start_reconnect_loop()
     
     def _auto_connect(
         self,
         strict_candidates: bool = False,
-        force_dtr_reset: bool = False,
+        assert_dtr: bool | None = None,
+        pulse_dtr: bool = False,
     ) -> bool:
         """Auto-detect and connect to the first available serial port."""
         try:
@@ -239,16 +250,16 @@ class CNCController:
                         rtscts=False,
                         dsrdtr=False,
                     )
-                    if self.sd_job_disconnected:
-                        # Opening a serial port can toggle DTR and reset Marlin.
-                        # Avoid an intentional reset when an SD print may be live.
-                        self.serial_port.dtr = False
+                    # The SKR Pro exposes Marlin through native USB CDC. DTR is
+                    # the CDC host-ready state, not a wired MCU reset. During
+                    # the first SD-job reconnect phase keep it deasserted; the
+                    # fallback explicitly asserts it so Marlin can reply.
+                    if assert_dtr is None:
+                        assert_dtr = not self.sd_job_disconnected
+                    self.serial_port.dtr = bool(assert_dtr)
                     self.serial_port.port = port.device
                     self.serial_port.open()
-                    if self._probe_marlin_on_open_port(
-                        port.device,
-                        force_dtr_reset=force_dtr_reset,
-                    ):
+                    if self._probe_marlin_on_open_port(port.device, pulse_dtr=pulse_dtr):
                         logger.info(f"Connected to Marlin on {port.device}")
                         self.connected = True
                         self.serial_uncertain = False
@@ -286,18 +297,20 @@ class CNCController:
     def _probe_marlin_on_open_port(
         self,
         port_device: str,
-        force_dtr_reset: bool = False,
+        *,
+        pulse_dtr: bool = False,
     ) -> bool:
         """Try to elicit a Marlin banner/version reply on an already-open serial port."""
         if not self.serial_port or not self.serial_port.is_open:
             return False
 
-        # Some boards need a brief DTR pulse after USB re-enumeration to clear
-        # a stuck CDC endpoint and make writes reliable again.
+        # DTR is set before opening the port. The fallback may also toggle it
+        # once to re-establish USB CDC host-ready; it does not issue G-code.
         try:
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-            if not self.sd_job_disconnected or force_dtr_reset:
+            if pulse_dtr:
+                log_controller_event("serial_dtr_pulse", device=port_device)
                 self.serial_port.dtr = False
                 time.sleep(0.15)
                 self.serial_port.dtr = True
@@ -371,8 +384,12 @@ class CNCController:
         if self.sd_job_active:
             # An SD print may continue without the Pi's USB link. Do not offer
             # the serial-stream resume flow, which uses line acknowledgements.
+            # Reconnect without pulsing DTR, then ask Marlin whether playback
+            # is still active before deciding what the UI should report.
             self.sd_job_disconnected = True
             log_controller_event("sd_job_host_disconnected", filename=_SD_FILENAME)
+            log_controller_event("serial_auto_reconnect_started", reason="sd_job_disconnect")
+            self._start_reconnect_loop()
         elif not self.sd_uploading and not self.reset_required:
             self._save_resume_state()
         if _log_uploader:
@@ -383,14 +400,15 @@ class CNCController:
                 daemon=True,
                 name="log-upload-on-disconnect",
             ).start()
-        # Stay in Disconnected until the operator explicitly clicks Retry.
-        # This keeps the UI state deterministic and avoids implicit USB recovery.
+        # Non-SD disconnects stay operator-driven because command delivery may
+        # have been interrupted mid-stream. SD playback has its own automatic
+        # reconnect path above and is reconciled with M27 before job state is restored.
 
-    def _start_reconnect_loop(self, force_dtr_reset: bool = False) -> None:
-        """Background thread: retries reconnect until the controller reappears."""
-        if force_dtr_reset:
-            with self._reconnect_force_lock:
-                self._force_reconnect_requested = True
+    def _start_reconnect_loop(self, pulse_dtr: bool = False) -> None:
+        """Retry normal USB discovery, then pulse CDC DTR if SD probing stalls."""
+        if pulse_dtr:
+            with self._dtr_recovery_lock:
+                self._dtr_pulse_requested = True
         if self.reconnect_thread_active:
             return
 
@@ -411,33 +429,54 @@ class CNCController:
 
                 attempt = 0
                 no_candidate_streak = 0
+                failed_attempt_streak = 0
+                if pulse_dtr:
+                    self.dtr_recovery_active = True
                 while not self.connected:
                     attempt += 1
-                    machine_state.set_status("Retrying connection...", busy=False)
+                    machine_state.set_status(
+                        "Retrying connection with DTR..." if self.dtr_recovery_active
+                        else "Retrying connection...",
+                        busy=False,
+                    )
                     logger.info(f"Reconnection attempt {attempt}...")
-                    with self._reconnect_force_lock:
-                        force_this_attempt = self._force_reconnect_requested
-                        self._force_reconnect_requested = False
-                    if force_this_attempt:
+                    with self._dtr_recovery_lock:
+                        pulse_this_attempt = self._dtr_pulse_requested
+                        self._dtr_pulse_requested = False
+                    if pulse_this_attempt:
+                        self.dtr_recovery_active = True
                         log_controller_event(
-                            "serial_force_dtr_reset_attempt",
+                            "serial_dtr_recovery_requested",
                             attempt=attempt,
+                            pulse=True,
                         )
-                    # A forced DTR pulse is only attempted on the first
-                    # operator-requested try (including an already-running
-                    # retry loop); never repeatedly reset a board on failure.
                     if self._auto_connect(
                         strict_candidates=True,
-                        force_dtr_reset=force_this_attempt,
+                        assert_dtr=(self.dtr_recovery_active or not self.sd_job_disconnected),
+                        pulse_dtr=pulse_this_attempt,
                     ):
                         logger.info(f"Reconnected on attempt {attempt}")
                         self.stop_requested = False
                         log_controller_event("serial_reconnect", attempt=attempt)
                         if self.sd_job_disconnected:
                             self._reconcile_sd_job_after_reconnect()
+                            if not self.connected:
+                                # The USB link dropped again while M27 was
+                                # reconciling. Keep this same retry loop alive.
+                                failed_attempt_streak += 1
+                                logger.warning(
+                                    "Controller disconnected while reconciling SD job status"
+                                )
+                            else:
+                                self.dtr_recovery_active = False
+                                return
                         else:
+                            self.dtr_recovery_active = False
                             machine_state.set_status("Idle", busy=False)
-                        return
+                            return
+
+                    else:
+                        failed_attempt_streak += 1
 
                     if self.last_candidate_count == 0:
                         no_candidate_streak += 1
@@ -446,20 +485,46 @@ class CNCController:
                                 "No Marlin USB serial device detected; waiting for controller to enumerate"
                             )
                             log_controller_event("serial_reconnect_no_usb_device")
-                        # If no candidate appears for several retries, stop retrying
-                        # so the UI returns to Disconnected until the operator retries again.
-                        if no_candidate_streak >= 5:
-                            machine_state.set_status("Disconnected", busy=False)
-                            log_controller_event(
-                                "serial_reconnect_aborted_no_usb",
-                                attempts=attempt,
-                            )
-                            return
+                        if self.sd_job_disconnected:
+                            # DTR cannot help until Linux sees the USB device.
+                            # Keep waiting so a returning SKR can be recovered
+                            # without another operator click.
+                            failed_attempt_streak = 0
+                            time.sleep(3.0)
+                            continue
                     else:
                         no_candidate_streak = 0
 
+                    if self.sd_job_disconnected and not self.dtr_recovery_active and failed_attempt_streak >= 5:
+                        # Try five ordinary M115 probes with DTR deasserted.
+                        # If the USB serial device is present but Marlin does
+                        # not answer, pulse and reassert CDC DTR automatically.
+                        # This does not send G-code or request an MCU reset.
+                        self.dtr_recovery_active = True
+                        failed_attempt_streak = 0
+                        with self._dtr_recovery_lock:
+                            self._dtr_pulse_requested = True
+                        machine_state.set_status("Retrying connection with DTR...", busy=False)
+                        log_controller_event(
+                            "serial_dtr_recovery_started",
+                            after_attempts=attempt,
+                        )
+                    elif failed_attempt_streak >= 5:
+                        machine_state.set_status("Disconnected", busy=False)
+                        log_controller_event(
+                            "serial_reconnect_aborted",
+                            attempts=attempt,
+                            no_usb_device=(self.last_candidate_count == 0),
+                            dtr_recovery_active=self.dtr_recovery_active,
+                        )
+                        return
+
                     time.sleep(3.0)
             finally:
+                with self._dtr_recovery_lock:
+                    self._dtr_pulse_requested = False
+                if not self.connected:
+                    self.dtr_recovery_active = False
                 self.reconnect_thread_active = False
 
         # Reserve ownership before starting the worker so rapid UI clicks cannot
@@ -467,16 +532,16 @@ class CNCController:
         self.reconnect_thread_active = True
         threading.Thread(target=_worker, daemon=True, name="serial-reconnect").start()
 
-    def attempt_reconnect(self, *, force_dtr_reset: bool = False) -> None:
-        """Retry Marlin discovery, optionally pulsing DTR once on operator request."""
+    def attempt_reconnect(self, *, pulse_dtr: bool = False) -> None:
+        """Retry Marlin discovery, optionally pulsing USB CDC DTR immediately."""
         if self.connected:
             return
         machine_state.set_status("Retrying connection...", busy=False)
         log_controller_event(
             "serial_reconnect_requested",
-            force_dtr_reset=force_dtr_reset,
+            pulse_dtr=pulse_dtr,
         )
-        self._start_reconnect_loop(force_dtr_reset=force_dtr_reset)
+        self._start_reconnect_loop(pulse_dtr=pulse_dtr)
 
     def reset_controller_after_estop(self) -> bool:
         """Clear a Marlin halt state after the physical E-stop has been released."""
@@ -2051,7 +2116,7 @@ class CNCController:
                 if not active_seen and idle_reports >= 4:
                     if reconnected:
                         machine_state.set_status(
-                            "SD job ended while disconnected — verify machine",
+                            "SD job ended while disconnected — re-home required",
                             busy=False,
                         )
                         log_controller_event("sd_job_ended_while_disconnected", filename=_SD_FILENAME)
@@ -2117,6 +2182,8 @@ class CNCController:
         explicitly_idle = False
         for _ in range(3):
             response = self.send_command_with_response("M27", timeout=5.0)
+            if not self.connected:
+                return
             responses.append(response)
             progress = _parse_sd_progress(response)
             if progress:
@@ -2132,11 +2199,11 @@ class CNCController:
         if not progress and explicitly_idle:
             self._clear_sd_job_state()
             machine_state.set_status(
-                "SD job ended while disconnected — verify machine",
+                "SD job ended while disconnected — re-home required",
                 busy=False,
             )
             log_controller_event(
-                "sd_job_reconnect_requires_verification",
+                "sd_job_ended_while_disconnected",
                 filename=_SD_FILENAME,
                 response=response_summary[:500],
             )
@@ -2159,6 +2226,8 @@ class CNCController:
             )
             return
 
+        if not self.connected:
+            return
         position, total_bytes = progress
         self.sd_job_active = True
         self.sd_job_disconnected = False

@@ -8,7 +8,7 @@ Software tests do not establish physical safety.
 - Two people present: one operator and one observer at the physical E-stop.
 - Cutter removed or Z constrained above the material for initial motion tests.
 - Clear table, known-good 24 V supply, and current Marlin configuration archived.
-- USB/DTR reset behavior and controller SD card available for observation.
+- USB CDC/DTR behavior and controller SD card available for observation.
 - Record application, controller, and toolpath logs for the entire session.
 
 ## Procedure
@@ -27,10 +27,16 @@ Software tests do not establish physical safety.
    dimensions, A-axis tangent direction, corner lifts, safe Z, and return home.
 6. During separate sacrificial jobs, disconnect USB: during SD upload, after
    `M24` write/before acknowledgement, during playback, during pause, and during
-   `M27` polling. Confirm the UI never reports stopped solely because USB was
-   lost and preserves the SD recovery marker.
-7. Reconnect after each fault. Confirm only an explicit `M27` active report
-   resumes monitoring and only explicit `Not SD printing` clears the marker.
+   `M27` polling. During playback, confirm fabCNC first retries the ordinary
+   `M115` probes with DTR deasserted, then performs one brief CDC DTR toggle
+   after five failures while the Marlin USB device is present. Verify this does not
+   reboot Marlin or stop SD playback, and that `M27` active progress restores monitoring. Confirm a
+   missing USB device is rediscovered automatically and USB loss alone is never
+   reported as proof that the job stopped.
+7. Confirm an explicit `M27` active report resumes progress monitoring, while
+   `Not SD printing` clears the marker and requires re-homing. Confirm repeated
+   handshake failure after the DTR fallback exposes manual Retry and an
+   ambiguous `M27` status remains uncertain.
 8. Test Pause, Resume, and Stop. Verify Marlin's actual `M25`, `M24`, `M524`,
    and `M410` semantics and that lost acknowledgements require physical
    verification rather than optimistic state changes.

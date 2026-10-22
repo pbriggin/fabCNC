@@ -3103,7 +3103,9 @@ function emitShapeUpdate(shapeName) {
     if (window.emitEvent) {
         window.emitEvent('shape_moved', {
             shapeName: shapeName,
-            newPoints: points
+            newPoints: points,
+            segmentBreaks: data.segmentBreaks || [0],
+            segmentTypes: data.segmentTypes || []
         });
     }
 }
@@ -3250,6 +3252,18 @@ function pasteShape() {
                 drawNotchMarksForShape(actualName);
                 emitNotchesChanged(actualName);
             }
+        }
+
+        // Keep the server-side canvas snapshot in sync so a page refresh can
+        // rebuild this pasted shape with the same segment boundaries. Notch
+        // edge indices depend on those boundaries when the canvas is restored.
+        if (window.emitEvent && shapeData[actualName]) {
+            window.emitEvent('shape_added', {
+                shapeName: actualName,
+                newPoints: shapeData[actualName].originalMmPoints,
+                segmentBreaks: shapeData[actualName].segmentBreaks,
+                segmentTypes: shapeData[actualName].segmentTypes
+            });
         }
     });
 
@@ -3712,14 +3726,33 @@ function computeCardinalNodes(shapeName) {
 function normalizeNotchNode(shapeName, savedNode, freshNodes = null) {
     if (!savedNode || !Number.isFinite(Number(savedNode.edgeIdx))) return null;
     const nodes = freshNodes || computeCardinalNodes(shapeName);
-    const freshNode = nodes.find(n => n.edgeIdx === Number(savedNode.edgeIdx));
-    if (!freshNode) return null;
+    const edgeIdx = Number(savedNode.edgeIdx);
+    const freshNode = nodes.find(n => n.edgeIdx === edgeIdx);
+    if (freshNode) {
+        return {
+            ...savedNode,
+            edgeIdx: freshNode.edgeIdx,
+            x: freshNode.x,
+            y: freshNode.y,
+            isJunction: freshNode.isJunction === true
+        };
+    }
+
+    // Older server snapshots can contain pasted shapes without their segment
+    // metadata. If that means the exact node cannot be regenerated, keep the
+    // notch and anchor it to the corresponding point on the restored outline.
+    // This avoids deleting saved notches while still preventing detached marks.
+    const points = shapeData[shapeName] && shapeData[shapeName].originalMmPoints;
+    if (!points || points.length < 2) return null;
+    const isJunction = savedNode.isJunction === true;
+    const rawIndex = isJunction ? Math.round(edgeIdx + 0.5) : Math.round(edgeIdx);
+    const pointIndex = Math.max(0, Math.min(points.length - 1, rawIndex));
     return {
         ...savedNode,
-        edgeIdx: freshNode.edgeIdx,
-        x: freshNode.x,
-        y: freshNode.y,
-        isJunction: freshNode.isJunction === true
+        edgeIdx,
+        x: points[pointIndex][0],
+        y: points[pointIndex][1],
+        isJunction
     };
 }
 
@@ -3728,11 +3761,17 @@ function buildNotchMap(shapeName, savedNodes) {
     const freshNodes = computeCardinalNodes(shapeName);
     const restored = new Map();
     let skipped = 0;
+    let reanchored = 0;
     savedNodes.forEach(savedNode => {
         const node = normalizeNotchNode(shapeName, savedNode, freshNodes);
-        if (node) restored.set(node.edgeIdx, node);
-        else skipped++;
+        if (node) {
+            restored.set(node.edgeIdx, node);
+            if (!freshNodes.some(candidate => candidate.edgeIdx === node.edgeIdx)) reanchored++;
+        } else skipped++;
     });
+    if (reanchored > 0) {
+        console.warn(`Re-anchored ${reanchored} notch(es) for ${shapeName} using outline points; segment metadata was unavailable`);
+    }
     if (skipped > 0) {
         console.warn(`Skipped ${skipped} stale notch(es) for ${shapeName}; no matching edge exists`);
     }
@@ -3746,16 +3785,9 @@ function refreshNotchPositions(shapeName) {
     const notches = shapeNotches[shapeName];
     if (!notches || notches.size === 0) return;
     const fresh = computeCardinalNodes(shapeName);
-    if (fresh.length === 0) return;
-    const byEdge = new Map(fresh.map(n => [n.edgeIdx, n]));
-    notches.forEach((nk, edgeIdx) => {
-        const fn = byEdge.get(edgeIdx);
-        if (fn) {
-            nk.x = fn.x;
-            nk.y = fn.y;
-        }
-        // If edgeIdx is no longer produced (segments changed), leave the stale
-        // anchor in place rather than dropping the notch silently.
+    notches.forEach(nk => {
+        const normalized = normalizeNotchNode(shapeName, nk, fresh);
+        if (normalized) Object.assign(nk, normalized);
     });
 }
 
@@ -3768,6 +3800,19 @@ function showNotchNodes() {
         if (!data || !data.originalMmPoints) return;
 
         const nodes = computeCardinalNodes(shapeName);
+        const activeNotches = shapeNotches[shapeName];
+        if (activeNotches) {
+            activeNotches.forEach((notch, edgeIdx) => {
+                if (!nodes.some(node => node.edgeIdx === edgeIdx)) {
+                    nodes.push({
+                        edgeIdx,
+                        x: notch.x,
+                        y: notch.y,
+                        isJunction: notch.isJunction === true
+                    });
+                }
+            });
+        }
         nodes.forEach((nodeKey) => {
             const cx = toCanvasX(nodeKey.x);
             const cy = toCanvasY(nodeKey.y);
