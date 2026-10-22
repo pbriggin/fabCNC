@@ -4715,6 +4715,42 @@ def main_page():
         _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
         _prev_controls_disabled_look: list = [False]  # last CSS-toggled disconnected-look state sent to browser
+        _disconnect_started_at_local: list[float | None] = [None]
+        _disconnect_alert_delay_seconds = 60.0
+
+        def _connection_alert_state(current_status: str) -> tuple[bool, bool]:
+            """Return (alert_due, disconnected), delaying only disconnect alerts."""
+            disconnected = (
+                not cnc_controller.connected
+                or current_status == 'Disconnected'
+                or current_status.startswith('Retrying connection')
+            )
+            now = time.monotonic()
+            if disconnected:
+                started_at = cnc_controller.disconnect_started_at
+                if started_at is None:
+                    if _disconnect_started_at_local[0] is None:
+                        _disconnect_started_at_local[0] = now
+                    started_at = _disconnect_started_at_local[0]
+                else:
+                    _disconnect_started_at_local[0] = started_at
+                urgent_machine_alert = (
+                    cnc_controller.reset_required
+                    or current_status == 'E-Stop Reset Required'
+                )
+                return (
+                    now - started_at >= _disconnect_alert_delay_seconds
+                    or urgent_machine_alert,
+                    True,
+                )
+
+            _disconnect_started_at_local[0] = None
+            immediate_recovery_alert = (
+                cnc_controller.reset_required
+                or cnc_controller.serial_uncertain
+                or current_status == 'E-Stop Reset Required'
+            )
+            return immediate_recovery_alert, False
 
         # Dimmed backdrop so the hand-rolled alert cards below stand out from the page
         # instead of blending into the dark theme.
@@ -4841,12 +4877,12 @@ def main_page():
                 connection_alert_title.set_text('Controller disconnected')
                 if cnc_controller.reconnect_thread_active:
                     connection_alert_subtitle.set_text(
-                        'Trying normal M115 probes, then a CDC DTR pulse if needed.'
+                        'Automatically reconnecting and checking machine status.'
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'If USB is present but Marlin does not answer, fabCNC briefly toggles USB CDC DTR '
-                        'once, then keeps it asserted and asks M27 before restoring progress monitoring.'
+                        'fabCNC briefly toggles USB CDC DTR as soon as the USB device is available, '
+                        'then asks M27 before restoring progress monitoring.'
                     )
                 else:
                     connection_alert_subtitle.set_text(
@@ -4892,14 +4928,8 @@ def main_page():
             if current_status == 'SD job ended while disconnected — re-home required':
                 ui.notify(current_status, type='warning', timeout=8000)
                 return
-            if (
-                not cnc_controller.connected
-                or current_status == 'Disconnected'
-                or current_status.startswith('Retrying connection')
-                or cnc_controller.reset_required
-                or cnc_controller.serial_uncertain
-                or current_status == 'E-Stop Reset Required'
-            ):
+            alert_due, _ = _connection_alert_state(current_status)
+            if alert_due:
                 _connection_alert_dismissed[0] = False
                 _show_connection_alert()
 
@@ -4942,10 +4972,9 @@ def main_page():
 
             current_status = machine_state.status_text
             prev = _prev_status_local[0]
+            alert_due, disconnected = _connection_alert_state(current_status)
             needs_disconnect_alert = (
-                (not cnc_controller.connected)
-                or current_status == 'Disconnected'
-                or current_status.startswith('Retrying connection')
+                disconnected
                 or cnc_controller.reset_required
                 or cnc_controller.serial_uncertain
                 or current_status == 'E-Stop Reset Required'
@@ -4961,15 +4990,18 @@ def main_page():
                 )
 
             # Track whether we've ever seen a disconnect since this page loaded.
-            if needs_disconnect_alert:
+            if disconnected or alert_due:
                 _was_disconnected[0] = True
                 _resume_dialog_shown[0] = False
+
+            if alert_due:
                 if not _connection_alert_dismissed[0]:
                     _show_connection_alert()
                     showing_connection_alert = True
             else:
                 connection_alert.set_visibility(False)
-                _connection_alert_dismissed[0] = False  # reset so the next disconnect shows fresh
+                if not disconnected:
+                    _connection_alert_dismissed[0] = False  # reset so the next disconnect shows fresh
 
             if update_state['available'] and not update_state['acknowledged'] and not showing_connection_alert:
                 update_alert.set_visibility(True)
