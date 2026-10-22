@@ -2580,7 +2580,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
-        elif current_status == sd_verification_status:
+        elif current_status == sd_ended_status:
             status_pill.style('background: #3d3a2d; border: 1px solid #6a5a3d;')
             status_icon.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
             status_label.classes(add='text-yellow-4', remove='text-green-4 text-red-5')
