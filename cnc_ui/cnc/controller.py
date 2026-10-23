@@ -6,13 +6,13 @@ This implementation communicates with Marlin firmware via serial.
 
 import json
 import math
+import os
 import re
 import time
 import threading
 import uuid
 from pathlib import Path
 import serial
-import serial.tools.list_ports
 from typing import Optional
 from .state import machine_state
 import logging
@@ -22,14 +22,16 @@ _RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
 _SD_JOB_STATE_FILE = Path(__file__).parent.parent / 'sd_job_state.json'
 
 # Marlin line-number protocol parsing. Used while a job is streaming so we can
-# recover from corrupted bytes on the serial link (under-voltage hiccups, USB
-# noise, etc.) via Marlin's built-in Resend mechanism.
+# recover from corrupted bytes on the serial link via Marlin's built-in Resend
+# mechanism.
 _OK_N_RE = re.compile(r"^ok\s+N(\d+)", re.IGNORECASE)
 _RESEND_RE = re.compile(r"Resend\s*:\s*(\d+)", re.IGNORECASE)
 _LAST_LINE_RE = re.compile(r"Last\s*Line\s*:\s*(\d+)", re.IGNORECASE)
 _SD_PROGRESS_RE = re.compile(r"SD printing byte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _SD_FILENAME = "FABJOB.GCO"  # Short 8.3-compatible name supported by Marlin SD builds.
 _SD_UPLOAD_POLL_INTERVAL = 0.001  # 1 ms; don't wait the normal 10 ms between SD-write acks.
+SERIAL_PORT = os.environ.get("FABCNC_SERIAL_PORT", "/dev/ttyAMA0")
+SERIAL_BAUDRATE = int(os.environ.get("FABCNC_SERIAL_BAUDRATE", "115200"))
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -115,7 +117,14 @@ class CNCController:
     Provides jogging, homing, and job execution capabilities.
     """
     
-    def __init__(self, baudrate: int = 250000, *, auto_connect: bool = True):
+    def __init__(
+        self,
+        baudrate: int = SERIAL_BAUDRATE,
+        *,
+        port: str = SERIAL_PORT,
+        auto_connect: bool = True,
+    ):
+        self.serial_device = port
         self.baudrate = baudrate
         self.serial_port: Optional[serial.Serial] = None
         self.stop_requested = False
@@ -128,13 +137,9 @@ class CNCController:
         self.connected = False
         self.disconnect_started_at: Optional[float] = None
         self.reconnect_thread_active = False
-        self._dtr_recovery_lock = threading.Lock()
-        self._dtr_pulse_requested = False
-        self.dtr_recovery_active = False
         self.reset_required = False
         self.last_controller_error = ""
-        self.last_serial_device = ""
-        self.last_candidate_count = 0
+        self.last_serial_device = self.serial_device
         self.emergency_parser_supported: Optional[bool] = None
         self.read_loop_paused = False
         self.reader_paused = threading.Event()
@@ -205,122 +210,92 @@ class CNCController:
             except Exception as exc:
                 logger.warning(f"Could not read saved SD job state: {exc}")
         if auto_connect:
-            connected = self._auto_connect()
+            connected = self._connect_configured_port()
             if self.connected and self.sd_job_disconnected:
                 self._start_sd_job_reconciliation()
             elif not connected and self.sd_job_disconnected:
                 # A restarted Pi can inherit an active SD-job marker while
                 # Marlin is still cutting. Enter the same automatic recovery
-                # path used for a live USB disconnect.
+                # path used for a live serial disconnect.
                 log_controller_event(
                     "serial_auto_reconnect_started",
                     reason="restored_sd_job_state",
                 )
-                self._start_reconnect_loop(pulse_dtr=True)
+                self._start_reconnect_loop()
     
-    def _auto_connect(
+    def _connect_configured_port(
         self,
-        strict_candidates: bool = False,
-        assert_dtr: bool | None = None,
-        pulse_dtr: bool = False,
     ) -> bool:
-        """Auto-detect and connect to the first available serial port."""
+        """Open only the configured controller UART and verify Marlin with M115."""
         try:
-            # List all available serial ports
-            ports = serial.tools.list_ports.comports()
-            candidate_ports = [p for p in ports if self._is_candidate_marlin_port(p)]
-            self.last_candidate_count = len(candidate_ports)
-            if not candidate_ports:
-                if strict_candidates:
-                    return False
-                candidate_ports = ports
-            
-            for port in candidate_ports:
-                # Try connecting to this port
-                try:
-                    logger.info(f"Trying to connect to {port.device} ({port.description})")
-                    # Keep the most recent USB tty so recovery can target it
-                    # even if handshake fails before a full connection is established.
-                    self.last_serial_device = str(port.device)
-                    self.serial_port = serial.Serial(
-                        port=None,
-                        baudrate=self.baudrate,
-                        timeout=2.0,
-                        write_timeout=2.0,
-                        xonxoff=False,
-                        rtscts=False,
-                        dsrdtr=False,
-                    )
-                    # The SKR Pro exposes Marlin through native USB CDC. DTR is
-                    # the CDC host-ready state, not a wired MCU reset. Keep it
-                    # asserted during recovery; the requested one-time pulse is
-                    # applied after the first USB port is successfully opened.
-                    if assert_dtr is None:
-                        assert_dtr = not self.sd_job_disconnected
-                    self.serial_port.dtr = bool(assert_dtr)
-                    self.serial_port.port = port.device
-                    self.serial_port.open()
-                    if self._probe_marlin_on_open_port(port.device, pulse_dtr=pulse_dtr):
-                        logger.info(f"Connected to Marlin on {port.device}")
-                        self.connected = True
-                        self.disconnect_started_at = None
-                        self.serial_uncertain = False
-                        self.last_serial_device = str(port.device)
-                        self.reset_required = False
-                        self.last_controller_error = ""
-                        
-                        # Start background thread to read responses
-                        self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
-                        self.read_thread.start()
-                        
-                        if not self.sd_job_disconnected:
-                            # Enable position reporting and restore the normal
-                            # acceleration only when no SD print may be active.
-                            self._send_command("M114")
-                            self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
-                        
-                        return True
-                    else:
-                        self.serial_port.close()
-                        
-                except (serial.SerialException, OSError) as e:
-                    logger.warning(f"Failed to connect to {port.device}: {e}")
-                    if self.serial_port and self.serial_port.is_open:
-                        self.serial_port.close()
-                    continue
-            
-            logger.error("No Marlin controller found on any serial port")
+            self.last_serial_device = self.serial_device
+            logger.info(
+                "Opening Marlin serial port %s at %s baud",
+                self.serial_device,
+                self.baudrate,
+            )
+            # Set DTR low before opening the port. UART recovery must not pulse
+            # the USB CDC host-ready line or reset the controller.
+            self.serial_port = serial.Serial(
+                port=None,
+                baudrate=self.baudrate,
+                timeout=2.0,
+                write_timeout=2.0,
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False,
+            )
+            self.serial_port.dtr = False
+            self.serial_port.port = self.serial_device
+            self.serial_port.open()
+            if not self._probe_marlin_on_open_port(self.serial_device):
+                self.serial_port.close()
+                self.serial_port = None
+                return False
+
+            logger.info("Connected to Marlin on %s", self.serial_device)
+            self.connected = True
+            self.disconnect_started_at = None
+            self.serial_uncertain = False
+            self.reset_required = False
+            self.last_controller_error = ""
+
+            # Start background thread to read responses
+            self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self.read_thread.start()
+
+            if not self.sd_job_disconnected:
+                # Enable position reporting and restore the normal
+                # acceleration only when no SD print may be active.
+                self._send_command("M114")
+                self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
+
+            return True
+        except (serial.SerialException, OSError) as e:
+            logger.warning("Failed to connect to Marlin on %s: %s", self.serial_device, e)
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+            self.serial_port = None
             return False
-            
         except Exception as e:
-            logger.error(f"Error during auto-connect: {e}")
+            logger.error("Error during connection to Marlin on %s: %s", self.serial_device, e)
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+            self.serial_port = None
             return False
 
     def _probe_marlin_on_open_port(
         self,
         port_device: str,
-        *,
-        pulse_dtr: bool = False,
     ) -> bool:
         """Try to elicit a Marlin banner/version reply on an already-open serial port."""
         if not self.serial_port or not self.serial_port.is_open:
             return False
 
-        # DTR is set before opening the port. Recovery may also toggle it once
-        # to re-establish USB CDC host-ready; it does not issue G-code.
+        # Flush stale bytes before probing. UART reconnect does not use DTR.
         try:
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-            if pulse_dtr:
-                with self._dtr_recovery_lock:
-                    pulse_pending = self._dtr_pulse_requested
-                if pulse_pending:
-                    self.serial_port.dtr = False
-                    time.sleep(0.15)
-                    self.serial_port.dtr = True
-                    with self._dtr_recovery_lock:
-                        self._dtr_pulse_requested = False
-                    log_controller_event("serial_dtr_pulse", device=port_device)
         except Exception:
             pass
 
@@ -360,26 +335,11 @@ class CNCController:
 
         return False
 
-    @staticmethod
-    def _is_candidate_marlin_port(port) -> bool:
-        """Return True for likely Marlin USB serial devices, False for SoC UARTs."""
-        device = str(getattr(port, 'device', '') or '').lower()
-        desc = str(getattr(port, 'description', '') or '').lower()
-
-        if device.startswith('/dev/ttyacm') or device.startswith('/dev/ttyusb'):
-            return True
-        if 'marlin' in desc or 'skr' in desc or 'usb' in desc:
-            return True
-        # VID/PID present usually indicates USB-backed adapters.
-        if getattr(port, 'vid', None) is not None and getattr(port, 'pid', None) is not None:
-            return True
-        return False
-    
     def _handle_disconnect(self) -> None:
-        """Handle an unexpected serial disconnection (e.g. controller power loss or USB drop)."""
+        """Handle an unexpected serial disconnection or controller power loss."""
         if not self.connected:
             return  # Already handled — avoid duplicate logging
-        logger.error("Serial connection lost — controller disconnected (power loss or USB fault)")
+        logger.error("Serial connection lost — controller disconnected or powered off")
         self.connected = False
         if self.disconnect_started_at is None:
             self.disconnect_started_at = time.monotonic()
@@ -391,15 +351,14 @@ class CNCController:
         machine_state.set_status("Disconnected", busy=False)
         log_controller_event("serial_disconnect")
         if self.sd_job_active:
-            # An SD print may continue without the Pi's USB link. Do not offer
+            # An SD print may continue without the Pi's serial link. Do not offer
             # the serial-stream resume flow, which uses line acknowledgements.
-            # Pulse USB CDC DTR as soon as a USB port is available, then ask
-            # Marlin whether playback is still active before deciding what
-            # the UI should report.
+            # Reopen the configured UART, then ask Marlin whether playback is
+            # still active before deciding what the UI should report.
             self.sd_job_disconnected = True
             log_controller_event("sd_job_host_disconnected", filename=_SD_FILENAME)
             log_controller_event("serial_auto_reconnect_started", reason="sd_job_disconnect")
-            self._start_reconnect_loop(pulse_dtr=True)
+            self._start_reconnect_loop()
         elif not self.sd_uploading and not self.reset_required:
             self._save_resume_state()
         if _log_uploader:
@@ -414,19 +373,8 @@ class CNCController:
         # have been interrupted mid-stream. SD playback has its own automatic
         # reconnect path above and is reconciled with M27 before job state is restored.
 
-    def _start_reconnect_loop(self, pulse_dtr: bool = False) -> None:
-        """Retry USB discovery, applying a requested CDC DTR pulse on first open."""
-        if pulse_dtr:
-            with self._dtr_recovery_lock:
-                pulse_was_pending = self._dtr_pulse_requested
-                self._dtr_pulse_requested = True
-            self.dtr_recovery_active = True
-            if not pulse_was_pending:
-                log_controller_event(
-                    "serial_dtr_recovery_started",
-                    immediate=True,
-                    device=self.last_serial_device or None,
-                )
+    def _start_reconnect_loop(self) -> None:
+        """Retry the configured UART directly and reconcile any active SD job."""
         if self.reconnect_thread_active:
             return
 
@@ -446,79 +394,52 @@ class CNCController:
                     self.serial_port = None
 
                 attempt = 0
-                no_candidate_streak = 0
                 failed_attempt_streak = 0
                 while not self.connected:
                     attempt += 1
-                    machine_state.set_status(
-                        "Retrying connection with DTR..." if self.dtr_recovery_active
-                        else "Retrying connection...",
-                        busy=False,
-                    )
+                    machine_state.set_status("Retrying connection...", busy=False)
                     logger.info(f"Reconnection attempt {attempt}...")
-                    with self._dtr_recovery_lock:
-                        pulse_this_attempt = self._dtr_pulse_requested
-                    if self._auto_connect(
-                        strict_candidates=True,
-                        assert_dtr=(self.dtr_recovery_active or not self.sd_job_disconnected),
-                        pulse_dtr=pulse_this_attempt,
-                    ):
+                    if self._connect_configured_port():
                         logger.info(f"Reconnected on attempt {attempt}")
                         self.stop_requested = False
                         log_controller_event("serial_reconnect", attempt=attempt)
                         if self.sd_job_disconnected:
                             self._reconcile_sd_job_after_reconnect()
                             if not self.connected:
-                                # The USB link dropped again while M27 was
+                                # The serial link dropped again while M27 was
                                 # reconciling. Keep this same retry loop alive.
                                 failed_attempt_streak += 1
                                 logger.warning(
                                     "Controller disconnected while reconciling SD job status"
                                 )
                             else:
-                                self.dtr_recovery_active = False
                                 return
                         else:
-                            self.dtr_recovery_active = False
                             machine_state.set_status("Idle", busy=False)
                             return
 
                     else:
                         failed_attempt_streak += 1
 
-                    if self.last_candidate_count == 0:
-                        no_candidate_streak += 1
-                        if no_candidate_streak == 1:
-                            logger.warning(
-                                "No Marlin USB serial device detected; waiting for controller to enumerate"
-                            )
-                            log_controller_event("serial_reconnect_no_usb_device")
-                        if self.sd_job_disconnected:
-                            # DTR cannot help until Linux sees the USB device.
-                            # Keep waiting so a returning SKR can be recovered
-                            # without another operator click.
-                            failed_attempt_streak = 0
-                            time.sleep(3.0)
-                            continue
-                    else:
-                        no_candidate_streak = 0
+                    if self.sd_job_disconnected:
+                        # The UART device may stay present while the controller
+                        # is powered off. Keep retrying so a possible SD print
+                        # can be reconciled with M27 when Marlin returns.
+                        failed_attempt_streak = 0
+                        time.sleep(3.0)
+                        continue
 
                     if failed_attempt_streak >= 5:
                         machine_state.set_status("Disconnected", busy=False)
                         log_controller_event(
                             "serial_reconnect_aborted",
                             attempts=attempt,
-                            no_usb_device=(self.last_candidate_count == 0),
-                            dtr_recovery_active=self.dtr_recovery_active,
+                            device=self.serial_device,
                         )
                         return
 
                     time.sleep(3.0)
             finally:
-                with self._dtr_recovery_lock:
-                    self._dtr_pulse_requested = False
-                if not self.connected:
-                    self.dtr_recovery_active = False
                 self.reconnect_thread_active = False
 
         # Reserve ownership before starting the worker so rapid UI clicks cannot
@@ -539,7 +460,7 @@ class CNCController:
                 disconnected_during_check = not self.connected and self.sd_job_disconnected
                 self.reconnect_thread_active = False
                 if disconnected_during_check:
-                    self._start_reconnect_loop(pulse_dtr=True)
+                    self._start_reconnect_loop()
 
         threading.Thread(
             target=_worker,
@@ -547,16 +468,16 @@ class CNCController:
             name="sd-job-status-reconciliation",
         ).start()
 
-    def attempt_reconnect(self, *, pulse_dtr: bool = False) -> None:
-        """Retry Marlin discovery, optionally pulsing USB CDC DTR immediately."""
+    def attempt_reconnect(self) -> None:
+        """Retry Marlin on the configured serial port."""
         if self.connected:
             return
         machine_state.set_status("Retrying connection...", busy=False)
         log_controller_event(
             "serial_reconnect_requested",
-            pulse_dtr=pulse_dtr,
+            device=self.serial_device,
         )
-        self._start_reconnect_loop(pulse_dtr=pulse_dtr)
+        self._start_reconnect_loop()
 
     def reset_controller_after_estop(self) -> bool:
         """Clear a Marlin halt state after the physical E-stop has been released."""
@@ -1162,7 +1083,7 @@ class CNCController:
                         
                 time.sleep(0.005)  # 5ms polling rate
             except OSError as e:
-                if e.errno == 5:  # EIO — USB/serial device disconnected (e.g. SKR board power loss)
+                if e.errno == 5:  # EIO — serial device disconnected (e.g. SKR board power loss)
                     logger.error(f"Serial device disconnected (EIO) — likely controller power loss: {e}")
                     self._handle_disconnect()
                     break
@@ -2103,7 +2024,7 @@ class CNCController:
         initially_active: bool = False,
         reconnected: bool = False,
     ) -> None:
-        """Poll M27 while Marlin runs from SD; retain state if USB disconnects."""
+        """Poll M27 while Marlin runs from SD; retain state if serial disconnects."""
         active_seen = initially_active
         idle_reports = 0
         missed_reports = 0
@@ -2153,7 +2074,7 @@ class CNCController:
             time.sleep(0.5)
 
         if not self.connected and self.sd_job_disconnected:
-            # USB loss must not clear the marker needed to query M27 on reconnect.
+            # Serial loss must not clear the marker needed to query M27 on reconnect.
             return
 
         if self.stop_requested:
@@ -2242,17 +2163,22 @@ class CNCController:
                 )
                 return
 
-            # A timeout, malformed reply, or unrelated response is not a
-            # machine-state result. Leave the serial link connected and ask
-            # again; only Marlin's M27 answer decides whether playback runs.
-            if attempt == 1 or attempt % 10 == 0:
-                log_controller_event(
-                    "sd_job_reconnect_status_pending",
-                    filename=_SD_FILENAME,
-                    attempt=attempt,
-                    response=response[:500],
-                )
-            time.sleep(1.0)
+            # A timeout, malformed reply, or unrelated response does not
+            # establish whether Marlin is still cutting. Keep the recovery
+            # marker and require operator verification instead of looping
+            # forever or inferring that playback stopped.
+            self._mark_serial_uncertain(
+                "Could not confirm Marlin SD job status after reconnect",
+                response,
+                stop_motion=False,
+            )
+            log_controller_event(
+                "sd_job_reconnect_status_ambiguous",
+                filename=_SD_FILENAME,
+                attempt=attempt,
+                response=response[:500],
+            )
+            return
 
     def _execute_job(self, gcode_lines: list[str], is_job: bool = True) -> None:
         """

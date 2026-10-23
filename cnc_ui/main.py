@@ -2497,7 +2497,7 @@ async def resume_disconnect_job():
 
 
 async def retry_controller_connection():
-    """Retry Marlin controller discovery after power or USB is restored."""
+    """Retry the configured Marlin serial connection after controller power is restored."""
     if _deny_cloudflare_control():
         return
     log_event('system', 'controller_reconnect_clicked')
@@ -2506,7 +2506,7 @@ async def retry_controller_connection():
 
 
 async def force_controller_recovery():
-    """Recover a stopped machine with M999 or reconnect using a USB CDC DTR pulse."""
+    """Recover a stopped machine with M999 or reconnect to the configured UART."""
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
@@ -2527,8 +2527,8 @@ async def force_controller_recovery():
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    ui.notify('Trying USB reconnect with a CDC DTR pulse…', type='info', timeout=6000)
-    await asyncio.to_thread(cnc_controller.attempt_reconnect, pulse_dtr=True)
+    ui.notify('Retrying the controller UART connection…', type='info', timeout=6000)
+    await asyncio.to_thread(cnc_controller.attempt_reconnect)
 
 
 async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None):
@@ -3300,8 +3300,8 @@ def main_page():
                     straighten: 'Move the machine to the fabric-taping position',
                     wifi_off: 'Remove saved Wi-Fi connections',
                     lock_reset: 'Reset the UI password', article: 'Show recent service logs',
-                    info: 'Show fabCNC service status', usb: 'List attached USB devices',
-                    cable: 'List available serial ports',
+                    info: 'Show fabCNC service status',
+                    cable: 'Show the configured controller UART',
                     align_horizontal_center: 'Align horizontal centers',
                     align_vertical_center: 'Align vertical centers',
                     horizontal_distribute: 'Distribute horizontally',
@@ -3338,7 +3338,7 @@ def main_page():
                     'Send Logs to Dev': 'Package and securely send diagnostic logs to the developer',
                     'Download Logs': 'Download a diagnostic log bundle to this computer',
                     'Retry Connection': 'Try connecting to the machine controller again',
-                    'Force Recovery': 'Recover an uncertain controller state or reconnect with a USB CDC DTR pulse',
+                    'Force Recovery': 'Recover an uncertain controller state or retry the controller UART connection',
                     Acknowledge: 'Dismiss this update notice without installing now',
                     'Update Now': 'Install the available fabCNC software update now',
                     Unlock: 'Sign in to unlock the fabCNC controls',
@@ -4729,8 +4729,7 @@ def main_page():
                                 ('View Logs', 'sudo journalctl -u fabcnc -n 200 --no-pager', 'article'),
                                 ('Service Status', 'sudo systemctl status fabcnc', 'info'),
                                 ('Restart Service', 'sudo systemctl restart fabcnc', 'restart_alt'),
-                                ('List USB', 'lsusb', 'usb'),
-                                ('Serial Ports', 'ls -la /dev/ttyACM* /dev/ttyUSB* 2>/dev/null', 'cable'),
+                                ('UART Device', 'ls -la /dev/ttyAMA0 /dev/serial0 2>/dev/null', 'cable'),
                             ]
                             with ui.row().classes('gap-1 flex-wrap'):
                                 for label, cmd, icon in quick_commands:
@@ -4806,7 +4805,7 @@ def main_page():
         )
         with connection_alert:
             with ui.row().classes('items-start gap-3 no-wrap w-full'):
-                connection_alert_icon = ui.icon('usb_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
+                connection_alert_icon = ui.icon('link_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
                 with ui.column().classes('gap-1 w-full'):
                     connection_alert_title = ui.label('Controller disconnected') \
                         .classes('text-h6').style('color: var(--md-text-primary);')
@@ -4835,8 +4834,8 @@ def main_page():
                             .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'If the USB link is disconnected, this briefly toggles USB CDC DTR and '
-                            'it does not issue a Marlin reset or stop command. If Marlin is connected '
+                            'If the UART link is disconnected, this retries the configured serial port '
+                            'and does not issue a Marlin reset or stop command. If Marlin is connected '
                             'but halted, recovery may send M999.'
                         ).classes('text-body2').style('color:#ccc; white-space:normal;')
                         with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
@@ -4910,7 +4909,7 @@ def main_page():
                 retry_connection_button.set_visibility(False)
                 force_recovery_button.set_text('Verify Controller')
             elif cnc_controller.sd_job_disconnected:
-                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
                 if cnc_controller.reconnect_thread_active:
                     connection_alert_subtitle.set_text(
@@ -4918,25 +4917,25 @@ def main_page():
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'fabCNC briefly toggles USB CDC DTR as soon as the USB device is available, '
-                        'then asks M27 before restoring progress monitoring.'
+                        'fabCNC retries the configured UART directly, then asks M27 before '
+                        'restoring progress monitoring.'
                     )
                 else:
                     connection_alert_subtitle.set_text(
-                        'Automatic USB handshake and CDC DTR recovery did not reconnect.'
+                        'Automatic UART reconnection did not reconnect.'
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'Restore USB when safe, then click Retry Connection. fabCNC will ask M27 '
+                        'Restore controller power and UART wiring, then click Retry Connection. fabCNC will ask M27 '
                         'before deciding whether the job is still active.'
                     )
                 retry_connection_button.set_visibility(not cnc_controller.reconnect_thread_active)
                 # Keep manual controller recovery unavailable while autonomous
-                # SD playback may still be active; automatic DTR recovery only
-                # changes the USB CDC host-ready state, then verifies with M27.
+                # SD playback may still be active; automatic UART recovery
+                # reconnects and verifies playback with M27.
                 force_recovery_button.set_visibility(False)
             else:
-                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
                 connection_alert_subtitle.set_text('Follow these steps to reconnect:')
                 connection_alert_steps.set_text(
@@ -4948,7 +4947,7 @@ def main_page():
                 force_recovery_button.set_text(
                     'Reset Controller' if cnc_controller.connected and cnc_controller.reset_required
                     else 'Verify Controller' if cnc_controller.connected and cnc_controller.serial_uncertain
-                    else 'Reconnect with DTR Pulse'
+                    else 'Reconnect UART'
                 )
             if not cnc_controller.sd_job_disconnected or (
                 cnc_controller.connected and cnc_controller.serial_uncertain

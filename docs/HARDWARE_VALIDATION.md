@@ -8,7 +8,7 @@ Software tests do not establish physical safety.
 - Two people present: one operator and one observer at the physical E-stop.
 - Cutter removed or Z constrained above the material for initial motion tests.
 - Clear table, known-good 24 V supply, and current Marlin configuration archived.
-- USB CDC/DTR behavior and controller SD card available for observation.
+- Raspberry Pi GPIO UART wired to SKR Pro UART3, and controller SD card available for observation.
 - Record application, controller, and toolpath logs for the entire session.
 
 ## Procedure
@@ -25,18 +25,16 @@ Software tests do not establish physical safety.
    Verify units, `M92`, pinion/rack configuration, and EEPROM values.
 5. Run a non-cutting square and curved/bulged-polyline fixture. Verify shape
    dimensions, A-axis tangent direction, corner lifts, safe Z, and return home.
-6. During separate sacrificial jobs, disconnect USB: during SD upload, after
+6. During separate sacrificial jobs, disconnect the UART: during SD upload, after
    `M24` write/before acknowledgement, during playback, during pause, and during
-   `M27` polling. During playback, confirm fabCNC first retries the ordinary
-   `M115` probes with DTR deasserted, then performs one brief CDC DTR toggle
-   after five failures while the Marlin USB device is present. Verify this does not
-   reboot Marlin or stop SD playback, and that `M27` active progress restores monitoring. Confirm a
-   missing USB device is rediscovered automatically and USB loss alone is never
-   reported as proof that the job stopped.
+   `M27` polling. During playback, confirm fabCNC retries `/dev/ttyAMA0` directly
+   without DTR toggles or USB enumeration waits, then asks `M27` before restoring
+   progress monitoring. Verify UART loss alone is never reported as proof that
+   the job stopped.
 7. Confirm an explicit `M27` active report resumes progress monitoring, while
    `Not SD printing` clears the marker and requires re-homing. Confirm repeated
-   handshake failure after the DTR fallback exposes manual Retry and an
-   ambiguous `M27` status remains uncertain.
+   handshake failure keeps the possible SD-job marker intact and an ambiguous
+   `M27` status remains uncertain.
 8. Test Pause, Resume, and Stop. Verify Marlin's actual `M25`, `M24`, `M524`,
    and `M410` semantics and that lost acknowledgements require physical
    verification rather than optimistic state changes.
