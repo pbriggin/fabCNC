@@ -11,7 +11,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cnc_ui"))
 
 from cnc import controller as controller_module  # noqa: E402
-from cnc.controller import CNCController, parse_homing_sensitivity_response  # noqa: E402
+from cnc.controller import (  # noqa: E402
+    CNCController,
+    parse_homing_sensitivity_response,
+    parse_tmc_prewarn_response,
+)
 from cnc.state import machine_state  # noqa: E402
 
 
@@ -118,6 +122,36 @@ class ControllerSafetyTests(unittest.TestCase):
             {"X": 2, "Y": 1},
             parse_homing_sensitivity_response(response),
         )
+
+    def test_m911_response_parser_reads_latched_driver_prewarn_flags(self):
+        response = (
+            "X temperature prewarn triggered: false\n"
+            "Y temperature prewarn triggered: true\n"
+            "Y2 temperature prewarn triggered: false\n"
+            "ok"
+        )
+
+        self.assertEqual(
+            {"X": False, "Y": True, "Y2": False},
+            parse_tmc_prewarn_response(response),
+        )
+
+    def test_job_end_m911_check_flags_the_driver_and_logs_title_data(self):
+        controller = connected_controller([
+            "X temperature prewarn triggered: false",
+            "Y temperature prewarn triggered: true",
+            "ok",
+        ])
+
+        result = controller._read_tmc_prewarn_at_job_end()
+
+        self.assertEqual("prewarn", result["status"])
+        self.assertEqual(["Y"], result["drivers"])
+        self.assertEqual(
+            "Job complete — TMC PREWARN LATCHED: Y",
+            controller._job_completion_title(result),
+        )
+        self.assertEqual(["M911"], controller.serial_port.writes)
 
     def test_homing_sensitivity_apply_sends_m914_then_m500(self):
         controller = connected_controller(

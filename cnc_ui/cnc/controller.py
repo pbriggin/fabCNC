@@ -5,6 +5,7 @@ This implementation communicates with Marlin firmware via serial.
 """
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -13,7 +14,24 @@ import threading
 import uuid
 from pathlib import Path
 import serial
-from typing import Optional
+from typing import Callable, Optional
+from .firmware_update import (
+    BFTProtocolError,
+    CONTROL_CLOSE,
+    CONTROL_PROTOCOL,
+    CONTROL_SYNC,
+    FILE_TRANSFER_PROTOCOL,
+    PROTOCOL_VERSION,
+    TRANSFER_ABORT,
+    TRANSFER_CLOSE,
+    TRANSFER_OPEN,
+    TRANSFER_QUERY,
+    TRANSFER_WRITE,
+    decode_packet,
+    encode_packet,
+    parse_ack,
+    parse_sync_response,
+)
 from .state import machine_state
 import logging
 
@@ -32,6 +50,9 @@ _SD_FILENAME = "FABJOB.GCO"  # Short 8.3-compatible name supported by Marlin SD 
 _SD_UPLOAD_POLL_INTERVAL = 0.001  # 1 ms; don't wait the normal 10 ms between SD-write acks.
 SERIAL_PORT = os.environ.get("FABCNC_SERIAL_PORT", "/dev/ttyAMA0")
 SERIAL_BAUDRATE = int(os.environ.get("FABCNC_SERIAL_BAUDRATE", "115200"))
+_FIRMWARE_FILENAME = "firmware.bin"
+_MAX_FIRMWARE_SIZE = 1024 * 1024
+_BFT_PACKET_RETRIES = 3
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -84,6 +105,20 @@ def parse_homing_sensitivity_response(response: str) -> dict[str, int]:
         match = pattern.match(line)
         if match:
             values[match.group(1).upper()] = int(match.group(2))
+    return values
+
+
+def parse_tmc_prewarn_response(response: str) -> dict[str, bool]:
+    """Parse Marlin M911 output into per-driver overtemperature prewarn flags."""
+    values: dict[str, bool] = {}
+    pattern = re.compile(
+        r"^\s*([A-Z][A-Z0-9]*)\s+temperature\s+prewarn\s+triggered:\s*(true|false)\s*$",
+        re.IGNORECASE,
+    )
+    for line in response.splitlines():
+        match = pattern.match(line)
+        if match:
+            values[match.group(1).upper()] = match.group(2).lower() == "true"
     return values
 
 
@@ -152,7 +187,23 @@ class CNCController:
         # re-entrant lock prevents jog/home/console/monitor operations from
         # interleaving modal commands or stealing one another's responses.
         self.operation_lock = threading.RLock()
+        # Coordinates firmware ownership with the priority Stop reservation.
+        # Stop must remain able to bypass operation_lock during a job.
+        self.firmware_update_gate = threading.Lock()
         self.serial_uncertain = False
+        self.firmware_update_active = False
+        self.firmware_update_generation = 0
+        self.firmware_reboot_pending = False
+        self._firmware_status_lock = threading.Lock()
+        self._firmware_update_status = {
+            "active": False,
+            "stage": "Idle",
+            "progress": 0.0,
+            "message": "No firmware update has been started.",
+            "filename": None,
+            "size": 0,
+            "sha256": None,
+        }
         self.rehome_required = False
         # A software Stop may leave the dual-Y motors in a state that makes the
         # next sensorless home trigger asymmetrically. Release and re-energize
@@ -170,6 +221,7 @@ class CNCController:
         self.homing_timeout = 180.0
         self.stream_ack_timeout = 30.0
         self.stream_final_ack_timeout = 10.0
+        self.firmware_reconnect_timeout = 120.0
 
         # Line-number protocol state (active only while streaming_mode is True).
         # Each streamed line is wrapped as "N<n> <cmd>*<xor-cs>". Marlin will
@@ -264,7 +316,7 @@ class CNCController:
             self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self.read_thread.start()
 
-            if not self.sd_job_disconnected:
+            if not self.sd_job_disconnected and not self.firmware_update_active:
                 # Enable position reporting and restore the normal
                 # acceleration only when no SD print may be active.
                 self._send_command("M114")
@@ -339,13 +391,25 @@ class CNCController:
         """Handle an unexpected serial disconnection or controller power loss."""
         if not self.connected:
             return  # Already handled — avoid duplicate logging
+        firmware_reboot = self.firmware_reboot_pending
         logger.error("Serial connection lost — controller disconnected or powered off")
         self.connected = False
         if self.disconnect_started_at is None:
             self.disconnect_started_at = time.monotonic()
-        self.serial_uncertain = True
         self.homed = False
         self.rehome_required = True
+        if firmware_reboot:
+            self.serial_uncertain = False
+            self.stop_requested = False
+            self.pause_requested = False
+            self._set_firmware_update_status(
+                "Reconnecting", 96.0, "Controller rebooted; waiting for Marlin to return."
+            )
+            log_controller_event("firmware_update_expected_disconnect")
+            self._start_reconnect_loop()
+            return
+
+        self.serial_uncertain = True
         self.stop_requested = True  # Abort any running job
         self.ok_event.set()   # Unblock any flow-control waits in _execute_job
         machine_state.set_status("Disconnected", busy=False)
@@ -414,6 +478,12 @@ class CNCController:
                                 )
                             else:
                                 return
+                        elif self.firmware_update_active:
+                            self._set_firmware_update_status(
+                                "Reconnecting", 98.0,
+                                "Controller reconnected; verifying the firmware response."
+                            )
+                            return
                         else:
                             machine_state.set_status("Idle", busy=False)
                             return
@@ -426,6 +496,13 @@ class CNCController:
                         # is powered off. Keep retrying so a possible SD print
                         # can be reconciled with M27 when Marlin returns.
                         failed_attempt_streak = 0
+                        time.sleep(3.0)
+                        continue
+
+                    if self.firmware_update_active:
+                        # M997 may take longer than an ordinary serial reset.
+                        # The update transaction owns recovery until its own
+                        # explicit verification deadline expires.
                         time.sleep(3.0)
                         continue
 
@@ -470,6 +547,9 @@ class CNCController:
 
     def attempt_reconnect(self) -> None:
         """Retry Marlin on the configured serial port."""
+        if self.firmware_update_active:
+            logger.warning("Manual reconnect rejected during firmware update")
+            return
         if self.connected:
             return
         machine_state.set_status("Retrying connection...", busy=False)
@@ -481,33 +561,41 @@ class CNCController:
 
     def reset_controller_after_estop(self) -> bool:
         """Clear a Marlin halt state after the physical E-stop has been released."""
-        if not self.connected:
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
             return False
+        with self.operation_lock:
+            if self._firmware_operation_blocked(generation) or not self.connected:
+                return False
+            response = self._exchange_locked("M999", 5.0)
+            if not _sd_response_ok(response):
+                self.last_controller_error = response.strip() or "No response from M999"
+                log_controller_event(
+                    "controller_reset_failed",
+                    response=self.last_controller_error[:500],
+                )
+                return False
 
-        response = self.send_command_with_response("M999", timeout=5.0)
-        if not _sd_response_ok(response):
-            self.last_controller_error = response.strip() or "No response from M999"
-            log_controller_event(
-                "controller_reset_failed",
-                response=self.last_controller_error[:500],
-            )
-            return False
-
-        self.reset_required = False
-        self.last_controller_error = ""
-        self.stop_requested = False
-        self.pause_requested = False
-        self.homed = False
-        self.rehome_required = True
-        machine_state.reset_job()
-        machine_state.set_status("Idle", busy=False)
-        self._send_command("M114")
-        log_controller_event("controller_reset", response=response[:500])
-        return True
+            self.reset_required = False
+            self.last_controller_error = ""
+            self.stop_requested = False
+            self.pause_requested = False
+            self.homed = False
+            self.rehome_required = True
+            machine_state.reset_job()
+            machine_state.set_status("Idle", busy=False)
+            self._send_command("M114")
+            log_controller_event("controller_reset", response=response[:500])
+            return True
 
     def recover_uncertain_state(self) -> bool:
         """Re-establish serial ordering after the operator confirms motion stopped."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return False
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False
             if not self.connected or self.reset_required or self.sd_uploading:
                 return False
             if not self._quiesce_before_stream():
@@ -870,9 +958,500 @@ class CNCController:
         self.read_loop_paused = False
         self.reader_paused.clear()
     
+    def firmware_update_snapshot(self) -> dict[str, object]:
+        """Return a thread-safe view of the current or most recent update."""
+        with self._firmware_status_lock:
+            return dict(self._firmware_update_status)
+
+    def _set_firmware_update_status(
+        self, stage: str, progress: float, message: str,
+        *, filename: Optional[str] = None, size: Optional[int] = None,
+        sha256: Optional[str] = None,
+    ) -> None:
+        with self._firmware_status_lock:
+            status = self._firmware_update_status
+            status.update(
+                active=self.firmware_update_active,
+                stage=stage,
+                progress=max(0.0, min(100.0, float(progress))),
+                message=message,
+            )
+            if filename is not None:
+                status["filename"] = filename
+            if size is not None:
+                status["size"] = size
+            if sha256 is not None:
+                status["sha256"] = sha256
+        if self.firmware_update_active:
+            machine_state.set_status(f"Firmware update: {stage}", busy=True, paused=False)
+
+    def _firmware_operation_blocked(self, generation: Optional[int] = None) -> bool:
+        return self.firmware_update_active or (
+            generation is not None and generation != self.firmware_update_generation
+        )
+
+    def _write_binary_payload(self, payload: bytes) -> bool:
+        """Write one BFT frame without passing binary bytes through G-code paths."""
+        if not self.serial_port or not self.serial_port.is_open:
+            return False
+        try:
+            with self.serial_write_lock:
+                written = self.serial_port.write(payload)
+                self.serial_port.flush()
+            if written != len(payload):
+                self._mark_serial_uncertain(
+                    "Partial BFT packet write", f"Wrote {written} of {len(payload)} bytes"
+                )
+                return False
+            return True
+        except (serial.SerialException, OSError) as exc:
+            logger.error("BFT serial write failed: %s", exc)
+            self._handle_disconnect()
+            return False
+        except Exception as exc:
+            logger.exception("BFT serial write failed")
+            self._mark_serial_uncertain("BFT serial write failed", str(exc))
+            return False
+
+    def _read_bft_sync_response(self, timeout: float = 8.0) -> str:
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            if not self.serial_port or not self.serial_port.is_open:
+                break
+            try:
+                if self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode("ascii", errors="replace").strip()
+                    if not line:
+                        continue
+                    lines.append(line)
+                    log_serial_rx(line, mode="bft_sync")
+                    if line.lower().startswith(("ss", "fe")):
+                        break
+                else:
+                    time.sleep(0.005)
+            except (serial.SerialException, OSError) as exc:
+                self._handle_disconnect()
+                lines.append(f"serial read failed: {exc}")
+                break
+        return "\n".join(lines)
+
+    def _read_bft_packet_response(
+        self, sync: int, *, timeout: float = 8.0, require_pft: bool = False,
+    ) -> tuple[tuple[str, int] | None, list[str]]:
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        ack: tuple[str, int] | None = None
+        last_input_at = time.monotonic()
+        while time.monotonic() < deadline:
+            if not self.serial_port or not self.serial_port.is_open:
+                break
+            try:
+                if self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode("ascii", errors="replace").strip()
+                    if not line:
+                        continue
+                    lines.append(line)
+                    last_input_at = time.monotonic()
+                    log_serial_rx(line, mode="bft_packet")
+                    parsed = parse_ack(line)
+                    if parsed:
+                        kind, number = parsed
+                        if kind in {"rs", "fe"}:
+                            return parsed, lines
+                        if number == sync:
+                            ack = parsed
+                    if ack and require_pft and any(item.startswith("PFT:") for item in lines):
+                        return ack, lines
+                    if ack and not require_pft and time.monotonic() - last_input_at >= 0.05:
+                        return ack, lines
+                else:
+                    if ack and not require_pft and time.monotonic() - last_input_at >= 0.05:
+                        return ack, lines
+                    time.sleep(0.005)
+            except (serial.SerialException, OSError) as exc:
+                self._handle_disconnect()
+                lines.append(f"serial read failed: {exc}")
+                break
+        return ack, lines
+
+    def _send_bft_packet(
+        self, sync: int, protocol: int, packet_type: int, payload: bytes = b"", *,
+        require_pft: bool = False, timeout: float = 8.0,
+    ) -> list[str]:
+        packet = encode_packet(sync, protocol, packet_type, payload)
+        for attempt in range(_BFT_PACKET_RETRIES + 1):
+            if not self._write_binary_payload(packet):
+                raise BFTProtocolError("Could not write the complete BFT packet")
+            log_serial_tx(
+                "BFT packet", mode="binary", sync=sync, protocol=protocol,
+                packet_type=packet_type, packet_bytes=len(packet),
+                packet_sha256=hashlib.sha256(packet).hexdigest(),
+                retransmission=attempt > 0,
+            )
+            ack, lines = self._read_bft_packet_response(
+                sync, timeout=timeout, require_pft=require_pft
+            )
+            if ack and ack[0] == "rs":
+                if ack[1] != sync:
+                    self._mark_serial_uncertain("Unexpected BFT resend sequence", "\n".join(lines))
+                    raise BFTProtocolError("Marlin requested a different BFT sequence")
+                if attempt >= _BFT_PACKET_RETRIES:
+                    raise BFTProtocolError("BFT packet exceeded the retransmission limit")
+                continue
+            if ack and ack[0] == "fe":
+                self._mark_serial_uncertain("Marlin rejected a BFT packet", "\n".join(lines))
+                raise BFTProtocolError("Marlin reset the BFT connection after a packet error")
+            if ack != ("ok", sync):
+                self._mark_serial_uncertain(
+                    "BFT packet acknowledgement was missing or ambiguous", "\n".join(lines)
+                )
+                raise BFTProtocolError("BFT packet acknowledgement was not confirmed")
+            if require_pft and not any(item.startswith("PFT:") for item in lines):
+                self._mark_serial_uncertain("BFT operation response was missing", "\n".join(lines))
+                raise BFTProtocolError("Marlin did not confirm the BFT operation")
+            return lines
+        raise BFTProtocolError("BFT packet retry loop ended unexpectedly")
+
+    def install_firmware(
+        self,
+        path: str | os.PathLike[str],
+        progress_callback: Optional[Callable[[str, float, str], None]] = None,
+    ) -> tuple[bool, str]:
+        """Upload firmware.bin over BFT, request one reboot, then verify Marlin."""
+        image_path = Path(path)
+        try:
+            if image_path.suffix.lower() != ".bin" or not image_path.is_file():
+                return False, "Select a readable .bin firmware file."
+            image = image_path.read_bytes()
+        except OSError as exc:
+            return False, f"Could not read firmware file: {exc}"
+        if not image or len(image) > _MAX_FIRMWARE_SIZE:
+            return False, "Firmware must be between 1 byte and 1 MiB."
+        firmware_name_match = re.search(rb"FIRMWARE_NAME:([^\x00\r\n]+)", image)
+        if not firmware_name_match:
+            return False, "Firmware image does not contain a Marlin firmware identity."
+        expected_firmware_name = firmware_name_match.group(1).decode("ascii", errors="replace")
+        expected_firmware_name = expected_firmware_name.split(" SOURCE_CODE_URL:", 1)[0].strip()
+        if not expected_firmware_name:
+            return False, "Firmware image does not contain a usable Marlin firmware identity."
+
+        image_sha256 = hashlib.sha256(image).hexdigest()
+        image_name = image_path.name
+        initial_state = machine_state.snapshot()
+        generation = self.firmware_update_generation
+
+        with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False, "Another firmware update owns the controller."
+            job_thread_active = bool(self.job_thread and self.job_thread.is_alive())
+            if (
+                not self.connected
+                or not self.serial_port
+                or not self.serial_port.is_open
+                or not machine_state.is_idle()
+                or job_thread_active
+                or self.sd_uploading
+                or self.sd_job_active
+                or self.sd_job_disconnected
+                or self.streaming_mode
+                or self.pause_requested
+                or self.stop_requested
+                or self.serial_uncertain
+                or self.reset_required
+                or self.reconnect_thread_active
+            ):
+                return False, "Firmware update requires a connected, known, idle controller with no active job or recovery."
+
+            with self.firmware_update_gate:
+                if not machine_state.is_idle() or self.stop_requested:
+                    return False, "Firmware update requires a connected, known, idle controller with no active job or recovery."
+                self.firmware_update_generation += 1
+                self.firmware_update_active = True
+                self.firmware_reboot_pending = False
+                self._set_firmware_update_status(
+                    "Preparing", 1.0, "Checking firmware capabilities and SD storage.",
+                    filename=image_name, size=len(image), sha256=image_sha256,
+                )
+            log_controller_event(
+                "firmware_update_start", filename=image_name,
+                target=_FIRMWARE_FILENAME, size=len(image), sha256=image_sha256,
+            )
+
+            binary_mode_started = False
+            transfer_open_attempted = False
+            reboot_requested = False
+            success = False
+            current_sync: Optional[int] = None
+            failure_message = ""
+
+            def report(stage: str, progress: float, message: str) -> None:
+                self._set_firmware_update_status(stage, progress, message)
+                if progress_callback:
+                    try:
+                        progress_callback(stage, progress, message)
+                    except Exception:
+                        logger.exception("Firmware update progress callback failed")
+
+            try:
+                report("Preparing", 2.0, "Querying Marlin firmware capabilities.")
+                response = self._exchange_locked("M115", 10.0)
+                required_caps = (
+                    "Cap:BINARY_FILE_TRANSFER:1",
+                    "Cap:SDCARD:1",
+                    "Cap:SD_WRITE:1",
+                )
+                missing_caps = [cap for cap in required_caps if cap.lower() not in response.lower()]
+                if not _sd_response_ok(response) or missing_caps:
+                    detail = ", ".join(missing_caps) if missing_caps else response or "No response"
+                    raise BFTProtocolError(f"Required Marlin firmware upload capabilities are missing: {detail}")
+
+                response = self._exchange_locked("M21", 10.0)
+                if not _sd_response_ok(response):
+                    raise BFTProtocolError(f"Could not mount the onboard SD card: {response or 'No response'}")
+
+                response = self._exchange_locked("M28 B1", 10.0)
+                if not _sd_response_ok(response) or "switching to binary protocol" not in response.lower():
+                    if not any(
+                        line.strip().lower().startswith("error")
+                        or "unknown command" in line.lower()
+                        for line in response.splitlines()
+                    ):
+                        self._mark_serial_uncertain(
+                            "M28 B1 response was missing or ambiguous", response
+                        )
+                    raise BFTProtocolError(
+                        f"Marlin did not enter Binary File Transfer mode: {response or 'No response'}"
+                    )
+                binary_mode_started = True
+                report("Uploading", 8.0, f"Opening {_FIRMWARE_FILENAME} on the controller SD card.")
+
+                with self.read_lock:
+                    if not self._pause_reader(timeout=5.0):
+                        self._mark_serial_uncertain("Could not acquire serial ownership for firmware transfer")
+                        raise BFTProtocolError("Could not pause the normal serial reader")
+                    try:
+                        sync_packet = encode_packet(0, CONTROL_PROTOCOL, CONTROL_SYNC)
+                        if not self._write_binary_payload(sync_packet):
+                            raise BFTProtocolError("Could not send the BFT synchronization packet")
+                        log_serial_tx(
+                            "BFT sync", mode="binary", packet_bytes=len(sync_packet),
+                            packet_sha256=hashlib.sha256(sync_packet).hexdigest(),
+                        )
+                        sync_response = self._read_bft_sync_response()
+                        sync_line = next(
+                            (line for line in sync_response.splitlines() if line.lower().startswith("ss")),
+                            "",
+                        )
+                        if not sync_line:
+                            self._mark_serial_uncertain("BFT synchronization response was missing", sync_response)
+                            raise BFTProtocolError("Marlin did not complete BFT synchronization")
+                        sync_info = parse_sync_response(sync_line)
+                        if sync_info.version != PROTOCOL_VERSION:
+                            raise BFTProtocolError(f"Unsupported BFT protocol version: {sync_info.version}")
+                        if sync_info.buffer_size < 1:
+                            raise BFTProtocolError("Marlin reported an invalid BFT buffer size")
+                        current_sync = sync_info.sync
+
+                        query_lines = self._send_bft_packet(
+                            current_sync, FILE_TRANSFER_PROTOCOL, TRANSFER_QUERY, require_pft=True
+                        )
+                        current_sync = (current_sync + 1) & 0xFF
+                        query_response = next(
+                            (line for line in query_lines if line.startswith("PFT:version:")), ""
+                        )
+                        if not query_response or ":compression:" not in query_response:
+                            raise BFTProtocolError("Marlin returned an invalid BFT query response")
+
+                        open_payload = b"\x00\x00" + _FIRMWARE_FILENAME.encode("ascii") + b"\x00"
+                        transfer_open_attempted = True
+                        open_lines = self._send_bft_packet(
+                            current_sync, FILE_TRANSFER_PROTOCOL, TRANSFER_OPEN,
+                            open_payload, require_pft=True,
+                        )
+                        current_sync = (current_sync + 1) & 0xFF
+                        if "PFT:success" not in open_lines:
+                            raise BFTProtocolError(
+                                f"Marlin could not open {_FIRMWARE_FILENAME}: {'; '.join(open_lines)}"
+                            )
+
+                        chunk_size = min(sync_info.buffer_size, 96)
+                        if chunk_size < 1:
+                            raise BFTProtocolError("Marlin reported an unusable BFT payload size")
+                        for offset in range(0, len(image), chunk_size):
+                            chunk = image[offset : offset + chunk_size]
+                            write_lines = self._send_bft_packet(
+                                current_sync, FILE_TRANSFER_PROTOCOL, TRANSFER_WRITE, chunk
+                            )
+                            current_sync = (current_sync + 1) & 0xFF
+                            if any(line == "PFT:ioerror" for line in write_lines):
+                                raise BFTProtocolError("Marlin reported an SD write error")
+                            progress = 8.0 + (offset + len(chunk)) / len(image) * 78.0
+                            report(
+                                "Uploading", progress,
+                                f"Transferred {min(offset + len(chunk), len(image)):,} of {len(image):,} bytes.",
+                            )
+
+                        report("Verifying upload", 88.0, "Closing and checking the firmware file.")
+                        close_lines = self._send_bft_packet(
+                            current_sync, FILE_TRANSFER_PROTOCOL, TRANSFER_CLOSE, require_pft=True
+                        )
+                        current_sync = (current_sync + 1) & 0xFF
+                        if "PFT:success" not in close_lines:
+                            raise BFTProtocolError(
+                                f"Marlin did not confirm closing {_FIRMWARE_FILENAME}: {'; '.join(close_lines)}"
+                            )
+                        close_session_lines = self._send_bft_packet(
+                            current_sync, CONTROL_PROTOCOL, CONTROL_CLOSE
+                        )
+                        if not any(parse_ack(line) == ("ok", current_sync) for line in close_session_lines):
+                            self._mark_serial_uncertain(
+                                "BFT session close acknowledgement was missing",
+                                "\n".join(close_session_lines),
+                            )
+                            raise BFTProtocolError("Marlin did not confirm exiting BFT mode")
+                        current_sync = (current_sync + 1) & 0xFF
+                        binary_mode_started = False
+                    except Exception:
+                        if (
+                            current_sync is not None
+                            and transfer_open_attempted
+                            and self.serial_port and self.serial_port.is_open
+                            and not self.serial_uncertain
+                        ):
+                            try:
+                                abort_lines = self._send_bft_packet(
+                                    current_sync, FILE_TRANSFER_PROTOCOL, TRANSFER_ABORT,
+                                    require_pft=True, timeout=3.0,
+                                )
+                                current_sync = (current_sync + 1) & 0xFF
+                                if "PFT:success" in abort_lines:
+                                    self._send_bft_packet(
+                                        current_sync, CONTROL_PROTOCOL, CONTROL_CLOSE, timeout=3.0
+                                    )
+                                    binary_mode_started = False
+                            except Exception:
+                                logger.exception("Could not cleanly abort the BFT transfer")
+                        elif (
+                            current_sync is not None and binary_mode_started
+                            and self.serial_port and self.serial_port.is_open
+                            and not self.serial_uncertain
+                        ):
+                            try:
+                                self._send_bft_packet(
+                                    current_sync, CONTROL_PROTOCOL, CONTROL_CLOSE, timeout=3.0
+                                )
+                                binary_mode_started = False
+                            except Exception:
+                                logger.exception("Could not close the BFT session")
+                        raise
+                    finally:
+                        self._resume_reader()
+
+                report("Verifying upload", 92.0, f"Checking the onboard SD listing for {_FIRMWARE_FILENAME}.")
+                listing = self._exchange_locked("M20 F", 15.0)
+                if (
+                    not _sd_response_ok(listing)
+                    or re.search(r"(?<![A-Za-z0-9_.-])firmware\.bin(?![A-Za-z0-9_.-])", listing, re.I) is None
+                ):
+                    raise BFTProtocolError(
+                        f"Marlin did not list the completed {_FIRMWARE_FILENAME}: {listing or 'No response'}"
+                    )
+
+                report("Rebooting controller", 94.0, "Upload verified; requesting the firmware reboot once.")
+                self.firmware_reboot_pending = True
+                if not self._send_command("M997"):
+                    self.firmware_reboot_pending = False
+                    raise BFTProtocolError("M997 could not be written; firmware state is unknown")
+                reboot_requested = True
+                # M997 restarts STM32 without a useful serial acknowledgement.
+                # Route the expected reset through the existing reconnect path.
+                if self.connected:
+                    self._handle_disconnect()
+                report("Reconnecting", 96.0, "Waiting for Marlin to restart and answer M115.")
+
+                deadline = time.monotonic() + self.firmware_reconnect_timeout
+                while time.monotonic() < deadline and not self.connected:
+                    time.sleep(0.1)
+                if not self.connected or not self.serial_port or not self.serial_port.is_open:
+                    failure_message = "Controller did not reconnect after M997; firmware state is unknown."
+                    self._mark_serial_uncertain("Firmware update reconnect timed out", failure_message)
+                    raise BFTProtocolError(failure_message)
+
+                report("Reconnecting", 99.0, "Controller is back; verifying Marlin capabilities.")
+                response = self._exchange_locked("M115", 12.0)
+                if (
+                    not _sd_response_ok(response)
+                    or "FIRMWARE_NAME" not in response
+                    or f"FIRMWARE_NAME:{expected_firmware_name}" not in response
+                    or any(cap.lower() not in response.lower() for cap in required_caps)
+                ):
+                    self._mark_serial_uncertain(
+                        "Firmware reboot did not report the uploaded Marlin identity and capabilities",
+                        response,
+                    )
+                    raise BFTProtocolError(
+                        "Controller reconnected, but the uploaded Marlin identity and required capabilities were not verified."
+                    )
+
+                self.firmware_reboot_pending = False
+                self.serial_uncertain = False
+                self.reset_required = False
+                self.homed = False
+                self.rehome_required = True
+                self._set_firmware_update_status(
+                    "Success", 100.0,
+                    "Marlin restarted and reported the required capabilities; home before motion.",
+                )
+                machine_state.set_status("Firmware updated — re-home required", busy=False)
+                log_controller_event(
+                    "firmware_update_success", filename=image_name,
+                    target=_FIRMWARE_FILENAME, size=len(image), sha256=image_sha256,
+                    firmware_response=response[:500],
+                )
+                success = True
+                return True, "Firmware update completed and Marlin was verified. Re-home before motion."
+
+            except Exception as exc:
+                failure_message = failure_message or str(exc)
+                logger.exception("Firmware update failed")
+                if reboot_requested:
+                    self.firmware_reboot_pending = False
+                    self.serial_uncertain = True
+                    self.homed = False
+                    self.rehome_required = True
+                    machine_state.set_status("Firmware update failed — verify controller", busy=True)
+                elif not self.serial_uncertain and self.connected:
+                    machine_state.set_status(
+                        initial_state.status_text, busy=initial_state.busy,
+                        paused=initial_state.paused,
+                    )
+                self._set_firmware_update_status(
+                    "Failed", self.firmware_update_snapshot()["progress"], failure_message
+                )
+                log_controller_event(
+                    "firmware_update_failed", filename=image_name,
+                    target=_FIRMWARE_FILENAME, size=len(image), sha256=image_sha256,
+                    after_m997=reboot_requested, serial_uncertain=self.serial_uncertain,
+                    error=failure_message[:500],
+                )
+                return False, failure_message
+            finally:
+                self.firmware_reboot_pending = False
+                self.firmware_update_active = False
+                with self._firmware_status_lock:
+                    self._firmware_update_status["active"] = False
+                if success:
+                    machine_state.set_status("Firmware updated — re-home required", busy=False)
+
     def send_command(self, command: str) -> bool:
         """Send one operator command only while the controller is idle."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return False
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False
             if (not self.connected or not machine_state.is_idle() or self.serial_uncertain
                     or self.rehome_required):
                 logger.warning("Rejected direct command while controller is not safely idle")
@@ -1201,6 +1780,9 @@ class CNCController:
             distance: Distance to jog in mm (or degrees for A)
             feed_rate: Feed rate in mm/min (or deg/min for A)
         """
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return
         axis = str(axis).upper()
         if axis not in {"X", "Y", "Z", "A"}:
             logger.warning("Rejected jog for invalid axis %r", axis)
@@ -1218,6 +1800,8 @@ class CNCController:
             logger.warning("Rejected jog with invalid distance/feed: %r/%r", distance, feed_rate)
             return
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return
             if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
                     or self.rehome_required):
                 logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
@@ -1253,7 +1837,12 @@ class CNCController:
             y_distance: Distance to jog Y axis in mm
             feed_rate: Feed rate in mm/min
         """
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return
             if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
                     or self.rehome_required):
                 logger.warning(f"Cannot jog: idle={machine_state.is_idle()}, connected={self.connected}")
@@ -1293,12 +1882,17 @@ class CNCController:
         Args:
             axis: Axis to home ('X', 'Y', 'Z', or 'A')
         """
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return False
         axis = str(axis).upper()
         if axis not in {"X", "Y", "Z", "A"}:
             logger.warning("Rejected home for invalid axis %r", axis)
             log_controller_event("home_rejected", axis=axis, reason="invalid_axis")
             return False
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False
             if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
                 reason = self._homing_rejection_reason()
                 logger.warning("Rejected home %s: %s", axis, reason)
@@ -1339,7 +1933,12 @@ class CNCController:
 
     def home_all(self) -> bool:
         """Home all axes sequentially."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return False
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False
             if not machine_state.is_idle() or not self.connected or self.serial_uncertain:
                 reason = self._homing_rejection_reason()
                 logger.warning("Rejected home all: %s", reason)
@@ -1380,7 +1979,12 @@ class CNCController:
         Args:
             gcode_lines: List of G-code commands to execute
         """
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return None
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return None
             if (not machine_state.is_idle() or not self.connected or self.serial_uncertain
                     or self.rehome_required):
                 return None
@@ -1405,7 +2009,14 @@ class CNCController:
         source_filename: Optional[str] = None,
     ) -> None:
         """Atomically reserve the machine and start an SD-card job."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            log_controller_event("job_start_rejected", reason="firmware_update_active")
+            return
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                log_controller_event("job_start_rejected", reason="firmware_update_active")
+                return
             self._start_job_locked(gcode_lines, piece_count, source_filename)
 
     @staticmethod
@@ -1444,6 +2055,9 @@ class CNCController:
             piece_count: Number of pieces this job is expected to cut.
         """
         state = machine_state.snapshot()
+        if self.firmware_update_active:
+            log_controller_event("job_start_rejected", reason="firmware_update_active")
+            return
         homes_before_motion = self._job_starts_with_full_home(gcode_lines)
         if (not machine_state.is_idle() or not gcode_lines or not self.connected
                 or self.serial_uncertain
@@ -1496,6 +2110,15 @@ class CNCController:
     
     def pause_job(self) -> None:
         """Pause a running SD print, or pause host streaming for utility moves."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return
+        with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return
+            self._pause_job_locked()
+
+    def _pause_job_locked(self) -> None:
         if machine_state.is_running():
             if self.sd_uploading:
                 logger.warning("Cannot pause while the G-code file is being uploaded")
@@ -1514,6 +2137,15 @@ class CNCController:
     
     def resume_job(self) -> None:
         """Resume a paused SD print or host-streamed utility sequence."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return
+        with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return
+            self._resume_job_locked()
+
+    def _resume_job_locked(self) -> None:
         if machine_state.snapshot().paused:
             if self.sd_job_active:
                 response = self.send_command_with_response("M24", timeout=8.0)
@@ -1529,6 +2161,18 @@ class CNCController:
     
     def stop_job(self) -> bool:
         """Request an immediate stop, then prove the controller is quiescent."""
+        generation = self.firmware_update_generation
+        with self.firmware_update_gate:
+            if self._firmware_operation_blocked(generation):
+                return False
+            self.pause_requested = False
+            self.stop_requested = True
+            self.homed = False
+            self.rehome_required = True
+            self.reset_y_motors_before_home = True
+            machine_state.set_status("Stopping", busy=True, paused=False)
+            log_controller_event("job_stop_requested", priority=True)
+
         stopped_during_job = self.sd_uploading or self.sd_job_active or self.streaming_mode
 
         def upload_stopped_log() -> None:
@@ -1542,14 +2186,6 @@ class CNCController:
                 daemon=True,
                 name="log-upload-on-job-stopped",
             ).start()
-
-        self.pause_requested = False
-        self.stop_requested = True
-        self.homed = False
-        self.rehome_required = True
-        self.reset_y_motors_before_home = True
-        machine_state.set_status("Stopping", busy=True, paused=False)
-        log_controller_event("job_stop_requested", priority=True)
 
         if self.connected and self.sd_uploading:
             # M28 treats all incoming commands as file contents. The upload
@@ -1600,14 +2236,24 @@ class CNCController:
     
     def send_command_with_response(self, command: str, timeout: float = 5.0) -> str:
         """Send a G-code command and return the response."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return "ERROR: Firmware update owns the controller"
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return "ERROR: Firmware update owns the controller"
             if not self.connected:
                 return "ERROR: Not connected to controller"
             return self._exchange_locked(command, timeout)
 
     def send_manual_command(self, command: str, timeout: float = 10.0) -> str:
         """Run an operator console command only in a known idle state."""
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return "ERROR: Firmware update owns the controller"
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return "ERROR: Firmware update owns the controller"
             if (not self.connected or not machine_state.is_idle() or self.sd_uploading
                     or self.sd_job_active or self.serial_uncertain or self.rehome_required):
                 return "ERROR: Controller is not safely idle"
@@ -1650,7 +2296,12 @@ class CNCController:
         y: Optional[int] = None,
         persist_to_eeprom: bool = False,
     ) -> tuple[bool, str]:
+        generation = self.firmware_update_generation
+        if self._firmware_operation_blocked(generation):
+            return False, "ERROR: Firmware update owns the controller"
         with self.operation_lock:
+            if self._firmware_operation_blocked(generation):
+                return False, "ERROR: Firmware update owns the controller"
             return self._set_homing_sensitivity_locked(
                 x=x, y=y, persist_to_eeprom=persist_to_eeprom
             )
@@ -2084,9 +2735,21 @@ class CNCController:
 
     def _finish_sd_job(self) -> None:
         """Mark a fully completed SD print and run existing completion hooks."""
+        prewarn = self._read_tmc_prewarn_at_job_end()
         machine_state.update_job_progress(1.0)
         machine_state.set_status("Complete", busy=False)
-        log_controller_event("job_complete", source="sd_card", filename=_SD_FILENAME)
+        title = self._job_completion_title(prewarn)
+        log_controller_event(
+            "job_complete",
+            title=title,
+            source="sd_card",
+            filename=_SD_FILENAME,
+            job_id=self.current_job_id or None,
+            tmc_prewarn=prewarn["status"],
+            tmc_prewarn_drivers=prewarn["drivers"],
+            tmc_prewarn_response=prewarn["response"][:500],
+        )
+        self._log_tmc_prewarn_result(prewarn)
         if _log_uploader:
             if self._current_job_piece_count > 0:
                 threading.Thread(
@@ -2102,6 +2765,56 @@ class CNCController:
                 name="log-upload-on-complete",
             ).start()
         self._clear_sd_job_state()
+
+    def _read_tmc_prewarn_at_job_end(self) -> dict[str, object]:
+        """Read Marlin's latched M911 flags after a job has finished."""
+        unavailable = {
+            "status": "unavailable",
+            "drivers": [],
+            "response": "M911 check could not be run",
+        }
+        with self.operation_lock:
+            if not self.connected or self.serial_uncertain or self.stop_requested:
+                return unavailable
+            try:
+                response = self._exchange_locked("M911", 8.0)
+            except Exception as exc:
+                logger.exception("M911 prewarn query failed after job completion")
+                return {**unavailable, "response": f"M911 query raised {type(exc).__name__}: {exc}"}
+
+        flags = parse_tmc_prewarn_response(response)
+        if not flags or not _sd_response_ok(response):
+            return {**unavailable, "response": response or "No response"}
+        drivers = sorted(axis for axis, triggered in flags.items() if triggered)
+        return {
+            "status": "prewarn" if drivers else "clear",
+            "drivers": drivers,
+            "response": response,
+        }
+
+    @staticmethod
+    def _job_completion_title(prewarn: dict[str, object]) -> str:
+        if prewarn["status"] == "prewarn":
+            return f"Job complete — TMC PREWARN LATCHED: {', '.join(prewarn['drivers'])}"
+        if prewarn["status"] == "unavailable":
+            return "Job complete — TMC PREWARN check unavailable"
+        return "Job complete — TMC PREWARN clear"
+
+    def _log_tmc_prewarn_result(self, prewarn: dict[str, object]) -> None:
+        if prewarn["status"] == "prewarn":
+            logger.warning(
+                "%s; M911 response: %s",
+                self._job_completion_title(prewarn),
+                prewarn["response"],
+            )
+        elif prewarn["status"] == "unavailable":
+            logger.warning(
+                "%s; M911 response: %s",
+                self._job_completion_title(prewarn),
+                prewarn["response"],
+            )
+        else:
+            logger.info("%s", self._job_completion_title(prewarn))
 
     def _clear_sd_job_state(self) -> None:
         self.sd_job_active = False
@@ -2411,11 +3124,21 @@ class CNCController:
             # Job complete
             if not self.stop_requested and not protocol_failed:
                 logger.info(f"Job complete! ({self.resend_total} resends)")
+                prewarn = None
+                if is_job:
+                    # All streamed acknowledgements have arrived. Release the
+                    # line-numbered response path before the synchronous M911
+                    # query takes serial response ownership.
+                    self.streaming_mode = False
+                    prewarn = self._read_tmc_prewarn_at_job_end()
                 machine_state.set_status("Complete" if is_job else "Idle", busy=False)
                 machine_state.update_job_progress(1.0)
                 if is_job:
+                    title = self._job_completion_title(prewarn)
                     log_controller_event(
                         "job_complete",
+                        title=title,
+                        job_id=self.current_job_id or None,
                         sent=sent_count,
                         acked=self.ok_count,
                         committed=self.committed_line,
@@ -2423,7 +3146,11 @@ class CNCController:
                         elapsed_s=round(time.time() - job_start_time, 2),
                         total_wait_s=round(total_wait_time, 2),
                         max_wait_s=round(max_wait_time, 2),
+                        tmc_prewarn=prewarn["status"],
+                        tmc_prewarn_drivers=prewarn["drivers"],
+                        tmc_prewarn_response=prewarn["response"][:500],
                     )
+                    self._log_tmc_prewarn_result(prewarn)
                     if _log_uploader:
                         if self._current_job_piece_count > 0:
                             threading.Thread(
