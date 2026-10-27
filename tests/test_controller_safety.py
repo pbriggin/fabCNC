@@ -153,6 +153,22 @@ class ControllerSafetyTests(unittest.TestCase):
         )
         self.assertEqual(["M911"], controller.serial_port.writes)
 
+    def test_sd_job_completion_refreshes_position_from_marlin(self):
+        controller = connected_controller([
+            "X:0.00 Y:0.00 Z:0.00 A:0.00 Count X:0 Y:0 Z:0",
+            "ok",
+            "X temperature prewarn triggered: false",
+            "Y temperature prewarn triggered: false",
+            "ok",
+        ])
+        machine_state.update_position(x=860, y=830, z=0, a=0)
+
+        controller._finish_sd_job()
+
+        self.assertEqual(["M114", "M911"], controller.serial_port.writes)
+        self.assertEqual((0.0, 0.0, 0.0, 0.0), machine_state.get_position())
+        self.assertEqual("Complete", machine_state.snapshot().status_text)
+
     def test_homing_sensitivity_apply_sends_m914_then_m500(self):
         controller = connected_controller(
             on_write={"M914 X2 Y1": ["ok"], "M500": ["Settings Stored", "ok"]}

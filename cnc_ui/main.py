@@ -1519,15 +1519,19 @@ async def change_cutting_wheel():
     wheel_z_high = -10.0
     wheel_a = 90
 
-    # ── Step 1: Home, lower to -20, rotate A to -90, disable steppers ──
+    # ── Step 1: Home through the dedicated controller path ──
     ui.notify('Step 1: Homing and moving to the screw-access position…', type='info')
+    if not await asyncio.to_thread(cnc_controller.home_all):
+        ui.notify('Homing failed. Verify the controller before continuing.', type='negative', timeout=8000)
+        return
+
     if not await _run_utility_sequence([
-        'G90', 'G28',
+        'G90',
         f'G1 Z{wheel_z_low} F{plunge:.0f}',
         f'G0 A{wheel_a}',
         'M400', 'M18',
     ]):
-        ui.notify('Could not reach the screw-access position. Verify the controller before continuing.', type='negative', timeout=8000)
+        ui.notify('Homing succeeded, but the screw-access move failed. Verify the controller before continuing.', type='negative', timeout=8000)
         return
 
     if not await _wheel_step_confirm('Step 1 of 3', 'Remove cutting wheel bolt', icon='hardware'):

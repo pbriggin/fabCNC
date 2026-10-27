@@ -2735,6 +2735,7 @@ class CNCController:
 
     def _finish_sd_job(self) -> None:
         """Mark a fully completed SD print and run existing completion hooks."""
+        position = self._read_position_at_job_end()
         prewarn = self._read_tmc_prewarn_at_job_end()
         machine_state.update_job_progress(1.0)
         machine_state.set_status("Complete", busy=False)
@@ -2748,6 +2749,8 @@ class CNCController:
             tmc_prewarn=prewarn["status"],
             tmc_prewarn_drivers=prewarn["drivers"],
             tmc_prewarn_response=prewarn["response"][:500],
+            position_refresh=position["status"],
+            position_response=position["response"][:500],
         )
         self._log_tmc_prewarn_result(prewarn)
         if _log_uploader:
@@ -2765,6 +2768,37 @@ class CNCController:
                 name="log-upload-on-complete",
             ).start()
         self._clear_sd_job_state()
+
+    def _read_position_at_job_end(self) -> dict[str, str]:
+        """Refresh the UI's logical position after Marlin confirms a job is idle."""
+        unavailable = {"status": "unavailable", "response": "M114 check could not be run"}
+        with self.operation_lock:
+            if not self.connected or self.serial_uncertain or self.stop_requested:
+                return unavailable
+            try:
+                response = self._exchange_locked("M114", 8.0)
+            except Exception as exc:
+                logger.exception("M114 position query failed after job completion")
+                return {
+                    "status": "unavailable",
+                    "response": f"M114 query raised {type(exc).__name__}: {exc}",
+                }
+
+        position_line = next(
+            (line for line in response.splitlines() if line.startswith("X:")),
+            None,
+        )
+        if not position_line or not _sd_response_ok(response):
+            logger.warning("Could not refresh Marlin position after job completion: %s", response)
+            return {"status": "unavailable", "response": response or "No response"}
+
+        axes = {part.split(":", 1)[0] for part in position_line.split() if ":" in part}
+        if not {"X", "Y", "Z"}.issubset(axes) or not ({"A", "E"} & axes):
+            logger.warning("Incomplete M114 position after job completion: %s", position_line)
+            return {"status": "unavailable", "response": response}
+
+        self._parse_position(position_line)
+        return {"status": "updated", "response": response}
 
     def _read_tmc_prewarn_at_job_end(self) -> dict[str, object]:
         """Read Marlin's latched M911 flags after a job has finished."""
@@ -3125,11 +3159,13 @@ class CNCController:
             if not self.stop_requested and not protocol_failed:
                 logger.info(f"Job complete! ({self.resend_total} resends)")
                 prewarn = None
+                position = None
                 if is_job:
                     # All streamed acknowledgements have arrived. Release the
                     # line-numbered response path before the synchronous M911
                     # query takes serial response ownership.
                     self.streaming_mode = False
+                    position = self._read_position_at_job_end()
                     prewarn = self._read_tmc_prewarn_at_job_end()
                 machine_state.set_status("Complete" if is_job else "Idle", busy=False)
                 machine_state.update_job_progress(1.0)
@@ -3149,6 +3185,8 @@ class CNCController:
                         tmc_prewarn=prewarn["status"],
                         tmc_prewarn_drivers=prewarn["drivers"],
                         tmc_prewarn_response=prewarn["response"][:500],
+                        position_refresh=position["status"],
+                        position_response=position["response"][:500],
                     )
                     self._log_tmc_prewarn_result(prewarn)
                     if _log_uploader:
