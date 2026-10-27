@@ -17,7 +17,7 @@ The machine uses:
 - Raspberry Pi 5 as the host computer
 - BTT SKR Pro v1.2 controller board
 - Marlin firmware on the SKR Pro
-- USB serial communication between the Raspberry Pi and SKR Pro
+- Raspberry Pi GPIO UART connection (`/dev/ttyAMA0`, 115200 baud) to SKR Pro UART3
 - TMC5160 stepper drivers
 - NEMA 23 stepper motors
 - 24 V motor/control system
@@ -26,7 +26,7 @@ The machine uses:
 - 16-tooth pinion gears
 - Sensorless homing where configured
 
-The host software sends G-code commands to Marlin over USB serial.
+The host software sends G-code commands to Marlin over the hardware UART.
 
 IMPORTANT:
 
@@ -160,7 +160,7 @@ Serial reliability is a known area requiring careful review.
 
 Inspect behavior when:
 
-- USB disconnects
+- Serial disconnects
 - the device disappears
 - the device reappears
 - reads time out
@@ -572,7 +572,7 @@ responses, and completion can be correlated.
 
 ## Recovery expectations
 
-- USB loss during SD playback may leave Marlin cutting autonomously.
+- UART loss during SD playback may leave Marlin cutting autonomously.
 - Never retry a motion command merely because its acknowledgement was lost.
 - Reconnect reconciles a possible SD print with `M27` rather than replaying it.
 - An uncertain non-SD stream is stopped and requires operator verification.
@@ -598,7 +598,7 @@ multi-client job identity.
 
 Passing mocked tests does not replace supervised hardware validation. Before
 deployment, verify the flashed Marlin configuration, sensorless homing,
-steps-per-unit, SD pause/resume/stop semantics, USB CDC/DTR reconnect behavior,
+steps-per-unit, SD pause/resume/stop semantics, UART reconnect behavior,
 controller reset behavior, and physical E-stop operation on the actual SKR Pro
 machine.
 

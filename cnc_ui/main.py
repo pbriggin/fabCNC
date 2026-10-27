@@ -1385,21 +1385,21 @@ def create_job_controls():
                 .classes('flex-1 motion-action') \
                 .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
-                                 backward=lambda _: machine_state.is_running())
+                                 backward=lambda _: machine_state.is_running() and not cnc_controller.firmware_update_active)
             
             ui.button('Resume', icon='play_arrow', on_click=resume_job) \
                 .props('dense flat no-wrap') \
                 .classes('flex-1 motion-action') \
                 .style('font-size: 13px; background-color: #2a2a2a; color: #4a9eff; height: 36px; white-space: nowrap; overflow: hidden;') \
                 .bind_enabled_from(machine_state, '_lock',
-                                 backward=lambda _: machine_state.paused)
+                                 backward=lambda _: machine_state.paused and not cnc_controller.firmware_update_active)
         
         ui.button('Stop', icon='stop', on_click=stop_job) \
             .props('dense flat') \
             .classes('w-full motion-action') \
             .style('font-size: 14px; background-color: #2a2a2a; color: #4a9eff;') \
             .bind_enabled_from(machine_state, '_lock',
-                             backward=lambda _: machine_state.busy)
+                             backward=lambda _: machine_state.busy and not cnc_controller.firmware_update_active)
 
         # Progress bar
         job_progress = ui.linear_progress(value=0, show_value=False).classes('w-full').style('height: 6px; margin-top: 8px;')
@@ -1519,15 +1519,19 @@ async def change_cutting_wheel():
     wheel_z_high = -10.0
     wheel_a = 90
 
-    # ── Step 1: Home, lower to -20, rotate A to -90, disable steppers ──
+    # ── Step 1: Home through the dedicated controller path ──
     ui.notify('Step 1: Homing and moving to the screw-access position…', type='info')
+    if not await asyncio.to_thread(cnc_controller.home_all):
+        ui.notify('Homing failed. Verify the controller before continuing.', type='negative', timeout=8000)
+        return
+
     if not await _run_utility_sequence([
-        'G90', 'G28',
+        'G90',
         f'G1 Z{wheel_z_low} F{plunge:.0f}',
         f'G0 A{wheel_a}',
         'M400', 'M18',
     ]):
-        ui.notify('Could not reach the screw-access position. Verify the controller before continuing.', type='negative', timeout=8000)
+        ui.notify('Homing succeeded, but the screw-access move failed. Verify the controller before continuing.', type='negative', timeout=8000)
         return
 
     if not await _wheel_step_confirm('Step 1 of 3', 'Remove cutting wheel bolt', icon='hardware'):
@@ -2497,7 +2501,7 @@ async def resume_disconnect_job():
 
 
 async def retry_controller_connection():
-    """Retry Marlin controller discovery after power or USB is restored."""
+    """Retry the configured Marlin serial connection after controller power is restored."""
     if _deny_cloudflare_control():
         return
     log_event('system', 'controller_reconnect_clicked')
@@ -2506,7 +2510,7 @@ async def retry_controller_connection():
 
 
 async def force_controller_recovery():
-    """Recover a stopped machine with M999 or reconnect using a USB CDC DTR pulse."""
+    """Recover a stopped machine with M999 or reconnect to the configured UART."""
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
@@ -2527,8 +2531,8 @@ async def force_controller_recovery():
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    ui.notify('Trying USB reconnect with a CDC DTR pulse…', type='info', timeout=6000)
-    await asyncio.to_thread(cnc_controller.attempt_reconnect, pulse_dtr=True)
+    ui.notify('Retrying the controller UART connection…', type='info', timeout=6000)
+    await asyncio.to_thread(cnc_controller.attempt_reconnect)
 
 
 async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None):
@@ -3300,8 +3304,8 @@ def main_page():
                     straighten: 'Move the machine to the fabric-taping position',
                     wifi_off: 'Remove saved Wi-Fi connections',
                     lock_reset: 'Reset the UI password', article: 'Show recent service logs',
-                    info: 'Show fabCNC service status', usb: 'List attached USB devices',
-                    cable: 'List available serial ports',
+                    info: 'Show fabCNC service status',
+                    cable: 'Show the configured controller UART',
                     align_horizontal_center: 'Align horizontal centers',
                     align_vertical_center: 'Align vertical centers',
                     horizontal_distribute: 'Distribute horizontally',
@@ -3338,7 +3342,7 @@ def main_page():
                     'Send Logs to Dev': 'Package and securely send diagnostic logs to the developer',
                     'Download Logs': 'Download a diagnostic log bundle to this computer',
                     'Retry Connection': 'Try connecting to the machine controller again',
-                    'Force Recovery': 'Recover an uncertain controller state or reconnect with a USB CDC DTR pulse',
+                    'Force Recovery': 'Recover an uncertain controller state or retry the controller UART connection',
                     Acknowledge: 'Dismiss this update notice without installing now',
                     'Update Now': 'Install the available fabCNC software update now',
                     Unlock: 'Sign in to unlock the fabCNC controls',
@@ -4267,7 +4271,11 @@ def main_page():
                     
                     # Command input
                     with ui.row().classes('w-full gap-2 items-center mb-3'):
-                        gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined dense')
+                        gcode_input = ui.input('Enter G-code command').classes('flex-1').props('outlined dense') \
+                            .bind_enabled_from(
+                                machine_state, '_lock',
+                                backward=lambda _: machine_state.is_idle() and not cnc_controller.firmware_update_active,
+                            )
                         
                         async def send_gcode():
                             if _deny_cloudflare_control():
@@ -4283,14 +4291,21 @@ def main_page():
                                           response=response[:500])
                                 gcode_input.value = ''
                         
-                        ui.button('Send', on_click=send_gcode, icon='send').props('color=primary dense')
+                        ui.button('Send', on_click=send_gcode, icon='send').props('color=primary dense') \
+                            .bind_enabled_from(
+                                machine_state, '_lock',
+                                backward=lambda _: machine_state.is_idle() and not cnc_controller.firmware_update_active,
+                            )
                     
                     # Common commands
                     ui.label('Quick Commands:').classes('text-body2 mb-1').style('color: #888;')
                     with ui.row().classes('gap-1 mb-3'):
-                        ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M115 to request firmware identity and capabilities')
-                        ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M114 to report the controller’s current axis positions')
-                        ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M503 to report the controller’s active configuration')
+                        ui.button('M115', on_click=lambda: [gcode_input.set_value('M115'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M115 to request firmware identity and capabilities') \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle() and not cnc_controller.firmware_update_active)
+                        ui.button('M114', on_click=lambda: [gcode_input.set_value('M114'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M114 to report the controller’s current axis positions') \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle() and not cnc_controller.firmware_update_active)
+                        ui.button('M503', on_click=lambda: [gcode_input.set_value('M503'), send_gcode()]).props('dense outline').style('font-size: 11px;').tooltip('Send M503 to report the controller’s active configuration') \
+                            .bind_enabled_from(machine_state, '_lock', backward=lambda _: machine_state.is_idle() and not cnc_controller.firmware_update_active)
                     
                     # Response log
                     ui.label('Response Log:').classes('text-body2 mb-1').style('color: #888;')
@@ -4516,6 +4531,179 @@ def main_page():
 
                             ui.separator().classes('my-3')
 
+                            ui.label('Firmware Update').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+                            ui.label(
+                                'Install Marlin firmware on the SKR Pro over the controller UART. '
+                                'Use a firmware.bin built for this machine.'
+                            ).classes('text-caption').style('color: #888;')
+
+                            firmware_client_storage = ui.context.client.storage
+                            firmware_selection_label = ui.label('No firmware file selected.').classes('text-caption') \
+                                .style('color: #aaa; overflow-wrap: anywhere;')
+                            firmware_status_label = ui.label('No firmware update has been started.').classes('text-caption') \
+                                .style('color: #888; white-space: pre-wrap;')
+                            firmware_progress = ui.linear_progress(value=0, show_value=True).classes('w-full')
+
+                            def _remove_staged_firmware() -> None:
+                                staged = firmware_client_storage.pop('firmware_update_file', None)
+                                if isinstance(staged, dict):
+                                    staged_path = staged.get('path')
+                                    if isinstance(staged_path, str):
+                                        try:
+                                            os.unlink(staged_path)
+                                        except FileNotFoundError:
+                                            pass
+                                        except OSError:
+                                            logger.warning('Could not remove temporary firmware file %s', staged_path)
+
+                            async def receive_firmware_upload(event):
+                                import tempfile
+
+                                try:
+                                    upload_file = event.file
+                                    filename = Path(str(upload_file.name)).name
+                                    if Path(filename).suffix.lower() != '.bin':
+                                        ui.notify('Select a .bin firmware file.', type='warning')
+                                        return
+                                    advertised_size = getattr(upload_file, 'size', None)
+                                    if advertised_size is not None and int(advertised_size) > 1024 * 1024:
+                                        ui.notify('Firmware file exceeds the 1 MiB SKR Pro limit.', type='negative')
+                                        return
+                                    content = await upload_file.read()
+                                    if not content or len(content) > 1024 * 1024:
+                                        ui.notify('Firmware must be between 1 byte and 1 MiB.', type='negative')
+                                        return
+                                    with tempfile.NamedTemporaryFile(
+                                        prefix='fabcnc-firmware-', suffix='.bin', delete=False
+                                    ) as staged_file:
+                                        staged_file.write(content)
+                                        staged_path = staged_file.name
+                                    _remove_staged_firmware()
+                                    firmware_client_storage['firmware_update_file'] = {
+                                        'path': staged_path,
+                                        'name': filename,
+                                        'size': len(content),
+                                    }
+                                    firmware_selection_label.set_text(
+                                        f'{filename} · {len(content):,} bytes'
+                                    )
+                                    ui.notify('Firmware file is ready to install.', type='positive')
+                                    log_event(
+                                        'system', 'firmware_file_staged',
+                                        filename=filename, size_bytes=len(content),
+                                    )
+                                except Exception as exc:
+                                    logger.exception('Could not stage firmware upload')
+                                    ui.notify('Could not stage the firmware file.', type='negative')
+                                    log_event('system', 'firmware_file_stage_failed', error=str(exc)[:500])
+
+                            firmware_upload = ui.upload(
+                                label='Choose firmware.bin',
+                                auto_upload=True,
+                                multiple=False,
+                                on_upload=receive_firmware_upload,
+                            ).props('accept=.bin max-file-size=1048576 dense').classes('w-full remote-control-lock')
+
+                            firmware_install_pending = {'value': False}
+
+                            async def install_selected_firmware():
+                                if firmware_install_pending['value'] or cnc_controller.firmware_update_active:
+                                    return
+                                if _deny_cloudflare_control():
+                                    return
+                                staged = firmware_client_storage.get('firmware_update_file')
+                                if not isinstance(staged, dict) or not Path(str(staged.get('path', ''))).is_file():
+                                    ui.notify('Choose a firmware .bin file first.', type='warning')
+                                    return
+                                if not _require_controller_connected():
+                                    return
+
+                                confirmed = {'value': False}
+                                with ui.dialog() as firmware_confirm_dialog, ui.card().style(_DIALOG_CARD_STYLE):
+                                    ui.label('Install SKR Pro Firmware?').classes('text-h6 font-bold')
+                                    ui.separator()
+                                    ui.label(
+                                        'Confirm all three before continuing:\n'
+                                        '• The machine is idle.\n'
+                                        '• Motion will be unavailable during the update.\n'
+                                        '• Do not interrupt power to the controller.'
+                                    ).classes('text-body1').style('white-space: pre-wrap; margin: 8px 0;')
+                                    ui.label(
+                                        f"File: {staged.get('name', 'firmware.bin')} "
+                                        f"({int(staged.get('size', 0)):,} bytes)"
+                                    ).classes('text-caption').style('color: #aaa; overflow-wrap: anywhere;')
+                                    with ui.row().classes('w-full justify-end gap-2'):
+                                        ui.button('Cancel', on_click=firmware_confirm_dialog.close).props('flat')
+
+                                        def confirm_firmware_install():
+                                            confirmed['value'] = True
+                                            firmware_confirm_dialog.close()
+
+                                        ui.button(
+                                            'Install Firmware', icon='system_update_alt',
+                                            on_click=confirm_firmware_install,
+                                        ).props('color=negative')
+                                firmware_install_pending['value'] = True
+                                firmware_install_button.disable()
+                                firmware_confirm_dialog.open()
+                                await firmware_confirm_dialog
+                                if not confirmed['value']:
+                                    firmware_install_pending['value'] = False
+                                    firmware_install_button.enable()
+                                    return
+
+                                firmware_status_label.set_text('Preparing firmware update…')
+                                firmware_progress.set_value(0)
+                                log_event(
+                                    'system', 'firmware_update_confirmed',
+                                    filename=staged.get('name'), size_bytes=staged.get('size'),
+                                )
+                                try:
+                                    ok, message = await asyncio.to_thread(
+                                        cnc_controller.install_firmware, staged['path']
+                                    )
+                                    ui.notify(
+                                        message,
+                                        type='positive' if ok else 'negative',
+                                        timeout=10000,
+                                    )
+                                except Exception as exc:
+                                    logger.exception('Firmware update UI handler failed')
+                                    ui.notify('Firmware update failed. Check controller status and logs.', type='negative', timeout=10000)
+                                    log_event('system', 'firmware_update_ui_error', error=str(exc)[:500])
+                                finally:
+                                    _remove_staged_firmware()
+                                    firmware_selection_label.set_text('No firmware file selected.')
+                                    firmware_install_pending['value'] = False
+
+                            firmware_install_button = ui.button(
+                                'Install Firmware', icon='system_update_alt',
+                                on_click=install_selected_firmware,
+                            ).props('color=primary dense').classes('w-full remote-control-lock').disable()
+
+                            def update_firmware_controls() -> None:
+                                update = cnc_controller.firmware_update_snapshot()
+                                active = bool(update.get('active')) or firmware_install_pending['value']
+                                progress = float(update.get('progress') or 0.0)
+                                stage = str(update.get('stage') or 'Idle')
+                                message = str(update.get('message') or '')
+                                if active:
+                                    firmware_upload.disable()
+                                    firmware_install_button.disable()
+                                else:
+                                    firmware_upload.enable()
+                                    staged = firmware_client_storage.get('firmware_update_file')
+                                    if isinstance(staged, dict) and Path(str(staged.get('path', ''))).is_file():
+                                        firmware_install_button.enable()
+                                firmware_progress.set_value(progress / 100.0)
+                                firmware_status_label.set_text(
+                                    f'{stage}: {message}' if message else stage
+                                )
+
+                            ui.timer(0.5, update_firmware_controls)
+
+                            ui.separator().classes('my-3')
+
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
                             async def send_logs_to_dev():
@@ -4729,8 +4917,7 @@ def main_page():
                                 ('View Logs', 'sudo journalctl -u fabcnc -n 200 --no-pager', 'article'),
                                 ('Service Status', 'sudo systemctl status fabcnc', 'info'),
                                 ('Restart Service', 'sudo systemctl restart fabcnc', 'restart_alt'),
-                                ('List USB', 'lsusb', 'usb'),
-                                ('Serial Ports', 'ls -la /dev/ttyACM* /dev/ttyUSB* 2>/dev/null', 'cable'),
+                                ('UART Device', 'ls -la /dev/ttyAMA0 /dev/serial0 2>/dev/null', 'cable'),
                             ]
                             with ui.row().classes('gap-1 flex-wrap'):
                                 for label, cmd, icon in quick_commands:
@@ -4806,7 +4993,7 @@ def main_page():
         )
         with connection_alert:
             with ui.row().classes('items-start gap-3 no-wrap w-full'):
-                connection_alert_icon = ui.icon('usb_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
+                connection_alert_icon = ui.icon('link_off', size='28px').style('color: #ff6b6b; margin-top: 2px;')
                 with ui.column().classes('gap-1 w-full'):
                     connection_alert_title = ui.label('Controller disconnected') \
                         .classes('text-h6').style('color: var(--md-text-primary);')
@@ -4835,8 +5022,8 @@ def main_page():
                             .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'If the USB link is disconnected, this briefly toggles USB CDC DTR and '
-                            'it does not issue a Marlin reset or stop command. If Marlin is connected '
+                            'If the UART link is disconnected, this retries the configured serial port '
+                            'and does not issue a Marlin reset or stop command. If Marlin is connected '
                             'but halted, recovery may send M999.'
                         ).classes('text-body2').style('color:#ccc; white-space:normal;')
                         with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
@@ -4910,7 +5097,7 @@ def main_page():
                 retry_connection_button.set_visibility(False)
                 force_recovery_button.set_text('Verify Controller')
             elif cnc_controller.sd_job_disconnected:
-                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
                 if cnc_controller.reconnect_thread_active:
                     connection_alert_subtitle.set_text(
@@ -4918,25 +5105,25 @@ def main_page():
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'fabCNC briefly toggles USB CDC DTR as soon as the USB device is available, '
-                        'then asks M27 before restoring progress monitoring.'
+                        'fabCNC retries the configured UART directly, then asks M27 before '
+                        'restoring progress monitoring.'
                     )
                 else:
                     connection_alert_subtitle.set_text(
-                        'Automatic USB handshake and CDC DTR recovery did not reconnect.'
+                        'Automatic UART reconnection did not reconnect.'
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'Restore USB when safe, then click Retry Connection. fabCNC will ask M27 '
+                        'Restore controller power and UART wiring, then click Retry Connection. fabCNC will ask M27 '
                         'before deciding whether the job is still active.'
                     )
                 retry_connection_button.set_visibility(not cnc_controller.reconnect_thread_active)
                 # Keep manual controller recovery unavailable while autonomous
-                # SD playback may still be active; automatic DTR recovery only
-                # changes the USB CDC host-ready state, then verifies with M27.
+                # SD playback may still be active; automatic UART recovery
+                # reconnects and verifies playback with M27.
                 force_recovery_button.set_visibility(False)
             else:
-                connection_alert_icon.props('name=usb_off color=red-4')
+                connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
                 connection_alert_subtitle.set_text('Follow these steps to reconnect:')
                 connection_alert_steps.set_text(
@@ -4948,7 +5135,7 @@ def main_page():
                 force_recovery_button.set_text(
                     'Reset Controller' if cnc_controller.connected and cnc_controller.reset_required
                     else 'Verify Controller' if cnc_controller.connected and cnc_controller.serial_uncertain
-                    else 'Reconnect with DTR Pulse'
+                    else 'Reconnect UART'
                 )
             if not cnc_controller.sd_job_disconnected or (
                 cnc_controller.connected and cnc_controller.serial_uncertain

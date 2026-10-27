@@ -261,6 +261,8 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl &>/dev/null; then
 FABCNC_APP_PASSWORD=2026
 FABCNC_STORAGE_SECRET=${FABCNC_SESSION_SECRET}
 FABCNC_SECURE_COOKIES=false
+FABCNC_SERIAL_PORT=/dev/ttyAMA0
+FABCNC_SERIAL_BAUDRATE=115200
 EOF
         sudo chmod 0600 /etc/fabcnc.env
         echo "    fabCNC UI password: 2026 (change FABCNC_APP_PASSWORD in /etc/fabcnc.env if desired)."

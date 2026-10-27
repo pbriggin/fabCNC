@@ -171,6 +171,8 @@ class ToolpathGenerator:
             "",
             "M919 X O4 P2 S1   ; Set X chopper timing to 24V defaults",
             "M919 Y O4 P2 S1   ; Set Y chopper timing to 24V defaults",
+            "M569 S0 X Y       ; X and primary Y -> SpreadCycle",
+            "M569 S0 I1 Y      ; Y2 -> SpreadCycle",
             "",
             "G21 ; Set units to millimeters",
             "G90 ; Set absolute positioning",
@@ -185,16 +187,14 @@ class ToolpathGenerator:
             "G28 A ; Home A (rotation)",
             "",
             "; Set speed/accel for cutting",
+            "M203 X150 Y150 ; Max XY speed 150 mm/s",
             "M203 Z25 ; Max Z speed 25 mm/s (1500 mm/min)",
             "M201 X500 Y500 ; Max XY accel 500 mm/s² (reduced for smoother motion)",
             "M201 Z100 ; Max Z accel 100 mm/s²",
             "M201 A3000 ; Max A accel 3000 deg/s² (faster rotation at corners)",
             "M204 P2000 T3000 ; Print accel 2000, Travel accel 3000",
             "",
-        ] + ([
-            "M569 S1 X Y ; Enable StealthChop (quiet mode)",
-            "",
-        ] if self.stealthchop else []) + [
+        ] + [
             f"G0 Z{self.safe_height} F{self.plunge_rate} ; Move to safe height",
             ""
         ]

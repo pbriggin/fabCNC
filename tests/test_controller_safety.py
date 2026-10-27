@@ -6,17 +6,17 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-import serial.tools.list_ports
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cnc_ui"))
 
-_real_comports = serial.tools.list_ports.comports
-serial.tools.list_ports.comports = lambda: []
 from cnc import controller as controller_module  # noqa: E402
-from cnc.controller import CNCController, parse_homing_sensitivity_response  # noqa: E402
+from cnc.controller import (  # noqa: E402
+    CNCController,
+    parse_homing_sensitivity_response,
+    parse_tmc_prewarn_response,
+)
 from cnc.state import machine_state  # noqa: E402
-serial.tools.list_ports.comports = _real_comports
 
 
 class FakeSerial:
@@ -47,6 +47,9 @@ class FakeSerial:
     def flush(self):
         pass
 
+    def open(self):
+        self.is_open = True
+
 
 def connected_controller(responses=(), on_write=None, auto_ok=False):
     controller = CNCController(auto_connect=False)
@@ -63,6 +66,40 @@ class ControllerSafetyTests(unittest.TestCase):
         self.addCleanup(uploader_patch.stop)
         machine_state.set_status("Idle", busy=False)
         machine_state.set_job_loaded(False)
+
+    def test_controller_opens_configured_uart_at_configured_baud_without_dtr_pulse(self):
+        controller = CNCController(auto_connect=False, port="/dev/ttyAMA0", baudrate=115200)
+        fake_serial = FakeSerial()
+        fake_serial.is_open = False
+        fake_serial.dtr = True
+        open_dtr_states = []
+        original_open = fake_serial.open
+
+        def record_open():
+            open_dtr_states.append(fake_serial.dtr)
+            original_open()
+
+        fake_serial.open = record_open
+        with (
+            patch.object(controller_module.serial, "Serial", return_value=fake_serial) as serial_open,
+            patch.object(controller, "_probe_marlin_on_open_port", return_value=True),
+            patch.object(controller, "_read_loop", return_value=None),
+            patch.object(controller, "_send_command"),
+        ):
+            self.assertTrue(controller._connect_configured_port())
+
+        serial_open.assert_called_once_with(
+            port=None,
+            baudrate=115200,
+            timeout=2.0,
+            write_timeout=2.0,
+            xonxoff=False,
+            rtscts=False,
+            dsrdtr=False,
+        )
+        self.assertEqual([False], open_dtr_states)
+        self.assertEqual("/dev/ttyAMA0", fake_serial.port)
+        self.assertTrue(controller.connected)
 
     def test_manual_command_is_rejected_while_machine_busy(self):
         controller = connected_controller(["ok"])
@@ -85,6 +122,52 @@ class ControllerSafetyTests(unittest.TestCase):
             {"X": 2, "Y": 1},
             parse_homing_sensitivity_response(response),
         )
+
+    def test_m911_response_parser_reads_latched_driver_prewarn_flags(self):
+        response = (
+            "X temperature prewarn triggered: false\n"
+            "Y temperature prewarn triggered: true\n"
+            "Y2 temperature prewarn triggered: false\n"
+            "ok"
+        )
+
+        self.assertEqual(
+            {"X": False, "Y": True, "Y2": False},
+            parse_tmc_prewarn_response(response),
+        )
+
+    def test_job_end_m911_check_flags_the_driver_and_logs_title_data(self):
+        controller = connected_controller([
+            "X temperature prewarn triggered: false",
+            "Y temperature prewarn triggered: true",
+            "ok",
+        ])
+
+        result = controller._read_tmc_prewarn_at_job_end()
+
+        self.assertEqual("prewarn", result["status"])
+        self.assertEqual(["Y"], result["drivers"])
+        self.assertEqual(
+            "Job complete — TMC PREWARN LATCHED: Y",
+            controller._job_completion_title(result),
+        )
+        self.assertEqual(["M911"], controller.serial_port.writes)
+
+    def test_sd_job_completion_refreshes_position_from_marlin(self):
+        controller = connected_controller([
+            "X:0.00 Y:0.00 Z:0.00 A:0.00 Count X:0 Y:0 Z:0",
+            "ok",
+            "X temperature prewarn triggered: false",
+            "Y temperature prewarn triggered: false",
+            "ok",
+        ])
+        machine_state.update_position(x=860, y=830, z=0, a=0)
+
+        controller._finish_sd_job()
+
+        self.assertEqual(["M114", "M911"], controller.serial_port.writes)
+        self.assertEqual((0.0, 0.0, 0.0, 0.0), machine_state.get_position())
+        self.assertEqual("Complete", machine_state.snapshot().status_text)
 
     def test_homing_sensitivity_apply_sends_m914_then_m500(self):
         controller = connected_controller(

@@ -19,7 +19,7 @@ A web-based controller for a 4-axis fabric CNC cutting machine, built with Pytho
 
 - Python 3.10 or higher
 - Raspberry Pi 5 (or any Linux/macOS for development)
-- Marlin-based CNC controller connected via USB serial (auto-detected at 250000 baud)
+- Marlin-based CNC controller connected through the Raspberry Pi GPIO UART at `/dev/ttyAMA0` and 115200 baud
 - Network connection
 
 ## Installation
@@ -59,6 +59,9 @@ password is stored locally as a salted hash and takes precedence over the
 default. `FABCNC_APP_PASSWORD` controls the initial password before the first
 user change.
 When the UI is served only through HTTPS, set `FABCNC_SECURE_COOKIES=true`.
+The controller serial connection defaults to `/dev/ttyAMA0` at `115200` baud.
+Set `FABCNC_SERIAL_PORT` and `FABCNC_SERIAL_BAUDRATE` in the environment (or
+`/etc/fabcnc.env` on the Pi) to override these defaults.
 
 For development without systemd, set `FABCNC_APP_PASSWORD` and
 `FABCNC_STORAGE_SECRET` in the environment before starting `main.py`. The
@@ -137,11 +140,13 @@ The toolpath generator uses the following defaults (configurable in `main.py`):
 
 ### Marlin SD-card job execution
 
-`controller.py` auto-detects the connected serial port and verifies Marlin with `M115`, including logging whether `Cap:EMERGENCY_PARSER:1` is present. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, and sends numbered/checksummed lines so Marlin can request retransmission if needed. It confirms the file appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress. Position polling is suspended during SD playback so it cannot delay Stop. Short utility sequences continue to use the existing serial streamer.
+`controller.py` opens the configured serial device directly and verifies Marlin with `M115`, including logging whether `Cap:EMERGENCY_PARSER:1` is present. The Raspberry Pi default is `/dev/ttyAMA0` at 115200 baud; `FABCNC_SERIAL_PORT` and `FABCNC_SERIAL_BAUDRATE` can override it. For jobs, fabCNC waits for the serial link to become idle, writes a normalized G-code file to the controller SD card with acknowledged `M28`/`M29` transfers, and sends numbered/checksummed lines so Marlin can request retransmission if needed. It confirms the file appears in `M20`, then selects and starts it with `M23`/`M24`. Marlin executes the file locally; fabCNC polls `M27` for byte progress. Position polling is suspended during SD playback so it cannot delay Stop. Short utility sequences continue to use the existing serial streamer.
 
-Pause and resume use Marlin `M25`/`M24`. Stop writes `M524` plus `M410` through a priority serial path, invalidates homing, and does not report success until SD-idle state and serial ordering are confirmed. The currently installed firmware may finish its active command before processing these stop commands, so the physical E-stop remains the only emergency stop. After every software Stop, run a full Home All before further motion. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. If USB is lost during SD playback, fabCNC first retries five `M115` probes with DTR deasserted. If a Marlin USB device is present but does not answer, fabCNC briefly toggles USB CDC DTR once, then keeps DTR asserted while it retries; if the device is absent, it waits for USB enumeration. Once connected, fabCNC asks Marlin `M27` and resumes monitoring only when active progress is reported. On this SKR Pro native USB CDC path, DTR is the host-ready signal; this recovery does not send a controller reset or stop command. A `Not SD printing` response clears the SD-job marker and requires a full re-home; it does not imply the job completed successfully. If both reconnect phases fail or Marlin's status is ambiguous, the UI asks for manual recovery. Do not power-cycle the controller while it may still be cutting. Controller power loss is not automatically resumable by fabCNC.
+Pause and resume use Marlin `M25`/`M24`. Stop writes `M524` plus `M410` through a priority serial path, invalidates homing, and does not report success until SD-idle state and serial ordering are confirmed. The currently installed firmware may finish its active command before processing these stop commands, so the physical E-stop remains the only emergency stop. After every software Stop, run a full Home All before further motion. Verify the flashed firmware's SD-print pause behavior (including any configured pause/parking moves) before using these controls on the cutter. If the UART is lost during SD playback, fabCNC retries the configured serial port and probes Marlin with `M115`; once connected, it asks Marlin `M27` and resumes monitoring only when active progress is reported. UART recovery does not use DTR or wait for USB enumeration. A `Not SD printing` response clears the SD-job marker and requires a full re-home; it does not imply the job completed successfully. If Marlin's status is ambiguous, the UI asks for manual recovery. Do not power-cycle the controller while it may still be cutting. Controller power loss is not automatically resumable by fabCNC.
 
-For a disconnected controller, **Force Recovery** briefly toggles USB CDC DTR and retries the connection; it does not reset Marlin or stop SD playback. If Marlin is connected but halted, guarded recovery can send `M999`, so verify the cutter is stopped and the physical E-stop is released first.
+After each confirmed job completion, fabCNC queries Marlin with `M911`. A latched overtemperature prewarn adds `TMC PREWARN LATCHED` and the affected driver axes to the `job_complete` controller log title; a failed query is labeled as unavailable. Marlin keeps the prewarn flag set until `M912` clears it, so the result can include a warning from before the latest job. fabCNC leaves the flag intact to preserve that evidence. `M122` provides more detailed driver diagnostics when investigating a flagged result.
+
+For a disconnected controller, **Force Recovery** retries the configured serial connection; it does not reset Marlin or stop SD playback. If Marlin is connected but halted, guarded recovery can send `M999`, so verify the cutter is stopped and the physical E-stop is released first.
 
 ### Thread-Safe State
 
