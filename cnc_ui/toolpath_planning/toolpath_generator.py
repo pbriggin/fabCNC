@@ -28,7 +28,7 @@ class ToolpathGenerator:
     
     def __init__(self, 
                  cutting_height: float = -20.0,  # Z height when cutting (lower)
-                 safe_height: float = -15.0,  # Z height when raised (higher)
+                 safe_height: float = -10.0,  # Z height when raised (higher)
                  corner_angle_threshold: float = 20.0,  # Standardized threshold across all corner detection
                  feed_rate: float = 12000.0,  # 200 mm/s (firmware max is 300)
                  plunge_rate: float = 3000.0,

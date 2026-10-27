@@ -445,6 +445,13 @@ def _mark_canvas_dirty() -> None:
 
 def apply_cut_pressure(name: str) -> None:
     """Apply a named pressure setting and record it in cut_settings."""
+    if (client_job_state.get('toolpath_generated', False)
+            or client_job_state.get('toolpath_generation_in_progress', False)):
+        # Also reject any event already in flight when the selector is locked.
+        pressure_select = ui.context.client.storage.get('pressure_select')
+        if pressure_select:
+            pressure_select.set_value(cut_settings['pressure'])
+        return
     changed = cut_settings.get('pressure') != name
     z_cut_height.update({'value': PRESSURE_MAP[name]})
     cut_settings['pressure'] = name
@@ -462,7 +469,7 @@ def apply_cut_speed(name: str) -> None:
 dxf_processor = DXFProcessor()
 toolpath_generator = ToolpathGenerator(
     cutting_height=-30.0,  # Z height when cutting (mm)
-    safe_height=-15.0,     # Z height when raised (mm)
+    safe_height=-10.0,     # Z height when raised (mm)
     corner_angle_threshold=20.0,  # Standardized threshold across all corner detection
     feed_rate=15000.0,     # mm/min (250 mm/s)
     plunge_rate=12000.0,    # mm/min
@@ -1316,8 +1323,21 @@ def create_file_controls():
         ui.context.client.storage['canvas_name_label'] = canvas_name_label
 
 
+def _sync_pressure_select() -> None:
+    """Lock pressure while generated toolpath is active or being generated."""
+    pressure_select = ui.context.client.storage.get('pressure_select')
+    if pressure_select is None:
+        return
+    if (client_job_state.get('toolpath_generated', False)
+            or client_job_state.get('toolpath_generation_in_progress', False)):
+        pressure_select.disable()
+    else:
+        pressure_select.enable()
+
+
 def _sync_toolpath_button(generated: bool) -> None:
     """Keep the visible action in sync with the persisted preview state."""
+    _sync_pressure_select()
     button = ui.context.client.storage.get('toolpath_button')
     if button is None:
         return
@@ -2100,7 +2120,7 @@ def _clear_canvas_now():
     ui.notify('Canvas cleared.', type='info')
 
 
-async def toggle_toolpath(button):
+async def _toggle_toolpath_impl(button):
     """Toggle between Generate Toolpath and Clear Toolpath modes."""
     global current_gcode
     
@@ -2270,6 +2290,24 @@ async def toggle_toolpath(button):
         ui.notify(f'Toolpath generated: {total_segments} segments and {total_corners} corners.', type='positive')
 
 
+async def toggle_toolpath(button):
+    """Prevent pressure changes for the full duration of toolpath generation."""
+    if client_job_state.get('toolpath_generated', False):
+        await _toggle_toolpath_impl(button)
+        return
+
+    if client_job_state.get('toolpath_generation_in_progress', False):
+        return
+
+    client_job_state['toolpath_generation_in_progress'] = True
+    _sync_pressure_select()
+    try:
+        await _toggle_toolpath_impl(button)
+    finally:
+        client_job_state['toolpath_generation_in_progress'] = False
+        _sync_pressure_select()
+
+
 async def safety_confirm() -> bool:
     """Show safety check dialog. Returns True if the user confirmed, False if cancelled."""
     confirmed = False
@@ -2377,7 +2415,7 @@ async def outline_job():
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
 
-    trace_z = -15.0  # Fixed trace height for outline (never cuts material)
+    trace_z = PRESSURE_MAP['Trace']  # Follow the Trace cut setting
     safe_z = toolpath_generator.safe_height
     _, rapid = SPEED_MAP[cut_settings['speed']]
     plunge = toolpath_generator.plunge_rate
