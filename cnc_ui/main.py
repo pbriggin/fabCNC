@@ -434,7 +434,7 @@ jog_params = _ClientDict('jog_params', {
 z_cut_height = _ClientDict('z_cut_height', {'value': -35.0})
 
 # Cut settings state — persisted with canvas saves
-PRESSURE_MAP = {'Trace': -20.0, 'Light': -32.5, 'Medium': -35.0, 'Hard': -37.5, 'Very Hard': -40.0}
+PRESSURE_MAP = {'Trace': -13.65, 'Light': -26.15, 'Medium': -28.65, 'Hard': -31.15, 'Very Hard': -33.65}
 SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
 cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medium'})
 def _mark_canvas_dirty() -> None:
