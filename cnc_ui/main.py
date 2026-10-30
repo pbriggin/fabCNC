@@ -59,6 +59,8 @@ import termios
 import struct
 import secrets
 import time
+import sys
+import inspect
 from collections import defaultdict, deque
 from collections.abc import MutableMapping
 from copy import deepcopy
@@ -839,6 +841,10 @@ def acknowledge_software_update():
 
 def _get_current_wifi_status():
     """Return (ssid, signal_percent) for the active Wi-Fi connection, or (None, None)."""
+    # The device runs Linux with NetworkManager. macOS has no nmcli, so leave
+    # the device-only status unknown while developing locally.
+    if sys.platform == 'darwin':
+        return None, None
     try:
         result = subprocess.run(
             ['nmcli', '-t', '-f', 'active,ssid,signal', 'dev', 'wifi', 'list', '--rescan', 'no'],
@@ -2566,7 +2572,7 @@ async def resume_disconnect_job():
 
 
 async def retry_controller_connection():
-    """Retry the configured Marlin serial connection after controller power is restored."""
+    """Retry the controller connection after power is restored."""
     if _deny_cloudflare_control():
         return
     log_event('system', 'controller_reconnect_clicked')
@@ -2575,28 +2581,28 @@ async def retry_controller_connection():
 
 
 async def force_controller_recovery():
-    """Recover a stopped machine with M999 or reconnect to the configured UART."""
+    """Retry controller recovery using the current connection and halt state."""
     if _deny_cloudflare_control():
         return
     if cnc_controller.connected:
         if cnc_controller.serial_uncertain and not cnc_controller.reset_required:
             if await asyncio.to_thread(cnc_controller.recover_uncertain_state):
-                ui.notify('Communication recovered. Re-home before motion.', type='warning')
+                ui.notify('Retry succeeded. Re-home before motion.', type='warning')
             else:
-                ui.notify('Recovery failed. Use the physical E-stop and inspect the controller.', type='negative')
+                ui.notify('Retry failed. Use the physical E-stop and inspect the controller.', type='negative')
             return
         if not cnc_controller.reset_required:
-            ui.notify('Controller is already connected.', type='info')
+            ui.notify('The controller connection is already active.', type='info')
             return
         if await asyncio.to_thread(cnc_controller.reset_controller_after_estop):
-            ui.notify('Controller reset. Re-home before the next job.', type='positive')
+            ui.notify('Retry succeeded. Re-home before the next job.', type='positive')
         else:
-            logger.error('Controller reset failed: %s', cnc_controller.last_controller_error or 'No M999 response')
-            ui.notify('The controller reset failed. Use the physical E-stop and inspect the controller.', type='negative', timeout=8000)
+            logger.error('Controller retry failed: %s', cnc_controller.last_controller_error or 'No M999 response')
+            ui.notify('Retry failed. Use the physical E-stop and inspect the controller.', type='negative', timeout=8000)
         return
 
     log_event('system', 'controller_force_recovery_clicked')
-    ui.notify('Retrying the controller UART connection…', type='info', timeout=6000)
+    ui.notify('Retrying the controller connection…', type='info', timeout=6000)
     await asyncio.to_thread(cnc_controller.attempt_reconnect)
 
 
@@ -2636,7 +2642,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     elif current_status == 'Disconnected':
         display_status = 'Controller disconnected'
     elif current_status == 'E-Stop Reset Required':
-        display_status = 'Controller reset required'
+        display_status = 'Retry connection required'
     elif (
         not cnc_controller.connected
         or cnc_controller.reset_required
@@ -2646,7 +2652,7 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     status_label.set_text(display_status)
     # Update status pill appearance
     if status_pill and status_icon:
-        if display_status in ('Controller disconnected', 'Controller reset required', 'Reconnecting…'):
+        if display_status in ('Controller disconnected', 'Retry connection required', 'Reconnecting…'):
             status_pill.style('background: #4a2d2d; border: 1px solid #7a3d3d;')
             status_icon.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
             status_label.classes(add='text-red-5', remove='text-green-4 text-yellow-4')
@@ -3370,7 +3376,7 @@ def main_page():
                     wifi_off: 'Remove saved Wi-Fi connections',
                     lock_reset: 'Reset the UI password', article: 'Show recent service logs',
                     info: 'Show fabCNC service status',
-                    cable: 'Show the configured controller UART',
+                    cable: 'Show the configured controller connection port',
                     align_horizontal_center: 'Align horizontal centers',
                     align_vertical_center: 'Align vertical centers',
                     horizontal_distribute: 'Distribute horizontally',
@@ -3406,8 +3412,7 @@ def main_page():
                     'Read Current': 'Read homing sensitivity values from the controller',
                     'Send Logs to Dev': 'Package and securely send diagnostic logs to the developer',
                     'Download Logs': 'Download a diagnostic log bundle to this computer',
-                    'Retry Connection': 'Try connecting to the machine controller again',
-                    'Force Recovery': 'Recover an uncertain controller state or retry the controller UART connection',
+                    'Retry Connection': 'Retry the controller connection and check its status',
                     Acknowledge: 'Dismiss this update notice without installing now',
                     'Update Now': 'Install the available fabCNC software update now',
                     Unlock: 'Sign in to unlock the fabCNC controls',
@@ -4596,179 +4601,6 @@ def main_page():
 
                             ui.separator().classes('my-3')
 
-                            ui.label('Firmware Update').classes('text-body1 font-bold mb-1').style('color: #aaa;')
-                            ui.label(
-                                'Install Marlin firmware on the SKR Pro over the controller UART. '
-                                'Use a firmware.bin built for this machine.'
-                            ).classes('text-caption').style('color: #888;')
-
-                            firmware_client_storage = ui.context.client.storage
-                            firmware_selection_label = ui.label('No firmware file selected.').classes('text-caption') \
-                                .style('color: #aaa; overflow-wrap: anywhere;')
-                            firmware_status_label = ui.label('No firmware update has been started.').classes('text-caption') \
-                                .style('color: #888; white-space: pre-wrap;')
-                            firmware_progress = ui.linear_progress(value=0, show_value=True).classes('w-full')
-
-                            def _remove_staged_firmware() -> None:
-                                staged = firmware_client_storage.pop('firmware_update_file', None)
-                                if isinstance(staged, dict):
-                                    staged_path = staged.get('path')
-                                    if isinstance(staged_path, str):
-                                        try:
-                                            os.unlink(staged_path)
-                                        except FileNotFoundError:
-                                            pass
-                                        except OSError:
-                                            logger.warning('Could not remove temporary firmware file %s', staged_path)
-
-                            async def receive_firmware_upload(event):
-                                import tempfile
-
-                                try:
-                                    upload_file = event.file
-                                    filename = Path(str(upload_file.name)).name
-                                    if Path(filename).suffix.lower() != '.bin':
-                                        ui.notify('Select a .bin firmware file.', type='warning')
-                                        return
-                                    advertised_size = getattr(upload_file, 'size', None)
-                                    if advertised_size is not None and int(advertised_size) > 1024 * 1024:
-                                        ui.notify('Firmware file exceeds the 1 MiB SKR Pro limit.', type='negative')
-                                        return
-                                    content = await upload_file.read()
-                                    if not content or len(content) > 1024 * 1024:
-                                        ui.notify('Firmware must be between 1 byte and 1 MiB.', type='negative')
-                                        return
-                                    with tempfile.NamedTemporaryFile(
-                                        prefix='fabcnc-firmware-', suffix='.bin', delete=False
-                                    ) as staged_file:
-                                        staged_file.write(content)
-                                        staged_path = staged_file.name
-                                    _remove_staged_firmware()
-                                    firmware_client_storage['firmware_update_file'] = {
-                                        'path': staged_path,
-                                        'name': filename,
-                                        'size': len(content),
-                                    }
-                                    firmware_selection_label.set_text(
-                                        f'{filename} · {len(content):,} bytes'
-                                    )
-                                    ui.notify('Firmware file is ready to install.', type='positive')
-                                    log_event(
-                                        'system', 'firmware_file_staged',
-                                        filename=filename, size_bytes=len(content),
-                                    )
-                                except Exception as exc:
-                                    logger.exception('Could not stage firmware upload')
-                                    ui.notify('Could not stage the firmware file.', type='negative')
-                                    log_event('system', 'firmware_file_stage_failed', error=str(exc)[:500])
-
-                            firmware_upload = ui.upload(
-                                label='Choose firmware.bin',
-                                auto_upload=True,
-                                multiple=False,
-                                on_upload=receive_firmware_upload,
-                            ).props('accept=.bin max-file-size=1048576 dense').classes('w-full remote-control-lock')
-
-                            firmware_install_pending = {'value': False}
-
-                            async def install_selected_firmware():
-                                if firmware_install_pending['value'] or cnc_controller.firmware_update_active:
-                                    return
-                                if _deny_cloudflare_control():
-                                    return
-                                staged = firmware_client_storage.get('firmware_update_file')
-                                if not isinstance(staged, dict) or not Path(str(staged.get('path', ''))).is_file():
-                                    ui.notify('Choose a firmware .bin file first.', type='warning')
-                                    return
-                                if not _require_controller_connected():
-                                    return
-
-                                confirmed = {'value': False}
-                                with ui.dialog() as firmware_confirm_dialog, ui.card().style(_DIALOG_CARD_STYLE):
-                                    ui.label('Install SKR Pro Firmware?').classes('text-h6 font-bold')
-                                    ui.separator()
-                                    ui.label(
-                                        'Confirm all three before continuing:\n'
-                                        '• The machine is idle.\n'
-                                        '• Motion will be unavailable during the update.\n'
-                                        '• Do not interrupt power to the controller.'
-                                    ).classes('text-body1').style('white-space: pre-wrap; margin: 8px 0;')
-                                    ui.label(
-                                        f"File: {staged.get('name', 'firmware.bin')} "
-                                        f"({int(staged.get('size', 0)):,} bytes)"
-                                    ).classes('text-caption').style('color: #aaa; overflow-wrap: anywhere;')
-                                    with ui.row().classes('w-full justify-end gap-2'):
-                                        ui.button('Cancel', on_click=firmware_confirm_dialog.close).props('flat')
-
-                                        def confirm_firmware_install():
-                                            confirmed['value'] = True
-                                            firmware_confirm_dialog.close()
-
-                                        ui.button(
-                                            'Install Firmware', icon='system_update_alt',
-                                            on_click=confirm_firmware_install,
-                                        ).props('color=negative')
-                                firmware_install_pending['value'] = True
-                                firmware_install_button.disable()
-                                firmware_confirm_dialog.open()
-                                await firmware_confirm_dialog
-                                if not confirmed['value']:
-                                    firmware_install_pending['value'] = False
-                                    firmware_install_button.enable()
-                                    return
-
-                                firmware_status_label.set_text('Preparing firmware update…')
-                                firmware_progress.set_value(0)
-                                log_event(
-                                    'system', 'firmware_update_confirmed',
-                                    filename=staged.get('name'), size_bytes=staged.get('size'),
-                                )
-                                try:
-                                    ok, message = await asyncio.to_thread(
-                                        cnc_controller.install_firmware, staged['path']
-                                    )
-                                    ui.notify(
-                                        message,
-                                        type='positive' if ok else 'negative',
-                                        timeout=10000,
-                                    )
-                                except Exception as exc:
-                                    logger.exception('Firmware update UI handler failed')
-                                    ui.notify('Firmware update failed. Check controller status and logs.', type='negative', timeout=10000)
-                                    log_event('system', 'firmware_update_ui_error', error=str(exc)[:500])
-                                finally:
-                                    _remove_staged_firmware()
-                                    firmware_selection_label.set_text('No firmware file selected.')
-                                    firmware_install_pending['value'] = False
-
-                            firmware_install_button = ui.button(
-                                'Install Firmware', icon='system_update_alt',
-                                on_click=install_selected_firmware,
-                            ).props('color=primary dense').classes('w-full remote-control-lock').disable()
-
-                            def update_firmware_controls() -> None:
-                                update = cnc_controller.firmware_update_snapshot()
-                                active = bool(update.get('active')) or firmware_install_pending['value']
-                                progress = float(update.get('progress') or 0.0)
-                                stage = str(update.get('stage') or 'Idle')
-                                message = str(update.get('message') or '')
-                                if active:
-                                    firmware_upload.disable()
-                                    firmware_install_button.disable()
-                                else:
-                                    firmware_upload.enable()
-                                    staged = firmware_client_storage.get('firmware_update_file')
-                                    if isinstance(staged, dict) and Path(str(staged.get('path', ''))).is_file():
-                                        firmware_install_button.enable()
-                                firmware_progress.set_value(progress / 100.0)
-                                firmware_status_label.set_text(
-                                    f'{stage}: {message}' if message else stage
-                                )
-
-                            ui.timer(0.5, update_firmware_controls)
-
-                            ui.separator().classes('my-3')
-
                             ui.label('Debug').classes('text-body1 font-bold mb-1').style('color: #aaa;')
 
                             async def send_logs_to_dev():
@@ -4982,14 +4814,12 @@ def main_page():
                                 ('View Logs', 'sudo journalctl -u fabcnc -n 200 --no-pager', 'article'),
                                 ('Service Status', 'sudo systemctl status fabcnc', 'info'),
                                 ('Restart Service', 'sudo systemctl restart fabcnc', 'restart_alt'),
-                                ('UART Device', 'ls -la /dev/ttyAMA0 /dev/serial0 2>/dev/null', 'cable'),
+                                ('Controller Port', 'ls -la /dev/ttyAMA0 /dev/serial0 2>/dev/null', 'cable'),
                             ]
-                            with ui.row().classes('gap-1 flex-wrap'):
+                            with ui.row().classes('gap-1').style('flex-wrap: nowrap; overflow-x: auto;'):
                                 for label, cmd, icon in quick_commands:
                                     ui.button(label, icon=icon, on_click=lambda c=cmd: _run_quick_command(c)) \
                                         .props('dense outline').style('font-size: 11px;')
-
-                            with ui.row().classes('gap-1'):
                                 ui.button('Clear', icon='clear_all', on_click=lambda: terminal_log.clear()) \
                                     .props('dense outline').style('font-size: 11px;')
 
@@ -4997,6 +4827,189 @@ def main_page():
 
                             # Start the shell immediately so the prompt appears on page load
                             ui.timer(0.1, _start_shell, once=True)
+
+                            # Firmware update controls sit below the live terminal.
+                            ui.separator().classes('my-3')
+
+                            ui.label('Firmware Update').classes('text-body1 font-bold mb-1').style('color: #aaa;')
+                            ui.label(
+                                'Install Marlin firmware on the SKR Pro through the controller connection. '
+                                'Use a firmware.bin built for this machine.'
+                            ).classes('text-caption').style('color: #888;')
+
+                            firmware_client_storage = ui.context.client.storage
+                            firmware_selection_label = ui.label('No firmware file selected.').classes('text-caption') \
+                                .style('color: #aaa; overflow-wrap: anywhere;')
+                            firmware_status_label = ui.label('No firmware update has been started.').classes('text-caption') \
+                                .style('color: #888; white-space: pre-wrap;')
+                            firmware_progress = ui.linear_progress(value=0, show_value=True).classes('w-full')
+
+                            def _remove_staged_firmware() -> None:
+                                staged = firmware_client_storage.pop('firmware_update_file', None)
+                                if isinstance(staged, dict):
+                                    staged_path = staged.get('path')
+                                    if isinstance(staged_path, str):
+                                        try:
+                                            os.unlink(staged_path)
+                                        except FileNotFoundError:
+                                            pass
+                                        except OSError:
+                                            logger.warning('Could not remove temporary firmware file %s', staged_path)
+
+                            async def receive_firmware_upload(event):
+                                import tempfile
+
+                                try:
+                                    upload_file = event.file
+                                    filename = Path(str(upload_file.name)).name
+                                    if Path(filename).suffix.lower() != '.bin':
+                                        ui.notify('Select a .bin firmware file.', type='warning')
+                                        return
+                                    advertised_size = getattr(upload_file, 'size', None)
+                                    if callable(advertised_size):
+                                        advertised_size = advertised_size()
+                                    if inspect.isawaitable(advertised_size):
+                                        advertised_size = await advertised_size
+                                    try:
+                                        advertised_size = int(advertised_size) if advertised_size is not None else None
+                                    except (TypeError, ValueError):
+                                        advertised_size = None
+                                    if advertised_size is not None and advertised_size > 1024 * 1024:
+                                        ui.notify('Firmware file exceeds the 1 MiB SKR Pro limit.', type='negative')
+                                        return
+                                    content = await upload_file.read()
+                                    if not content or len(content) > 1024 * 1024:
+                                        ui.notify('Firmware must be between 1 byte and 1 MiB.', type='negative')
+                                        return
+                                    with tempfile.NamedTemporaryFile(
+                                        prefix='fabcnc-firmware-', suffix='.bin', delete=False
+                                    ) as staged_file:
+                                        staged_file.write(content)
+                                        staged_path = staged_file.name
+                                    _remove_staged_firmware()
+                                    firmware_client_storage['firmware_update_file'] = {
+                                        'path': staged_path,
+                                        'name': filename,
+                                        'size': len(content),
+                                    }
+                                    firmware_selection_label.set_text(
+                                        f'{filename} · {len(content):,} bytes'
+                                    )
+                                    ui.notify('Firmware file is ready to install.', type='positive')
+                                    log_event(
+                                        'system', 'firmware_file_staged',
+                                        filename=filename, size_bytes=len(content),
+                                    )
+                                except Exception as exc:
+                                    logger.exception('Could not stage firmware upload')
+                                    ui.notify('Could not stage the firmware file.', type='negative')
+                                    log_event('system', 'firmware_file_stage_failed', error=str(exc)[:500])
+
+                            firmware_upload = ui.upload(
+                                label='Choose firmware.bin',
+                                auto_upload=True,
+                                multiple=False,
+                                on_upload=receive_firmware_upload,
+                            ).props('accept=.bin max-file-size=1048576 dense').classes('w-full remote-control-lock')
+
+                            firmware_install_pending = {'value': False}
+
+                            async def install_selected_firmware():
+                                if firmware_install_pending['value'] or cnc_controller.firmware_update_active:
+                                    return
+                                if _deny_cloudflare_control():
+                                    return
+                                staged = firmware_client_storage.get('firmware_update_file')
+                                if not isinstance(staged, dict) or not Path(str(staged.get('path', ''))).is_file():
+                                    ui.notify('Choose a firmware .bin file first.', type='warning')
+                                    return
+                                if not _require_controller_connected():
+                                    return
+
+                                confirmed = {'value': False}
+                                with ui.dialog() as firmware_confirm_dialog, ui.card().style(_DIALOG_CARD_STYLE):
+                                    ui.label('Install SKR Pro Firmware?').classes('text-h6 font-bold')
+                                    ui.separator()
+                                    ui.label(
+                                        'Confirm all three before continuing:\n'
+                                        '• The machine is idle.\n'
+                                        '• Motion will be unavailable during the update.\n'
+                                        '• Do not interrupt power to the controller.'
+                                    ).classes('text-body1').style('white-space: pre-wrap; margin: 8px 0;')
+                                    ui.label(
+                                        f"File: {staged.get('name', 'firmware.bin')} "
+                                        f"({int(staged.get('size', 0)):,} bytes)"
+                                    ).classes('text-caption').style('color: #aaa; overflow-wrap: anywhere;')
+                                    with ui.row().classes('w-full justify-end gap-2'):
+                                        ui.button('Cancel', on_click=firmware_confirm_dialog.close).props('flat')
+
+                                        def confirm_firmware_install():
+                                            confirmed['value'] = True
+                                            firmware_confirm_dialog.close()
+
+                                        ui.button(
+                                            'Install Firmware', icon='system_update_alt',
+                                            on_click=confirm_firmware_install,
+                                        ).props('color=negative')
+                                firmware_install_pending['value'] = True
+                                firmware_install_button.disable()
+                                firmware_confirm_dialog.open()
+                                await firmware_confirm_dialog
+                                if not confirmed['value']:
+                                    firmware_install_pending['value'] = False
+                                    firmware_install_button.enable()
+                                    return
+
+                                firmware_status_label.set_text('Preparing firmware update…')
+                                firmware_progress.set_value(0)
+                                log_event(
+                                    'system', 'firmware_update_confirmed',
+                                    filename=staged.get('name'), size_bytes=staged.get('size'),
+                                )
+                                try:
+                                    ok, message = await asyncio.to_thread(
+                                        cnc_controller.install_firmware, staged['path']
+                                    )
+                                    ui.notify(
+                                        message,
+                                        type='positive' if ok else 'negative',
+                                        timeout=10000,
+                                    )
+                                except Exception as exc:
+                                    logger.exception('Firmware update UI handler failed')
+                                    ui.notify('Firmware update failed. Check controller status and logs.', type='negative', timeout=10000)
+                                    log_event('system', 'firmware_update_ui_error', error=str(exc)[:500])
+                                finally:
+                                    _remove_staged_firmware()
+                                    firmware_selection_label.set_text('No firmware file selected.')
+                                    firmware_install_pending['value'] = False
+
+                            firmware_install_button = ui.button(
+                                'Install Firmware', icon='system_update_alt',
+                                on_click=install_selected_firmware,
+                            ).props('color=primary dense').classes('w-full remote-control-lock').disable()
+
+                            def update_firmware_controls() -> None:
+                                update = cnc_controller.firmware_update_snapshot()
+                                active = bool(update.get('active')) or firmware_install_pending['value']
+                                progress = float(update.get('progress') or 0.0)
+                                stage = str(update.get('stage') or 'Idle')
+                                message = str(update.get('message') or '')
+                                if active:
+                                    firmware_upload.disable()
+                                    firmware_install_button.disable()
+                                else:
+                                    firmware_upload.enable()
+                                    staged = firmware_client_storage.get('firmware_update_file')
+                                    if isinstance(staged, dict) and Path(str(staged.get('path', ''))).is_file():
+                                        firmware_install_button.enable()
+                                firmware_progress.set_value(progress / 100.0)
+                                firmware_status_label.set_text(
+                                    f'{stage}: {message}' if message else stage
+                                )
+
+                            ui.timer(0.5, update_firmware_controls)
+
 
         # Per-page state for disconnect recovery and resume dialog
         _prev_status_local: list = [None]
@@ -5083,13 +5096,11 @@ def main_page():
                 def _confirm_force_controller_recovery():
                     with ui.dialog().props('persistent') as recovery_dialog, \
                          ui.card().style(_DIALOG_CARD_STYLE):
-                        ui.label('Recover the controller?') \
+                        ui.label('Retry the controller connection?') \
                             .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'If the UART link is disconnected, this retries the configured serial port '
-                            'and does not issue a Marlin reset or stop command. If Marlin is connected '
-                            'but halted, recovery may send M999.'
+                            'fabCNC will retry the connection and clear Marlin’s halt if needed.'
                         ).classes('text-body2').style('color:#ccc; white-space:normal;')
                         with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
                             ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
@@ -5104,14 +5115,14 @@ def main_page():
                                     force_recovery_button.enable()
 
                             ui.button(
-                                'Cutter Stopped — Continue',
+                                'Retry Connection',
                                 icon='restart_alt',
                                 on_click=_run_forced_recovery,
                             ).props('color=negative dense')
                     recovery_dialog.open()
 
                 force_recovery_button = ui.button(
-                    'Force Recovery',
+                    'Retry Connection',
                     icon='restart_alt',
                     on_click=_confirm_force_controller_recovery,
                 ).props('dense color=negative').style('font-size: 12px;').classes('remote-control-lock')
@@ -5156,56 +5167,62 @@ def main_page():
                 connection_alert_subtitle.set_text('Controller status could not be confirmed:')
                 connection_alert_steps.set_text(
                     '1. Confirm the cutter is fully stopped.\n'
-                    '2. Click "Verify Controller" below.\n'
-                    '3. After verification succeeds, run Home All.'
+                    '2. Click "Retry Connection" below.\n'
+                    '3. After the retry succeeds, run Home All.'
                 )
                 retry_connection_button.set_visibility(False)
-                force_recovery_button.set_text('Verify Controller')
+                force_recovery_button.set_text('Retry Connection')
+                force_recovery_button.set_visibility(True)
             elif cnc_controller.sd_job_disconnected:
                 connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
                 if cnc_controller.reconnect_thread_active:
                     connection_alert_subtitle.set_text(
-                        'Automatically reconnecting and checking machine status.'
+                        'Retrying the connection automatically and checking machine status.'
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'fabCNC retries the configured UART directly, then asks M27 before '
+                        'fabCNC retries the controller connection, then asks M27 before '
                         'restoring progress monitoring.'
                     )
                 else:
                     connection_alert_subtitle.set_text(
-                        'Automatic UART reconnection did not reconnect.'
+                        'Automatic retry did not connect.'
                     )
                     connection_alert_steps.set_text(
                         'Marlin may still be cutting from its SD card. Do not power-cycle the controller.\n'
-                        'Restore controller power and UART wiring, then click Retry Connection. fabCNC will ask M27 '
+                        'Restore controller power and its connections, then click Retry Connection. fabCNC will ask M27 '
                         'before deciding whether the job is still active.'
                     )
                 retry_connection_button.set_visibility(not cnc_controller.reconnect_thread_active)
                 # Keep manual controller recovery unavailable while autonomous
-                # SD playback may still be active; automatic UART recovery
+                # SD playback may still be active; automatic reconnection
                 # reconnects and verifies playback with M27.
                 force_recovery_button.set_visibility(False)
             else:
                 connection_alert_icon.props('name=link_off color=red-4')
                 connection_alert_title.set_text('Controller disconnected')
-                connection_alert_subtitle.set_text('Follow these steps to reconnect:')
+                connection_alert_subtitle.set_text('Follow these steps to retry the connection:')
                 connection_alert_steps.set_text(
                     '1. Disengage E-Stop.\n'
                     '2. Power cycle the fabCNC control box (red switch).\n'
                     '3. Click "Retry Connection".'
                 )
-                retry_connection_button.set_visibility(True)
-                force_recovery_button.set_text(
-                    'Reset Controller' if cnc_controller.connected and cnc_controller.reset_required
-                    else 'Verify Controller' if cnc_controller.connected and cnc_controller.serial_uncertain
-                    else 'Reconnect UART'
+                retry_connection_button.set_visibility(not cnc_controller.connected)
+                force_recovery_button.set_text('Retry Connection')
+                force_recovery_button.set_visibility(
+                    cnc_controller.connected
+                    and (cnc_controller.reset_required or cnc_controller.serial_uncertain)
                 )
-            if not cnc_controller.sd_job_disconnected or (
-                cnc_controller.connected and cnc_controller.serial_uncertain
-            ):
-                force_recovery_button.set_visibility(True)
+                if cnc_controller.reset_required:
+                    connection_alert_subtitle.set_text(
+                        'Marlin reported a kill condition; retry the connection:'
+                    )
+                    connection_alert_steps.set_text(
+                        '1. Confirm the cutter has stopped and release the physical E-Stop.\n'
+                        '2. Click "Retry Connection" below.\n'
+                        '3. Run Home All before further motion.'
+                    )
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
             # and file controls remain usable until the alert is dismissed.
@@ -5324,8 +5341,6 @@ def main_page():
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    # Kick off the periodic log uploader (no-op when disabled in config).
-    log_uploader.start_uploader()
     # Run the NiceGUI app
     # Bind to 0.0.0.0 to allow access from other computers on the network
     ui.run(

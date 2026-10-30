@@ -1,6 +1,6 @@
 # cnc_ui/log_uploader.py
 """
-Periodic + on-demand log uploader for fabCNC.
+Event-triggered and on-demand log uploader for fabCNC.
 
 Bundles the contents of <log_dir>/ (and optionally recent gcode + canvas
 saves) into a single zip and POSTs it to the URL configured in
@@ -10,10 +10,8 @@ the device pushes its logs to a webhook you control.
 Configure in logging_config.json:
 
     "upload": {
-      "enabled": true,
       "url": "https://example.com/fabcnc-logs",
       "method": "POST",             # POST (multipart) | PUT (raw zip body)
-      "interval_minutes": 60,
       "device_id": "shop-pi",       # blank = hostname
       "auth_header": "Bearer xyz",  # optional
     "piece_count_webhook_url": "", # optional Good Pigeon relay endpoint
@@ -42,7 +40,6 @@ import zipfile
 from datetime import datetime, timezone
 from urllib import error as _urlerror
 from pathlib import Path
-from typing import Optional
 from urllib import request as _urlrequest
 
 import logging_setup
@@ -114,18 +111,7 @@ def _get_device_id() -> str:
 
     return socket.gethostname()
 
-_uploader_thread: Optional[threading.Thread] = None
-_stop_event = threading.Event()
 _state_lock = threading.Lock()
-
-# Set to True by notify_job_run(); the periodic uploader only fires when True.
-_job_run_since_last_periodic: bool = False
-
-
-def notify_job_run() -> None:
-    """Call this when a job starts or completes to allow the next periodic upload."""
-    global _job_run_since_last_periodic
-    _job_run_since_last_periodic = True
 
 
 # ── State file (tracks last uploaded bundle, byte offsets per log) ────────────
@@ -311,22 +297,19 @@ def build_bundle(
     log_dir = logging_setup.get_log_dir()
     upload_cfg = cfg["upload"]
     device_id = _get_device_id()
-    include_all_once = bool(upload_cfg.get("include_all_gcode_once", False))
-    bundle_tag = "allgcode" if include_all_once else ""
-    trigger_tag = trigger if not bundle_tag else f"{trigger}_{bundle_tag}"
+    trigger_tag = trigger
 
     state = _read_state() if not full else {}
+    # Drop the legacy field from existing state files on their next write.
+    state.pop("last_bundle", None)
     offsets: dict[str, int] = state.get("offsets", {})
 
     manifest = {
         "device_id": device_id,
         "app_version": logging_setup.APP_VERSION,
-        "bundle_id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "full": full,
         "trigger": trigger_tag,
-        "include_all_gcode": include_all_once,
-        "bundle_tag": bundle_tag,
         "hostname": socket.gethostname(),
         "files": [],
     }
@@ -337,7 +320,6 @@ def build_bundle(
     else:
         max_bytes = int(upload_cfg.get("max_bundle_mb", 50)) * 1024 * 1024
     new_offsets = dict(offsets)
-    total_log_bytes = 0
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         # Logs (incremental tail since last upload)
@@ -365,7 +347,6 @@ def build_bundle(
                     arcname = f"logs/{f.name}.from{start}"
                 zf.writestr(arcname, data)
                 new_offsets[f.name] = size
-                total_log_bytes += len(data)
                 manifest["files"].append({"name": arcname, "bytes": len(data)})
 
             # Include rotated backups (.1, .2, …) once each (size as key).
@@ -393,8 +374,7 @@ def build_bundle(
                     key=lambda x: x.stat().st_mtime,
                     reverse=True,
                 )
-                if not include_all_once:
-                    gcode_files = gcode_files[:30]
+                gcode_files = gcode_files[:30]
                 written = 0
                 for f in gcode_files:
                     if buf.tell() >= max_bytes:
@@ -459,12 +439,6 @@ def build_bundle(
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"fabcnc_{device_id}_{ts}_{trigger_tag}.zip"
     state["offsets"] = new_offsets
-    state["last_bundle"] = {
-        "filename": filename,
-        "bundle_id": manifest["bundle_id"],
-        "bytes": len(data),
-        "ts": manifest["created_at"],
-    }
     # State is only persisted on a successful upload (caller does that).
     manifest["_state"] = state
     return data, filename, manifest
@@ -669,15 +643,9 @@ def upload_now(full: bool = False, trigger: str = "retry") -> dict:
             zip_bytes, filename, manifest = build_bundle(
                 full=full, trigger=trigger, max_bytes_override=override
             )
-            include_all_once = bool(cfg.get("include_all_gcode_once", False))
             try:
                 result = _do_upload(zip_bytes, filename, manifest)
                 _write_state(manifest.pop("_state"))
-                if include_all_once:
-                    try:
-                        logging_setup.save_upload_config({"include_all_gcode_once": False})
-                    except Exception as e:
-                        logger.warning(f"Could not reset include_all_gcode_once after upload: {e}")
                 logging_setup.log_event(
                     "system",
                     "log_upload",
@@ -717,68 +685,3 @@ def upload_now(full: bool = False, trigger: str = "retry") -> dict:
                     "system", "log_upload", ok=False, error=str(e), filename=filename
                 )
                 return {"ok": False, "error": str(e), "filename": filename, "bytes": len(zip_bytes)}
-
-
-def _uploader_loop(interval_s: float) -> None:
-    logger.info(f"Log uploader thread started (interval={interval_s/60:.1f} min)")
-    # Stagger first run slightly so the app finishes booting first.
-    if _stop_event.wait(min(30.0, interval_s)):
-        return
-    while not _stop_event.is_set():
-        global _job_run_since_last_periodic
-        if _job_run_since_last_periodic:
-            # Clear before uploading so a job that starts during the upload
-            # sets the flag for the following interval. Restore it on failure
-            # so transient network errors do not silently discard the retry.
-            _job_run_since_last_periodic = False
-            try:
-                result = upload_now(full=False, trigger="retry")
-                if not result.get("ok"):
-                    _job_run_since_last_periodic = True
-            except Exception as e:
-                _job_run_since_last_periodic = True
-                logger.exception(f"Uploader iteration crashed: {e}")
-        else:
-            logger.debug("Periodic upload skipped — no job run since last upload")
-        if _stop_event.wait(interval_s):
-            break
-    logger.info("Log uploader thread stopped")
-
-
-def start_uploader() -> None:
-    """Start the background uploader if enabled in config."""
-    global _uploader_thread
-    cfg = logging_setup.load_config()["upload"]
-    if not cfg.get("enabled"):
-        logger.info("Log uploader disabled (upload.enabled=false)")
-        return
-    if not cfg.get("url"):
-        logger.warning("Log uploader enabled but upload.url is empty — not starting")
-        return
-    interval_min = float(cfg.get("interval_minutes", 60) or 0)
-    if interval_min <= 0:
-        logger.info("Log uploader periodic interval is 0 — manual uploads only")
-        return
-    if _uploader_thread and _uploader_thread.is_alive():
-        return
-    _stop_event.clear()
-    _uploader_thread = threading.Thread(
-        target=_uploader_loop, args=(interval_min * 60,), daemon=True, name="log-uploader"
-    )
-    _uploader_thread.start()
-
-
-def stop_uploader() -> None:
-    _stop_event.set()
-
-
-def restart_uploader() -> None:
-    """Stop and re-launch the uploader thread (picks up new config)."""
-    global _uploader_thread
-    stop_uploader()
-    if _uploader_thread and _uploader_thread.is_alive():
-        _uploader_thread.join(timeout=5.0)
-    _uploader_thread = None
-    # Force a fresh config read on next call.
-    logging_setup.load_config(force=True)
-    start_uploader()

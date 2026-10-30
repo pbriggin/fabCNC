@@ -242,8 +242,9 @@ sudo nmcli connection modify "$CON" -802-11-wireless.bssid "" && echo "BSSID loc
 ## Logging & Remote Diagnostics
 
 fabCNC writes structured logs to `cnc_ui/logs/` and can ship them to a remote
-endpoint on a schedule — designed for headless Raspberry Pi installs where SSH
-isn't available.
+endpoint when a job completes, aborts, stops, or the controller disconnects.
+Operators can also request an upload from the System tab. This supports headless
+Raspberry Pi installs where SSH isn't available.
 
 ### Files written
 
@@ -259,7 +260,7 @@ All four files rotate (default 10 MB × 10 backups).
 ### Configure from the GUI (no SSH needed)
 
 Open the **System** tab → **Debug** section. There is no editable form for
-upload settings (URL, interval, device ID, etc.) — those are only set via
+upload settings (URL, device ID, etc.) — those are only set via
 `logging_config.json` (see below). The GUI gives you two buttons:
 
 | Button | What it does |
@@ -290,15 +291,12 @@ apply (or use the **Restart Service** button in the System tab).
   "max_file_size_mb": 10,
   "backup_count": 10,
   "upload": {
-    "enabled": true,
     "url": "https://v0-good-pigeon.vercel.app/api/fabcnc-logs",
     "method": "POST",
-    "interval_minutes": 0,
     "device_id": "shop-pi-1",
     "auth_header": "",
     "piece_count_webhook_url": "https://v0-good-pigeon.vercel.app/api/cnc-webhook",
     "include_gcode": true,
-    "include_all_gcode_once": false,
     "include_uploads": true,
     "max_bundle_mb": 4
   }
@@ -363,9 +361,8 @@ next upload once the backlog eases.
 
 Three ways:
 
-1. **Automatic push** — set `upload.enabled=true` and `upload.interval_minutes`
-   to a nonzero value in `logging_config.json`, then restart the service. The
-   uploader thread runs on that interval.
+1. **Event-triggered upload** — fabCNC uploads logs after job completion,
+   abort, or stop, and after a controller disconnect.
 2. **One-click upload from the GUI** — open the System tab and click
    **Send Logs to Dev**. Same bundle, sent immediately.
 3. **Download from any browser** — `http://<pi>:8080/debug-bundle` returns a

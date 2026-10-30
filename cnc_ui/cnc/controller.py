@@ -2096,9 +2096,6 @@ class CNCController:
             piece_count=self._current_job_piece_count,
             job_id=self.current_job_id,
         )
-        if _log_uploader:
-            _log_uploader.notify_job_run()
-
         machine_state.set_status("Uploading to SD card...", busy=True, paused=False)
         self.job_thread = threading.Thread(
             target=self._execute_sd_job,

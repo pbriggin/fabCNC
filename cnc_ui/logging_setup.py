@@ -54,15 +54,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "backup_count": 10,
     # Optional remote shipping of the rolling log bundle.
     "upload": {
-        "enabled": False,
         "url": "",                  # HTTPS endpoint that accepts POST multipart
         "method": "POST",           # POST (multipart) or PUT (raw zip body)
-        "interval_minutes": 60,     # 0 disables the periodic uploader
         "device_id": "",            # Defaults to hostname when blank
         "auth_header": "",          # e.g. "Bearer abc123" (optional)
         "piece_count_webhook_url": "",  # Optional piece-count relay endpoint (Good Pigeon)
         "include_gcode": True,
-        "include_all_gcode_once": False,  # True means include all gcode on next successful upload only
         "include_uploads": False,   # DXFs can be big; off by default
         "max_bundle_mb": 50,
     },
@@ -111,30 +108,6 @@ def _deep_merge(dst: dict, src: dict) -> None:
 
 def get_log_dir() -> Path:
     return Path(load_config()["log_dir"])
-
-
-def save_upload_config(updates: dict[str, Any]) -> dict[str, Any]:
-    """Persist changes to the ``upload`` section of logging_config.json.
-
-    Only keys present in ``updates`` are touched, so this is safe to call
-    from a partial GUI form. Returns the new merged config.
-    """
-    # Start with whatever is on disk (or defaults).
-    on_disk: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
-        try:
-            on_disk = json.loads(CONFIG_PATH.read_text())
-        except Exception:
-            on_disk = {}
-    upload = dict(on_disk.get("upload") or {})
-    upload.update({k: v for k, v in updates.items() if v is not None})
-    on_disk["upload"] = upload
-    # Keep top-level defaults if file was missing.
-    on_disk.setdefault("enabled", True)
-    on_disk.setdefault("log_dir", "cnc_ui/logs")
-    CONFIG_PATH.write_text(json.dumps(on_disk, indent=2))
-    # Force re-read so subsequent log_event / uploader calls see new values.
-    return load_config(force=True)
 
 
 # ── Internal state ────────────────────────────────────────────────────────────
