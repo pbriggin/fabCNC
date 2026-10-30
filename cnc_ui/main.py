@@ -435,7 +435,7 @@ z_cut_height = _ClientDict('z_cut_height', {'value': -35.0})
 
 # Cut settings state — persisted with canvas saves
 PRESSURE_MAP = {'Trace': -13.65, 'Light': -26.15, 'Medium': -28.65, 'Hard': -31.15, 'Very Hard': -33.65}
-SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (10000.0, 10000.0), 'Fast': (15000.0, 18000.0)}
+SPEED_MAP    = {'Slow': (5000.0, 8000.0), 'Medium': (9000.0, 12000.0), 'Fast': (12000.0, 15000.0)}
 cut_settings = _ClientDict('cut_settings', {'pressure': 'Medium', 'speed': 'Medium'})
 def _mark_canvas_dirty() -> None:
     """Record that the in-memory canvas no longer matches its saved file."""
@@ -471,9 +471,9 @@ toolpath_generator = ToolpathGenerator(
     cutting_height=-30.0,  # Z height when cutting (mm)
     safe_height=-10.0,     # Z height when raised (mm)
     corner_angle_threshold=20.0,  # Standardized threshold across all corner detection
-    feed_rate=15000.0,     # mm/min (250 mm/s)
+    feed_rate=12000.0,     # mm/min (200 mm/s)
     plunge_rate=12000.0,    # mm/min
-    rapid_rate=18000.0,    # mm/min (300 mm/s) - rapid/jog moves
+    rapid_rate=15000.0,    # mm/min (250 mm/s) - rapid/jog moves
     min_curve_feed_rate=1000.0,  # mm/min - slow down for tight curves
     curve_slowdown_radius=75.0   # Start slowing below this radius (mm)
 )
@@ -2120,6 +2120,27 @@ def _clear_canvas_now():
     ui.notify('Canvas cleared.', type='info')
 
 
+def _query_marlin_firmware_version() -> str | None:
+    """Query M115 through the controller's idle-only serial transaction path."""
+    if not cnc_controller.connected or not machine_state.is_idle():
+        return None
+
+    response = cnc_controller.send_manual_command('M115', timeout=8.0)
+    match = re.search(r'FIRMWARE_NAME:([^\r\n]+)', response, re.IGNORECASE)
+    if not match:
+        logger.info("Could not read Marlin firmware identity from M115: %s", response[:300])
+        return None
+
+    identity = re.split(
+        r'\s+(?:SOURCE_CODE_URL|PROTOCOL_VERSION|MACHINE_TYPE|EXTRUDER_COUNT):',
+        match.group(1),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    logger.info("Queried Marlin firmware identity before toolpath generation: %s", identity)
+    return identity or None
+
+
 async def _toggle_toolpath_impl(button):
     """Toggle between Generate Toolpath and Clear Toolpath modes."""
     global current_gcode
@@ -2201,7 +2222,6 @@ async def _toggle_toolpath_impl(button):
             min_curve_feed_rate=toolpath_generator.min_curve_feed_rate,
             curve_slowdown_radius=toolpath_generator.curve_slowdown_radius,
         )
-        generator.stealthchop = cut_settings['speed'] in ('Slow', 'Medium')
         
         # Fetch notch data from canvas (in mm coords, geometry pre-computed)
         notches = {}
@@ -2222,12 +2242,19 @@ async def _toggle_toolpath_impl(button):
         import concurrent.futures as _cf
         shapes_snapshot = dict(current_toolpath_shapes)
         notches_snapshot = dict(notches)
+        canvas_name = _canvas_job_label()
         with _cf.ThreadPoolExecutor(max_workers=1) as _exec:
             viz_data, gcode_str = await loop.run_in_executor(
                 _exec,
                 lambda: (
                     generator.generate_visualization_data(shapes_snapshot),
-                    generator.generate_toolpath(shapes_snapshot, source_filename="preview", notches=notches_snapshot)
+                    generator.generate_toolpath(
+                        shapes_snapshot,
+                        source_filename="preview",
+                        notches=notches_snapshot,
+                        canvas_name=canvas_name,
+                        firmware_version=_query_marlin_firmware_version(),
+                    )
                 )
             )
         current_gcode = gcode_str.split('\n')
