@@ -946,6 +946,7 @@ class CNCController:
                     "Cap:BINARY_FILE_TRANSFER:1",
                     "Cap:SDCARD:1",
                     "Cap:SD_WRITE:1",
+                    "Cap:CUSTOM_FIRMWARE_UPLOAD:1",
                 )
                 missing_caps = [cap for cap in required_caps if cap.lower() not in response.lower()]
                 if not _sd_response_ok(response) or missing_caps:
@@ -1096,12 +1097,29 @@ class CNCController:
 
                 report("Verifying upload", 92.0, f"Checking the onboard SD listing for {_FIRMWARE_FILENAME}.")
                 listing = self._exchange_locked("M20 F", 15.0)
-                if (
-                    not _sd_response_ok(listing)
-                    or re.search(r"(?<![A-Za-z0-9_.-])firmware\.bin(?![A-Za-z0-9_.-])", listing, re.I) is None
-                ):
+                # A stray trailing BFT footer byte was seen prepended to this
+                # first command on affected firmware builds. M20 F is read-only,
+                # so retry once only when Marlin explicitly rejects that form.
+                if re.search(r"unknown command:\s*[\"']?,\s*m20\s+f", listing, re.I):
+                    logger.warning("Marlin rejected M20 F with a leading BFT footer byte; retrying the listing")
+                    listing = self._exchange_locked("M20 F", 15.0)
+
+                filename_match = re.search(
+                    r"(?im)^\s*firmware\.bin\s+(\d+)\s*$", listing
+                )
+                if not _sd_response_ok(listing):
+                    raise BFTProtocolError(
+                        f"Marlin rejected the SD listing command: {listing or 'No response'}"
+                    )
+                if not filename_match:
                     raise BFTProtocolError(
                         f"Marlin did not list the completed {_FIRMWARE_FILENAME}: {listing or 'No response'}"
+                    )
+                listed_size = int(filename_match.group(1))
+                if listed_size != len(image):
+                    raise BFTProtocolError(
+                        f"Marlin lists {_FIRMWARE_FILENAME} as {listed_size:,} bytes; "
+                        f"the uploaded firmware is {len(image):,} bytes."
                     )
 
                 report("Rebooting controller", 94.0, "Upload verified; requesting the firmware reboot once.")
