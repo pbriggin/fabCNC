@@ -1097,11 +1097,11 @@ class CNCController:
 
                 report("Verifying upload", 92.0, f"Checking the onboard SD listing for {_FIRMWARE_FILENAME}.")
                 listing = self._exchange_locked("M20 F", 15.0)
-                # A stray trailing BFT footer byte was seen prepended to this
-                # first command on affected firmware builds. M20 F is read-only,
-                # so retry once only when Marlin explicitly rejects that form.
-                if re.search(r"unknown command:\s*[\"']?,\s*m20\s+f", listing, re.I):
-                    logger.warning("Marlin rejected M20 F with a leading BFT footer byte; retrying the listing")
+                # Binary bytes can leak into the first text command when leaving
+                # BFT on older firmware. M20 F is read-only, so retry once after
+                # any explicit unknown-command response.
+                if "unknown command" in listing.lower():
+                    logger.warning("Marlin rejected the first post-BFT M20 F listing; retrying once")
                     listing = self._exchange_locked("M20 F", 15.0)
 
                 filename_match = re.search(
