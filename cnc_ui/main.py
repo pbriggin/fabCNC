@@ -2554,23 +2554,6 @@ async def stop_job():
         ui.notify('SD stop failed — use the physical E-stop.', type='negative', timeout=8000)
 
 
-async def resume_disconnect_job():
-    """Home the machine then resume a job interrupted by a controller disconnect."""
-    if not _require_controller_connected():
-        return
-    log_event('job', 'resume_disconnect_clicked')
-    ui.notify('Homing before resume…', type='info')
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, cnc_controller.home_all)
-    if not cnc_controller.homed:
-        ui.notify('Homing failed — cannot resume.', type='negative')
-        return
-    if not cnc_controller.resume_from_disconnect():
-        ui.notify('Resume failed — no saved state found.', type='negative')
-        return
-    ui.notify('Resuming from last safe point…', type='positive')
-
-
 async def retry_controller_connection():
     """Retry the controller connection after power is restored."""
     if _deny_cloudflare_control():
@@ -5011,10 +4994,9 @@ def main_page():
                             ui.timer(0.5, update_firmware_controls)
 
 
-        # Per-page state for disconnect recovery and resume dialog
+        # Per-page state for disconnect recovery feedback
         _prev_status_local: list = [None]
-        _resume_dialog_shown: list = [False]
-        _was_disconnected: list = [False]   # set on any 'Disconnected' status, cleared on resume/discard
+        _was_disconnected: list = [False]
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
         _prev_controls_disabled_look: list = [False]  # last CSS-toggled disconnected-look state sent to browser
         _disconnect_started_at_local: list[float | None] = [None]
@@ -5242,30 +5224,6 @@ def main_page():
         status_pill.style('cursor: pointer;')
         status_pill.on('click', _reopen_connection_alert)
 
-        def _show_resume_dialog():
-            _resume_dialog_shown[0] = True
-            with ui.dialog().props('persistent') as dlg, \
-                 ui.card().style(_DIALOG_CARD_STYLE):
-                ui.label('Resume interrupted job?') \
-                    .classes('text-h6 font-bold').style('margin-bottom:6px;')
-                ui.label(
-                    'The controller reconnected. The machine will re-home then continue from the last safe position.'
-                ).classes('text-body2').style('color:#aaa;')
-                with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
-                    ui.button('Discard', on_click=lambda: (
-                        cnc_controller.clear_resume_state(), dlg.close()
-                    )).props('flat').style('color:#aaa;')
-
-                    async def _do_resume():
-                        dlg.close()
-                        await resume_disconnect_job()
-
-                    ui.button(
-                        'Resume Job', icon='settings_backup_restore',
-                        on_click=_do_resume,
-                    ).style('background:#FFA726; color:#000;').classes('remote-control-lock')
-            dlg.open()
-
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label, status_pill, status_icon)
@@ -5298,7 +5256,6 @@ def main_page():
             # Track whether we've ever seen a disconnect since this page loaded.
             if disconnected or alert_due:
                 _was_disconnected[0] = True
-                _resume_dialog_shown[0] = False
 
             if alert_due:
                 if not _connection_alert_dismissed[0]:
@@ -5320,22 +5277,10 @@ def main_page():
             if prev != current_status:
                 _prev_status_local[0] = current_status
 
-            # Show resume dialog only once, and only when:
-            #   - we previously saw a disconnect on this page
-            #   - the controller is actually reconnected and idle now
-            #   - a resume state file exists
-            #   - we haven't already shown the dialog
-            if (
-                _was_disconnected[0]
-                and not _resume_dialog_shown[0]
-                and cnc_controller.connected
-                and current_status == 'Idle'
-            ):
-                connection_alert.set_visibility(False)
+            # Confirm the connection is back once the controller is idle again.
+            if _was_disconnected[0] and cnc_controller.connected and current_status == 'Idle':
                 ui.notify('Controller reconnected.', type='positive')
                 _was_disconnected[0] = False
-                if cnc_controller.has_resume_state():
-                    _show_resume_dialog()
 
         ui.timer(0.1, _update_ui_timer)
 

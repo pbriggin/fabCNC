@@ -35,8 +35,7 @@ from .firmware_update import (
 from .state import machine_state
 import logging
 
-# Persisted between runs — written on disconnect, deleted on successful resume
-_RESUME_STATE_FILE = Path(__file__).parent.parent / 'resume_state.json'
+# Persisted between runs to reconcile a possible active SD-card job
 _SD_JOB_STATE_FILE = Path(__file__).parent.parent / 'sd_job_state.json'
 
 # Marlin line-number protocol parsing. Used while a job is streaming so we can
@@ -243,7 +242,6 @@ class CNCController:
         
         # Try to connect on initialization
         self.homed = False              # True only after a successful home_all()
-        self._current_job_gcode: list = []  # Copy of last started job's gcode
         self._current_job_piece_count = 0
         self._current_source_filename: Optional[str] = None
         self.current_job_id = ""
@@ -416,15 +414,12 @@ class CNCController:
         log_controller_event("serial_disconnect")
         if self.sd_job_active:
             # An SD print may continue without the Pi's serial link. Do not offer
-            # the serial-stream resume flow, which uses line acknowledgements.
             # Reopen the configured UART, then ask Marlin whether playback is
             # still active before deciding what the UI should report.
             self.sd_job_disconnected = True
             log_controller_event("sd_job_host_disconnected", filename=_SD_FILENAME)
             log_controller_event("serial_auto_reconnect_started", reason="sd_job_disconnect")
             self._start_reconnect_loop()
-        elif not self.sd_uploading and not self.reset_required:
-            self._save_resume_state()
         if _log_uploader:
             _log_uploader.log_system_snapshot(trigger="serial_disconnect")
             threading.Thread(
@@ -632,255 +627,6 @@ class CNCController:
                 sd_idle_confirmed=True,
             )
             return True
-
-    # ==================== Resume After Disconnect ====================
-
-    def has_resume_state(self) -> bool:
-        """Check whether a resume-state file was saved after a disconnect."""
-        return _RESUME_STATE_FILE.exists()
-
-    def clear_resume_state(self) -> None:
-        """Delete the resume-state file without resuming (user chose to discard)."""
-        try:
-            _RESUME_STATE_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def _get_safe_height(self, commands: list) -> float | None:
-        """Find the tool travel (safe) height from the first G0 Z in the preamble."""
-        for cmd in commands[:30]:
-            upper = cmd.strip().upper()
-            if upper.startswith('G0 Z') or upper.startswith('G0Z'):
-                try:
-                    z_str = upper.split('Z', 1)[1].split('F')[0].strip()
-                    return float(z_str)
-                except (ValueError, IndexError):
-                    pass
-        return None
-
-    def _find_safe_resume_index(self, commands: list, last_acked: int) -> int:
-        """
-        Scan backward from last_acked to find the last G0 Z<safe_height> command.
-        That is a 'tool up, between shapes' position — safe to rapid to and resume from.
-        """
-        safe_z = self._get_safe_height(commands)
-        search_to = min(last_acked, len(commands) - 1)
-        for i in range(search_to, -1, -1):
-            upper = commands[i].strip().upper()
-            if upper.startswith('G0 Z') or upper.startswith('G0Z'):
-                if safe_z is not None:
-                    try:
-                        z_str = upper.split('Z', 1)[1].split('F')[0].strip()
-                        z_val = float(z_str)
-                        if abs(z_val - safe_z) < 0.5:
-                            return i
-                    except (ValueError, IndexError):
-                        pass
-                else:
-                    return i  # No known safe height — take the first G0 Z found
-        logger.warning("No safe G0 Z resume point found; defaulting to command 0")
-        return 0
-
-    def _extract_preamble(self, commands: list) -> list:
-        """
-        Return setup commands from the job header (before the first G0/G1 motion),
-        excluding G28 homing lines (machine is already homed at resume time).
-        """
-        preamble = []
-        for cmd in commands:
-            upper = cmd.strip().upper()
-            if upper.startswith('G0') or upper.startswith('G1'):
-                break
-            if not upper.startswith('G28'):
-                preamble.append(cmd)
-        return preamble
-
-    def _find_last_xy_before(self, commands: list, idx: int) -> tuple[float | None, float | None]:
-        """
-        Scan backward from idx for the last command that specifies both X and Y.
-        Returns (x, y) — the machine's position at the moment we want to resume.
-        Needed because gcode at safe_idx assumes the previous cut's end position,
-        but after a home + resume the machine is at (0, 0).
-        """
-        x_val: float | None = None
-        y_val: float | None = None
-        for i in range(min(idx, len(commands) - 1), -1, -1):
-            upper = commands[i].strip().upper()
-            if not (upper.startswith('G0') or upper.startswith('G1')):
-                continue
-            # Parse tokens like "X12.345", "Y-67.89"
-            for tok in upper.split():
-                if x_val is None and tok.startswith('X'):
-                    try:
-                        x_val = float(tok[1:])
-                    except ValueError:
-                        pass
-                elif y_val is None and tok.startswith('Y'):
-                    try:
-                        y_val = float(tok[1:])
-                    except ValueError:
-                        pass
-            if x_val is not None and y_val is not None:
-                return x_val, y_val
-        return x_val, y_val
-
-    def _save_resume_state(self) -> None:
-        """Persist enough information to resume the job after a reconnect + re-home."""
-        if not self._current_job_gcode:
-            logger.warning("_save_resume_state: skipped — no job gcode in memory (no job was running)")
-            return  # No job was running
-        # committed_line is the highest N Marlin confirmed (1-indexed; N1 == commands[0]),
-        # so it is also the count of filtered commands successfully completed.
-        with self.line_buffer_lock:
-            last_acked = self.committed_line
-        if last_acked == 0:
-            logger.warning("_save_resume_state: skipped — committed_line is 0 (job had not started sending)")
-            return  # Job hadn't meaningfully started
-        safe_idx = self._find_safe_resume_index(self._current_job_gcode, last_acked)
-        pct = last_acked / len(self._current_job_gcode) * 100
-        state = {
-            'filename': machine_state.snapshot().loaded_filename,
-            'safe_resume_index': safe_idx,
-            'last_acked_index': last_acked,
-            'total_commands': len(self._current_job_gcode),
-            'gcode': self._current_job_gcode,
-        }
-        try:
-            _RESUME_STATE_FILE.write_text(json.dumps(state))
-            logger.info(
-                f"Resume state saved: safe_resume_index={safe_idx}, "
-                f"last_acked={last_acked}/{len(self._current_job_gcode)} "
-                f"({pct:.1f}% complete)"
-            )
-            log_controller_event(
-                "resume_state_saved",
-                filename=machine_state.snapshot().loaded_filename,
-                safe_resume_index=safe_idx,
-                last_acked_index=last_acked,
-                total_commands=len(self._current_job_gcode),
-                pct_complete=round(pct, 1),
-            )
-        except Exception as e:
-            logger.error(f"Failed to save resume state: {e}")
-
-    def resume_from_disconnect(self) -> bool:
-        """
-        Resume a job from the saved disconnect state.
-        Machine must be homed (home_all) before calling this.
-        """
-        if not self.homed:
-            logger.warning("resume_from_disconnect: machine not homed")
-            return False
-        if not _RESUME_STATE_FILE.exists():
-            logger.warning("resume_from_disconnect: no saved state file")
-            return False
-        try:
-            state = json.loads(_RESUME_STATE_FILE.read_text())
-        except Exception as e:
-            logger.error(f"Failed to load resume state: {e}")
-            return False
-
-        gcode = state.get('gcode', [])
-        safe_idx = state.get('safe_resume_index', 0)
-        if not gcode or safe_idx >= len(gcode):
-            logger.error("Resume state is invalid or index out of range")
-            return False
-
-        preamble = self._extract_preamble(gcode)
-        safe_z = self._get_safe_height(gcode)
-        resume_x, resume_y = self._find_last_xy_before(gcode, safe_idx)
-        # After homing, the machine is at (0, 0). The gcode at safe_idx assumes
-        # the previous cut's end position. We must:
-        #   1) lift to safe Z (above any material)
-        #   2) rapid to the last known X/Y (still at safe Z)
-        # before letting the resumed gcode plunge to cut depth.
-        safety_lift = []
-        if safe_z is not None:
-            safety_lift.append(f"; --- resume safety lift to Z={safe_z} ---")
-            safety_lift.append(f"G0 Z{safe_z} F1200")
-        if resume_x is not None and resume_y is not None:
-            safety_lift.append(
-                f"; --- resume travel to last X/Y ({resume_x}, {resume_y}) at safe Z ---"
-            )
-            safety_lift.append(f"G0 X{resume_x} Y{resume_y} F10000")
-        # Our injected lift replaces the G0 Z<safe> that lives at safe_idx,
-        # so skip it to avoid a duplicate (harmless but noisy in logs).
-        resume_start = safe_idx
-        if safe_z is not None and resume_start < len(gcode):
-            head = gcode[resume_start].strip().upper()
-            if head.startswith('G0 Z') or head.startswith('G0Z'):
-                try:
-                    z_str = head.split('Z', 1)[1].split('F')[0].strip()
-                    if abs(float(z_str) - safe_z) < 0.5:
-                        resume_start += 1
-                except (ValueError, IndexError):
-                    pass
-        resume_commands = preamble + safety_lift + gcode[resume_start:]
-        logger.info(
-            f"Resuming from index {safe_idx}/{len(gcode)} — "
-            f"skipping {safe_idx} commands, {len(resume_commands)} remaining "
-            f"(safe_z={safe_z}, resume_xy=({resume_x}, {resume_y}))"
-        )
-
-        # --- Debug: save the exact gcode we're about to stream, plus context ---
-        try:
-            from datetime import datetime as _dt
-            debug_dir = Path(__file__).resolve().parent.parent / 'uploads' / 'gcode_output'
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            ts = _dt.now().strftime('%Y%m%d_%H%M%S')
-            ctx_start = max(0, safe_idx - 10)
-            ctx_lines = [
-                "; ============ RESUME DEBUG DUMP ============",
-                f"; filename:           {state.get('filename')}",
-                f"; total_commands:     {len(gcode)}",
-                f"; last_acked_index:   {state.get('last_acked_index')}",
-                f"; safe_resume_index:  {safe_idx}",
-                f"; safe_z:             {safe_z}",
-                f"; resume_xy:          ({resume_x}, {resume_y})",
-                f"; preamble_lines:     {len(preamble)}",
-                f"; safety_lift_lines:  {len(safety_lift)}",
-                f"; resume_total_lines: {len(resume_commands)}",
-                "",
-                f"; ---- Context: original gcode[{ctx_start}:{safe_idx + 5}] ----",
-            ]
-            for i in range(ctx_start, min(safe_idx + 5, len(gcode))):
-                marker = "  >>"  if i == safe_idx else "    "
-                ctx_lines.append(f"; {i:6d} {marker} {gcode[i]}")
-            ctx_lines += [
-                "",
-                "; ============ ACTUAL STREAM TO MARLIN ============",
-                "",
-            ]
-            debug_path = debug_dir / f"resume_{ts}.gcode"
-            debug_path.write_text("\n".join(ctx_lines + resume_commands) + "\n")
-            logger.info(f"Resume debug dump saved: {debug_path}")
-        except Exception as e:
-            logger.warning(f"Failed to write resume debug dump: {e}")
-        log_controller_event(
-            "job_resume_disconnect",
-            filename=state.get('filename'),
-            safe_resume_index=safe_idx,
-            last_acked_index=state.get('last_acked_index'),
-            total=len(gcode),
-        )
-
-        # Clear saved state so it isn't offered again after a clean finish
-        try:
-            _RESUME_STATE_FILE.unlink()
-        except Exception:
-            pass
-
-        self.stop_requested = False
-        self.pause_requested = False
-        self._current_job_gcode = resume_commands
-        self.job_thread = threading.Thread(
-            target=self._execute_job,
-            args=(resume_commands,),
-            daemon=True,
-            name="job-resume",
-        )
-        self.job_thread.start()
-        return True
 
     def _send_command(self, command: str) -> bool:
         """Send a G-code command to Marlin."""
@@ -2075,7 +1821,6 @@ class CNCController:
         
         self.stop_requested = False
         self.pause_requested = False
-        self._current_job_gcode = list(gcode_lines)
         self._current_job_piece_count = max(0, int(piece_count or 0))
         self._current_source_filename = source_filename or state.loaded_filename
         if self._current_source_filename:
@@ -2087,7 +1832,6 @@ class CNCController:
         self.sd_job_active = False
         self.sd_job_disconnected = False
         _SD_JOB_STATE_FILE.unlink(missing_ok=True)
-        self.clear_resume_state()
         self.sd_uploading = True
         log_controller_event(
             "job_start",
@@ -2994,11 +2738,6 @@ class CNCController:
             if line and not line.startswith('#'):
                 commands.append(line)
 
-        # Update _current_job_gcode to the filtered list so committed_line
-        # (which tracks acked filtered commands; N1 == commands[0]) is a
-        # valid index into it.
-        self._current_job_gcode = commands
-        
         total_commands = len(commands)
         # Flow control: keep some commands in flight but don't overflow Marlin's buffer
         max_in_flight = 8  # Conservative - Marlin has ~16 slot buffer
