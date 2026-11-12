@@ -1095,6 +1095,14 @@ class CNCController:
                     finally:
                         self._resume_reader()
 
+                report("Verifying upload", 91.0, "Remounting the controller SD card after the binary transfer.")
+                remount_response = self._exchange_locked("M21", 15.0)
+                if not _sd_response_ok(remount_response):
+                    raise BFTProtocolError(
+                        f"Could not remount the controller SD card after upload: "
+                        f"{remount_response or 'No response'}"
+                    )
+
                 report("Verifying upload", 92.0, f"Checking the onboard SD listing for {_FIRMWARE_FILENAME}.")
                 listing = self._exchange_locked("M20 F", 15.0)
                 # Binary bytes can leak into the first text command when leaving
