@@ -425,11 +425,11 @@ def get_local_ip():
 
 
 # Jog parameters (user-adjustable)
+JOG_FEED_RATE_MM_MIN = 9000.0  # Medium speed preset, in mm/min (A moves use deg/min)
 jog_params = _ClientDict('jog_params', {
     'xy_step': 10.0,  # mm
     'z_step': 1.0,    # mm
     'a_step': 45.0,   # degrees
-    'feed_rate': 4000.0,  # mm/min
 })
 
 # Z cut height parameter (used by toolpath generator)
@@ -570,9 +570,9 @@ async def jog_endpoint(request: Request):
     else:
         return {'status': 'error', 'message': 'Invalid axis'}
     
-    await asyncio.to_thread(cnc_controller.jog, axis, distance, jog_params['feed_rate'])
+    await asyncio.to_thread(cnc_controller.jog, axis, distance, JOG_FEED_RATE_MM_MIN)
     log_event('jog', 'jog_request', axis=axis, direction=direction, distance=distance,
-              feed_rate=jog_params['feed_rate'], source='js_endpoint')
+              feed_rate=JOG_FEED_RATE_MM_MIN, source='js_endpoint')
     return {'status': 'ok'}
 
 # Stores the latest toolpath visualization data for /toolpath-preview
@@ -1443,9 +1443,9 @@ async def jog_axis(axis: str, distance: float):
     if not await safety_confirm():
         log_event('jog', 'jog_cancelled', axis=axis, distance=distance)
         return
-    print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={jog_params['feed_rate']}")
-    log_event('jog', 'jog_button', axis=axis, distance=distance, feed_rate=jog_params['feed_rate'])
-    await asyncio.to_thread(cnc_controller.jog, axis, distance, jog_params['feed_rate'])
+    print(f"[DEBUG] jog_axis called: axis={axis}, distance={distance}, feed_rate={JOG_FEED_RATE_MM_MIN}")
+    log_event('jog', 'jog_button', axis=axis, distance=distance, feed_rate=JOG_FEED_RATE_MM_MIN)
+    await asyncio.to_thread(cnc_controller.jog, axis, distance, JOG_FEED_RATE_MM_MIN)
 
 
 async def home_axis(axis: str):

@@ -58,6 +58,7 @@ _Z_HOMING_MAX_FEEDRATE_MM_S = 5
 _Z_HOMING_MAX_ACCELERATION_MM_S2 = 15
 _Z_MAX_FEEDRATE_MM_S = 25
 _Z_MAX_ACCELERATION_MM_S2 = 100
+_MOTION_ACCELERATION_MM_S2 = 250
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -324,7 +325,9 @@ class CNCController:
                 # Enable position reporting and restore the normal
                 # acceleration only when no SD print may be active.
                 self._send_command("M114")
-                self._send_command("M204 P2000 T3000")  # Print accel 2000, Travel accel 3000
+                self._send_command(
+                    f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}"
+                )
 
             return True
         except (serial.SerialException, OSError) as e:
@@ -1606,9 +1609,11 @@ class CNCController:
             logger.info(f"JOG {axis.upper()} AXIS: distance={distance} mm, feed={feed_rate} mm/min")
             move = f"G1 {axis}{distance} F{feed_rate}"
         self._run_acknowledged_sequence_locked([
-            ("M204 P500 T500", 10.0), ("G91", 10.0), (move, 10.0),
+            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+            ("G91", 10.0), (move, 10.0),
             ("G90", 10.0), ("M400", 180.0),
-            ("M204 P2000 T3000", 10.0), ("M114", 10.0),
+            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+            ("M114", 10.0),
         ], "jog")
     
     def jog_xy(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
@@ -1640,10 +1645,12 @@ class CNCController:
     def _jog_xy_locked(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
         logger.info(f"JOG XY DIAGONAL: X={x_distance} mm, Y={y_distance} mm, feed={feed_rate} mm/min")
         self._run_acknowledged_sequence_locked([
-            ("M204 P500 T500", 10.0), ("G91", 10.0),
+            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+            ("G91", 10.0),
             (f"G1 X{x_distance} Y{y_distance} F{feed_rate}", 10.0),
             ("G90", 10.0), ("M400", 180.0),
-            ("M204 P2000 T3000", 10.0), ("M114", 10.0),
+            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+            ("M114", 10.0),
         ], "jog")
 
     def _run_acknowledged_sequence_locked(
@@ -1694,11 +1701,13 @@ class CNCController:
             commands.extend((("M17", 10.0),
                              (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
                              (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
-                             ("M204 P1000 T1000", 10.0), (f"G28 {axis}", 180.0),
+                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+                             (f"G28 {axis}", 180.0),
                              ("M400", 180.0), ("M114", 10.0),
                              (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
                              (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
-                             ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
+                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+                             ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
@@ -1744,11 +1753,13 @@ class CNCController:
             commands.extend((("M17", 10.0),
                              (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
                              (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
-                             ("M204 P1000 T1000", 10.0), ("G28", 180.0),
+                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+                             ("G28", 180.0),
                              ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
                              (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
                              (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
-                             ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
+                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
+                             ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
