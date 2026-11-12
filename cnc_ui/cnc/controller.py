@@ -52,6 +52,12 @@ SERIAL_BAUDRATE = int(os.environ.get("FABCNC_SERIAL_BAUDRATE", "115200"))
 _FIRMWARE_FILENAME = "firmware.bin"
 _MAX_FIRMWARE_SIZE = 1024 * 1024
 _BFT_PACKET_RETRIES = 3
+# Keep the restored Z limits aligned with Marlin's configured Z axis defaults.
+# Homing uses lower temporary caps to limit motion into the Z endstop.
+_Z_HOMING_MAX_FEEDRATE_MM_S = 5
+_Z_HOMING_MAX_ACCELERATION_MM_S2 = 15
+_Z_MAX_FEEDRATE_MM_S = 25
+_Z_MAX_ACCELERATION_MM_S2 = 100
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -1685,9 +1691,13 @@ class CNCController:
                 commands.extend((("M18 Y", 10.0), ("G4 P1000", 10.0),
                                  ("M17 Y", 10.0), ("G4 P500", 10.0)))
                 log_controller_event("recovery_home_y_motor_cycle", axis=axis)
-            commands.extend((("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+            commands.extend((("M17", 10.0),
+                             (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
+                             (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
                              ("M204 P1000 T1000", 10.0), (f"G28 {axis}", 180.0),
                              ("M400", 180.0), ("M114", 10.0),
+                             (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
+                             (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
                              ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
@@ -1731,9 +1741,13 @@ class CNCController:
                 commands.extend((("M18 Y", 10.0), ("G4 P1000", 10.0),
                                  ("M17 Y", 10.0), ("G4 P500", 10.0)))
                 log_controller_event("recovery_home_y_motor_cycle", axis="ALL")
-            commands.extend((("M17", 10.0), ("M203 Z5", 10.0), ("M201 Z15", 10.0),
+            commands.extend((("M17", 10.0),
+                             (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
+                             (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
                              ("M204 P1000 T1000", 10.0), ("G28", 180.0),
                              ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
+                             (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
+                             (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
                              ("M204 P2000 T3000", 10.0), ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)

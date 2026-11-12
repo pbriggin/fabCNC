@@ -593,6 +593,9 @@ class ControllerSafetyTests(unittest.TestCase):
         )
         self.assertLess(commands.index("M17 Y"), commands.index("G28"))
         self.assertFalse(controller.reset_y_motors_before_home)
+        self.assertLess(commands.index("M400"), commands.index("M203 Z25"))
+        self.assertLess(commands.index("M203 Z25"), commands.index("M201 Z100"))
+        self.assertLess(commands.index("M201 Z100"), commands.index("M18"))
 
     def test_normal_home_all_does_not_cycle_y_motors(self):
         controller = connected_controller()
@@ -605,6 +608,11 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertTrue(homed)
         self.assertNotIn("M18 Y", commands)
         self.assertEqual("M17", commands[0])
+        self.assertIn("M203 Z5", commands)
+        self.assertIn("M201 Z15", commands)
+        self.assertLess(commands.index("M400"), commands.index("M203 Z25"))
+        self.assertLess(commands.index("M203 Z25"), commands.index("M201 Z100"))
+        self.assertLess(commands.index("M201 Z100"), commands.index("M18"))
 
     def test_home_x_preserves_pending_y_motor_cycle(self):
         controller = connected_controller()
@@ -618,6 +626,27 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertTrue(homed)
         self.assertNotIn("M18 Y", commands)
         self.assertTrue(controller.reset_y_motors_before_home)
+        self.assertLess(commands.index("M400"), commands.index("M203 Z25"))
+        self.assertLess(commands.index("M203 Z25"), commands.index("M201 Z100"))
+        self.assertLess(commands.index("M201 Z100"), commands.index("M18"))
+
+    def test_home_fails_closed_if_z_limit_restore_is_not_acknowledged(self):
+        controller = connected_controller()
+        controller._quiesce_before_stream = lambda timeout=180.0: True
+        commands = []
+
+        def respond(command, timeout):
+            commands.append(command)
+            return "Error: rejected" if command == "M201 Z100" else "ok"
+
+        controller._exchange_locked = respond
+
+        homed = controller.home_all()
+
+        self.assertFalse(homed)
+        self.assertFalse(controller.homed)
+        self.assertTrue(controller.serial_uncertain)
+        self.assertNotIn("M18", commands)
 
     def test_sd_monitor_does_not_issue_position_poll(self):
         controller = connected_controller()
