@@ -939,6 +939,17 @@ class CNCController:
                     except Exception:
                         logger.exception("Firmware update progress callback failed")
 
+            def post_bft_command(command: str) -> str:
+                response = self._exchange_locked(command, 15.0)
+                # Older firmware can leave binary bytes ahead of the first text
+                # command after BFT. M21 and M20 F are safe to repeat.
+                if "unknown command" in response.lower():
+                    logger.warning(
+                        "Marlin rejected the first post-BFT %s command; retrying once", command
+                    )
+                    response = self._exchange_locked(command, 15.0)
+                return response
+
             try:
                 report("Preparing", 2.0, "Querying Marlin firmware capabilities.")
                 response = self._exchange_locked("M115", 10.0)
@@ -1096,7 +1107,7 @@ class CNCController:
                         self._resume_reader()
 
                 report("Verifying upload", 91.0, "Remounting the controller SD card after the binary transfer.")
-                remount_response = self._exchange_locked("M21", 15.0)
+                remount_response = post_bft_command("M21")
                 if not _sd_response_ok(remount_response):
                     raise BFTProtocolError(
                         f"Could not remount the controller SD card after upload: "
@@ -1104,13 +1115,7 @@ class CNCController:
                     )
 
                 report("Verifying upload", 92.0, f"Checking the onboard SD listing for {_FIRMWARE_FILENAME}.")
-                listing = self._exchange_locked("M20 F", 15.0)
-                # Binary bytes can leak into the first text command when leaving
-                # BFT on older firmware. M20 F is read-only, so retry once after
-                # any explicit unknown-command response.
-                if "unknown command" in listing.lower():
-                    logger.warning("Marlin rejected the first post-BFT M20 F listing; retrying once")
-                    listing = self._exchange_locked("M20 F", 15.0)
+                listing = post_bft_command("M20 F")
 
                 filename_match = re.search(
                     r"(?im)^\s*firmware\.bin\s+(\d+)\s*$", listing
