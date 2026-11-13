@@ -101,25 +101,21 @@ class ToolpathGenerator:
             "",
         ])
         
-        # --- Cut all notches FIRST, before any shape outlines ---
-        if notches:
+        # --- Cut notches in nearest-neighbor order, before shape outlines ---
+        planned_notches = self._plan_notches_by_proximity(notches or {})
+        if planned_notches:
             gcode_lines.append("; === NOTCH CUTS (cut before outlines) ===")
-            for shape_name, shape_notch_list in notches.items():
-                for notch in shape_notch_list:
-                    gcode_lines.extend(self._generate_notch_gcode(shape_name, notch))
+            for shape_name, notch, first_arm in planned_notches:
+                gcode_lines.extend(
+                    self._generate_notch_gcode(shape_name, notch, first_arm)
+                )
             gcode_lines.append("")
         
         # Notch cuts run before outlines and finish at the last notch apex.
         # Use that point as the start of the nearest-neighbor outline route.
         start_point = (0.0, 0.0)
-        if notches:
-            last_notch = next(
-                (notch for notch_list in reversed(list(notches.values()))
-                 for notch in reversed(notch_list)),
-                None,
-            )
-            if last_notch:
-                start_point = tuple(last_notch['apex'])
+        if planned_notches:
+            start_point = tuple(planned_notches[-1][1]['apex'])
 
         sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
         
@@ -227,7 +223,12 @@ class ToolpathGenerator:
             "M18 ; Disable steppers",
         ]
     
-    def _generate_notch_gcode(self, shape_name: str, notch: dict) -> list:
+    def _generate_notch_gcode(
+        self,
+        shape_name: str,
+        notch: dict,
+        first_arm: str = 'e1',
+    ) -> list:
         """
         Generate GCODE for a single V-notch cut.
 
@@ -242,32 +243,25 @@ class ToolpathGenerator:
             List of GCODE lines
         """
         apex = notch['apex']
-        e1   = notch['e1']
-        e2   = notch['e2']
+        arms = [('e1', notch['e1']), ('e2', notch['e2'])]
+        if first_arm == 'e2':
+            arms.reverse()
         lines = [f"; Notch on {shape_name}"]
 
-        # --- Arm 1: e1 → apex ---
-        # Set blade parallel to this arm before plunging
-        target_a = self._calculate_z_rotation(e1, apex)
-        self.current_a = self._calculate_continuous_a(target_a)
-        lines.append(
-            f"G0 X{e1[0]:.3f} Y{e1[1]:.3f} A{self.current_a:.2f} "
-            f"F{self.rapid_rate:.0f} ; Move to notch arm 1 and align blade"
-        )
-        lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
-        lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
-        lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
-
-        # --- Arm 2: e2 → apex ---
-        target_a = self._calculate_z_rotation(e2, apex)
-        self.current_a = self._calculate_continuous_a(target_a)
-        lines.append(
-            f"G0 X{e2[0]:.3f} Y{e2[1]:.3f} A{self.current_a:.2f} "
-            f"F{self.rapid_rate:.0f} ; Move to notch arm 2 and align blade"
-        )
-        lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
-        lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
-        lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
+        for arm_name, endpoint in arms:
+            arm_number = '1' if arm_name == 'e1' else '2'
+            target_a = self._calculate_z_rotation(endpoint, apex)
+            self.current_a = self._calculate_continuous_a(target_a)
+            lines.append(
+                f"G0 X{endpoint[0]:.3f} Y{endpoint[1]:.3f} A{self.current_a:.2f} "
+                f"F{self.rapid_rate:.0f} ; Move to notch arm {arm_number} and align blade"
+            )
+            lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
+            lines.append(
+                f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} "
+                f"F{self.feed_rate:.0f} ; Cut to apex"
+            )
+            lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
         lines.append("")
 
         return lines
@@ -662,14 +656,9 @@ class ToolpathGenerator:
         result = {'shapes': {}}
         
         start_point = (0.0, 0.0)
-        if notches:
-            last_notch = next(
-                (notch for notch_list in reversed(list(notches.values()))
-                 for notch in reversed(notch_list)),
-                None,
-            )
-            if last_notch:
-                start_point = tuple(last_notch['apex'])
+        planned_notches = self._plan_notches_by_proximity(notches or {})
+        if planned_notches:
+            start_point = tuple(planned_notches[-1][1]['apex'])
 
         sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
         
@@ -729,6 +718,43 @@ class ToolpathGenerator:
             logger.info(f"Generated visualization for {shape_name}: {len(segments)} segments, {corner_count} corners")
         
         return result
+
+    def _plan_notches_by_proximity(
+        self,
+        notches: Dict[str, list],
+        start_point: Tuple[float, float] = (0.0, 0.0),
+    ) -> List[Tuple[str, dict, str]]:
+        """Greedily order notches from the closest available arm endpoint.
+
+        Each notch ends at its apex, so that becomes the current position for
+        selecting the next notch. The nearer endpoint is cut first.
+        """
+        remaining = [
+            (shape_name, notch)
+            for shape_name, shape_notches in notches.items()
+            for notch in shape_notches
+        ]
+        planned = []
+        current = tuple(start_point)
+
+        while remaining:
+            best_choice = None
+            best_distance = float('inf')
+
+            for index, (shape_name, notch) in enumerate(remaining):
+                for arm_name in ('e1', 'e2'):
+                    distance = math.dist(current, notch[arm_name])
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_choice = (index, shape_name, notch, arm_name)
+
+            index, shape_name, notch, first_arm = best_choice
+            remaining.pop(index)
+            planned.append((shape_name, notch, first_arm))
+            current = tuple(notch['apex'])
+
+        logger.info("Planned %d notches by nearest travel start", len(planned))
+        return planned
 
     def _plan_shapes_by_proximity(
         self,
