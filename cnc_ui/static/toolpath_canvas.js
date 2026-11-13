@@ -209,6 +209,16 @@ function initCanvas(elementId) {
         selection: true,
         preserveObjectStacking: true
     });
+
+    const reportCutLastSelection = () => {
+        if (!window.emitEvent) return;
+        window.emitEvent('cut_last_selection_changed', {
+            shapeNames: getSelectedShapes().map(shape => shape.shapeName)
+        });
+    };
+    canvas.on('selection:created', reportCutLastSelection);
+    canvas.on('selection:updated', reportCutLastSelection);
+    canvas.on('selection:cleared', reportCutLastSelection);
     
     // Force background color multiple ways (Fabric.js can be stubborn)
     canvas.backgroundColor = BG_COLOR;

@@ -3986,6 +3986,7 @@ def main_page():
                             # Second toolbar row: inspection/editing tools
                             notch_mode_state = {'active': False, 'btn': None}
                             measure_mode_state = {'active': False, 'btn': None}
+                            cut_last_button_state = {'btn': None}
 
                             def toggle_notch_mode():
                                 notch_mode_state['active'] = not notch_mode_state['active']
@@ -4018,7 +4019,18 @@ def main_page():
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;')
                                     btn.set_text('Measure')
 
-                            async def mark_selected_shapes_cut_last():
+                            def update_cut_last_button(selected_names=None):
+                                btn = cut_last_button_state['btn']
+                                if not btn:
+                                    return
+                                selected_names = selected_names or []
+                                all_marked = bool(selected_names) and all(
+                                    name in current_toolpath_cut_last
+                                    for name in selected_names
+                                )
+                                btn.set_text('Cut Normally' if all_marked else 'Cut Last')
+
+                            async def toggle_selected_shapes_cut_last():
                                 global current_gcode
                                 try:
                                     selected_names = await ui.run_javascript(
@@ -4033,27 +4045,14 @@ def main_page():
                                 if not selected_names:
                                     ui.notify('Select one or more shapes first.', type='warning')
                                     return
-                                changed = False
+                                remove_cut_last = all(
+                                    name in current_toolpath_cut_last for name in selected_names
+                                )
                                 for name in selected_names:
-                                    if name not in current_toolpath_cut_last:
+                                    if remove_cut_last:
+                                        current_toolpath_cut_last.pop(name, None)
+                                    else:
                                         current_toolpath_cut_last[name] = True
-                                        changed = True
-                                if changed:
-                                    _mark_canvas_dirty()
-                                    if client_job_state['toolpath_generated']:
-                                        machine_state.set_toolpath_generated(False)
-                                        client_job_state['toolpath_generated'] = False
-                                        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
-                                        _sync_toolpath_button(False)
-                                        current_gcode = []
-                                        app.storage.user.pop('generated_job', None)
-                                ui.notify(f'{len(selected_names)} shape(s) will be cut last.', type='positive')
-
-                            def clear_cut_last_shapes():
-                                global current_gcode
-                                if not current_toolpath_cut_last:
-                                    return
-                                current_toolpath_cut_last.clear()
                                 _mark_canvas_dirty()
                                 if client_job_state['toolpath_generated']:
                                     machine_state.set_toolpath_generated(False)
@@ -4062,7 +4061,19 @@ def main_page():
                                     _sync_toolpath_button(False)
                                     current_gcode = []
                                     app.storage.user.pop('generated_job', None)
-                                ui.notify('Cut-last selection cleared.', type='info')
+                                update_cut_last_button(selected_names)
+                                message = (
+                                    f'{len(selected_names)} shape(s) will be cut normally.'
+                                    if remove_cut_last else
+                                    f'{len(selected_names)} shape(s) will be cut last.'
+                                )
+                                ui.notify(message, type='info' if remove_cut_last else 'positive')
+
+                            def on_cut_last_selection_changed(e):
+                                data = e.args if isinstance(e.args, dict) else (e.args[0] if e.args else {})
+                                names = data.get('shapeNames', []) if isinstance(data, dict) else []
+                                names = [name for name in names if name in current_toolpath_shapes]
+                                update_cut_last_button(names)
 
                             def toggle_measure_mode():
                                 measure_mode_state['active'] = not measure_mode_state['active']
@@ -4082,8 +4093,8 @@ def main_page():
                                 measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point')
                                 measure_mode_state['btn'] = measure_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.button('Cut Last', icon='last_page', on_click=mark_selected_shapes_cut_last).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFB74D;').tooltip('Select one or more shapes, then mark them to be cut after all other shapes')
-                                ui.button('Clear Last', icon='close', on_click=clear_cut_last_shapes).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Clear all cut-last assignments')
+                                cut_last_btn = ui.button('Cut Last', icon='last_page', on_click=toggle_selected_shapes_cut_last).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFB74D;').tooltip('Select one or more shapes; toggle whether they are cut after the other shapes')
+                                cut_last_button_state['btn'] = cut_last_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
                                 ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint')
@@ -4322,6 +4333,8 @@ def main_page():
                                         ui.notify('Toolpath cleared because a shape was deleted.', type='info')
                             
                             ui.on('shape_deleted', on_shape_deleted)
+
+                            ui.on('cut_last_selection_changed', on_cut_last_selection_changed)
 
                             # Generic canvas action emitter from JavaScript — catches
                             # transforms, copy/paste, undo, zoom, notch add/remove, etc.
