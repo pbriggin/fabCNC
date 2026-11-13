@@ -287,15 +287,16 @@ class ToolpathGenerator:
         gcode_lines = []
         gcode_lines.append(f"; Shape: {shape_name}")
         
-        # Move to start point
+        # Travel to the next shape while orienting the blade. At this point
+        # Z is already at safe_height from homing, the previous shape, or the
+        # last notch, so XY and A can move together without dragging the blade.
         first_point = points[0]
-        gcode_lines.append(f"G0 X{first_point[0]:.3f} Y{first_point[1]:.3f} F{self.rapid_rate} ; Move to start")
-        
-        # Set initial A rotation and plunge
-        if len(points) > 1:
-            target_a = self._calculate_z_rotation(first_point, points[1])
-            self.current_a = self._calculate_continuous_a(target_a)
-            gcode_lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate} ; Set initial blade angle")
+        target_a = self._calculate_z_rotation(first_point, points[1])
+        self.current_a = self._calculate_continuous_a(target_a)
+        gcode_lines.append(
+            f"G0 X{first_point[0]:.3f} Y{first_point[1]:.3f} "
+            f"A{self.current_a:.2f} F{self.rapid_rate} ; Travel to start and align blade"
+        )
         
         gcode_lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate} ; Plunge to cutting height")
         
