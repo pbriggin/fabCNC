@@ -250,8 +250,10 @@ class ToolpathGenerator:
         # Set blade parallel to this arm before plunging
         target_a = self._calculate_z_rotation(e1, apex)
         self.current_a = self._calculate_continuous_a(target_a)
-        lines.append(f"G0 X{e1[0]:.3f} Y{e1[1]:.3f} F{self.rapid_rate:.0f} ; Move to notch arm 1")
-        lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate:.0f} ; Align blade for notch arm 1")
+        lines.append(
+            f"G0 X{e1[0]:.3f} Y{e1[1]:.3f} A{self.current_a:.2f} "
+            f"F{self.rapid_rate:.0f} ; Move to notch arm 1 and align blade"
+        )
         lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
         lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
         lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
@@ -259,8 +261,10 @@ class ToolpathGenerator:
         # --- Arm 2: e2 → apex ---
         target_a = self._calculate_z_rotation(e2, apex)
         self.current_a = self._calculate_continuous_a(target_a)
-        lines.append(f"G0 X{e2[0]:.3f} Y{e2[1]:.3f} F{self.rapid_rate:.0f} ; Move to notch arm 2")
-        lines.append(f"G0 A{self.current_a:.2f} F{self.rapid_rate:.0f} ; Align blade for notch arm 2")
+        lines.append(
+            f"G0 X{e2[0]:.3f} Y{e2[1]:.3f} A{self.current_a:.2f} "
+            f"F{self.rapid_rate:.0f} ; Move to notch arm 2 and align blade"
+        )
         lines.append(f"G0 Z{self.cutting_height} F{self.plunge_rate:.0f} ; Plunge")
         lines.append(f"G1 X{apex[0]:.3f} Y{apex[1]:.3f} A{self.current_a:.2f} F{self.feed_rate:.0f} ; Cut to apex")
         lines.append(f"G0 Z{self.safe_height} F{self.plunge_rate:.0f} ; Raise")
