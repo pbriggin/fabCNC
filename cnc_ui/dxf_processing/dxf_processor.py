@@ -138,12 +138,36 @@ class DXFProcessor:
             if not shapes:
                 return {}, {}, {}
             
-            # Check DXF units and convert if necessary
-            # Most DXFs use inches by default, but we need millimeters
-            # Read the $INSUNITS variable to determine units
+            # Check DXF units and convert if necessary. Prefer the standard
+            # header variable; some exporters store INSUNITS in AutoCAD's
+            # header round-trip dictionary instead.
             try:
-                insunits = doc.header.get('$INSUNITS', 1)  # 1 = inches, 4 = millimeters
-                logger.info(f"DXF units: {insunits} (1=inches, 4=mm)")
+                insunits = doc.header.get('$INSUNITS')
+                units_source = 'header $INSUNITS'
+
+                if insunits is None:
+                    header_roundtrip = doc.rootdict.get('ACDBHEADERROUNDTRIPXREC')
+                    units_record = (
+                        header_roundtrip.get('INSUNITS')
+                        if header_roundtrip is not None else None
+                    )
+                    if units_record is not None:
+                        insunits = next(
+                            (tag.value for tag in units_record.tags if tag.code == 90),
+                            None,
+                        )
+                        if insunits is not None:
+                            units_source = 'ACDBHEADERROUNDTRIPXREC/INSUNITS'
+
+                if insunits is None:
+                    # Preserve the historical default for unitless DXFs, but
+                    # make the assumption visible in logs.
+                    insunits = 1
+                    units_source = 'default (inches)'
+
+                logger.info(
+                    f"DXF units: {insunits} (1=inches, 4=mm; source: {units_source})"
+                )
                 
                 # If DXF is in inches, convert to millimeters
                 if insunits == 1:  # Inches
