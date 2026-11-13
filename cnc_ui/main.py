@@ -487,6 +487,7 @@ current_toolpath_shapes = _ClientDict('toolpath_shapes')
 current_toolpath_breaks = _ClientDict('toolpath_breaks')
 current_toolpath_types = _ClientDict('toolpath_types')
 current_toolpath_notches = _ClientDict('toolpath_notches')
+current_toolpath_cut_last = _ClientDict('toolpath_cut_last')
 client_job_state = _ClientDict(
     'client_job_state',
     {'toolpath_generated': False, 'loaded_filename': None, 'canvas_dirty': False},
@@ -1826,6 +1827,10 @@ async def _save_canvas_to_filename(safe_name: str) -> bool:
 
         state = json.loads(canvas_json)
         state['cut_settings'] = cut_settings.copy()
+        state['cut_last_shapes'] = sorted(
+            name for name in current_toolpath_cut_last
+            if name in current_toolpath_shapes
+        )
         canvas_json = json.dumps(state, indent=2)
         filepath = os.path.join(file_manager.upload_dir, safe_name)
         with open(filepath, 'w') as f:
@@ -2035,6 +2040,7 @@ async def _show_load_canvas_dialog():
                         current_toolpath_breaks.clear()
                         current_toolpath_types.clear()
                         current_toolpath_notches.clear()
+                        current_toolpath_cut_last.clear()
                         for name, shape_data in state.get('shapes', {}).items():
                             current_toolpath_shapes[name] = [tuple(p) for p in shape_data.get('points', [])]
                             current_toolpath_breaks[name] = list(shape_data.get('segmentBreaks', [0]) or [0])
@@ -2042,6 +2048,9 @@ async def _show_load_canvas_dialog():
                         for name, notches in (state.get('notches') or {}).items():
                             if notches:
                                 current_toolpath_notches[name] = [dict(n) for n in notches]
+                        for name in state.get('cut_last_shapes', []):
+                            if name in current_toolpath_shapes:
+                                current_toolpath_cut_last[name] = True
                         saved_cut = state.get('cut_settings', {})
                         if saved_cut.get('pressure') in PRESSURE_MAP:
                             apply_cut_pressure(saved_cut['pressure'])
@@ -2115,6 +2124,7 @@ def _clear_canvas_now():
     current_toolpath_breaks.clear()
     current_toolpath_types.clear()
     current_toolpath_notches.clear()
+    current_toolpath_cut_last.clear()
     ui.run_javascript('window.toolpathCanvas.clearShapes()')
     machine_state.set_job_loaded(False)
     machine_state.set_toolpath_generated(False)
@@ -2248,16 +2258,20 @@ async def _toggle_toolpath_impl(button):
         import concurrent.futures as _cf
         shapes_snapshot = dict(current_toolpath_shapes)
         notches_snapshot = dict(notches)
+        cut_last_snapshot = set(current_toolpath_cut_last)
         canvas_name = _canvas_job_label()
         with _cf.ThreadPoolExecutor(max_workers=1) as _exec:
             viz_data, gcode_str = await loop.run_in_executor(
                 _exec,
                 lambda: (
-                    generator.generate_visualization_data(shapes_snapshot, notches_snapshot),
+                    generator.generate_visualization_data(
+                        shapes_snapshot, notches_snapshot, cut_last_snapshot
+                    ),
                     generator.generate_toolpath(
                         shapes_snapshot,
                         source_filename="preview",
                         notches=notches_snapshot,
+                        cut_last_shapes=cut_last_snapshot,
                         canvas_name=canvas_name,
                         firmware_version=_query_marlin_firmware_version(),
                     )
@@ -4004,6 +4018,52 @@ def main_page():
                                     btn.style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;')
                                     btn.set_text('Measure')
 
+                            async def mark_selected_shapes_cut_last():
+                                global current_gcode
+                                try:
+                                    selected_names = await ui.run_javascript(
+                                        'window.toolpathCanvas.getSelectedShapeNames()'
+                                    )
+                                except Exception:
+                                    selected_names = None
+                                selected_names = [
+                                    name for name in (selected_names or [])
+                                    if isinstance(name, str) and name in current_toolpath_shapes
+                                ]
+                                if not selected_names:
+                                    ui.notify('Select one or more shapes first.', type='warning')
+                                    return
+                                changed = False
+                                for name in selected_names:
+                                    if name not in current_toolpath_cut_last:
+                                        current_toolpath_cut_last[name] = True
+                                        changed = True
+                                if changed:
+                                    _mark_canvas_dirty()
+                                    if client_job_state['toolpath_generated']:
+                                        machine_state.set_toolpath_generated(False)
+                                        client_job_state['toolpath_generated'] = False
+                                        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+                                        _sync_toolpath_button(False)
+                                        current_gcode = []
+                                        app.storage.user.pop('generated_job', None)
+                                ui.notify(f'{len(selected_names)} shape(s) will be cut last.', type='positive')
+
+                            def clear_cut_last_shapes():
+                                global current_gcode
+                                if not current_toolpath_cut_last:
+                                    return
+                                current_toolpath_cut_last.clear()
+                                _mark_canvas_dirty()
+                                if client_job_state['toolpath_generated']:
+                                    machine_state.set_toolpath_generated(False)
+                                    client_job_state['toolpath_generated'] = False
+                                    ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+                                    _sync_toolpath_button(False)
+                                    current_gcode = []
+                                    app.storage.user.pop('generated_job', None)
+                                ui.notify('Cut-last selection cleared.', type='info')
+
                             def toggle_measure_mode():
                                 measure_mode_state['active'] = not measure_mode_state['active']
                                 btn = measure_mode_state['btn']
@@ -4021,6 +4081,9 @@ def main_page():
                                 notch_mode_state['btn'] = notch_btn
                                 measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point')
                                 measure_mode_state['btn'] = measure_btn
+                                ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
+                                ui.button('Cut Last', icon='last_page', on_click=mark_selected_shapes_cut_last).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFB74D;').tooltip('Select one or more shapes, then mark them to be cut after all other shapes')
+                                ui.button('Clear Last', icon='close', on_click=clear_cut_last_shapes).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Clear all cut-last assignments')
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
                                 ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
                                 ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint')
@@ -4246,6 +4309,7 @@ def main_page():
                                     current_toolpath_breaks.pop(shape_name, None)
                                     current_toolpath_types.pop(shape_name, None)
                                     current_toolpath_notches.pop(shape_name, None)
+                                    current_toolpath_cut_last.pop(shape_name, None)
                                     _mark_canvas_dirty()
                                     logger.info(f"Shape '{shape_name}' deleted from toolpath shapes")
                                     log_event('canvas', 'shape_deleted', shape=shape_name)

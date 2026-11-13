@@ -70,6 +70,7 @@ class ToolpathGenerator:
         notches: dict = None,
         canvas_name: str = None,
         firmware_version: str = None,
+        cut_last_shapes: set = None,
     ) -> str:
         """
         Generate GCODE from DXF shapes.
@@ -117,7 +118,9 @@ class ToolpathGenerator:
         if planned_notches:
             start_point = tuple(planned_notches[-1][1]['apex'])
 
-        sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
+        sorted_shapes = self._plan_shapes_by_proximity(
+            shapes, start_point, cut_last_shapes=cut_last_shapes
+        )
         
         # Process each shape
         for shape_name, points in sorted_shapes:
@@ -642,6 +645,7 @@ class ToolpathGenerator:
         self,
         shapes: Dict[str, List[Tuple[float, float]]],
         notches: dict = None,
+        cut_last_shapes: set = None,
     ) -> Dict:
         """
         Generate toolpath visualization data for the canvas.
@@ -660,7 +664,9 @@ class ToolpathGenerator:
         if planned_notches:
             start_point = tuple(planned_notches[-1][1]['apex'])
 
-        sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
+        sorted_shapes = self._plan_shapes_by_proximity(
+            shapes, start_point, cut_last_shapes=cut_last_shapes
+        )
         
         for shape_name, points in sorted_shapes:
             if len(points) < 2:
@@ -760,6 +766,7 @@ class ToolpathGenerator:
         self,
         shapes: Dict[str, List[Tuple[float, float]]],
         start_point: Tuple[float, float] = (0.0, 0.0),
+        cut_last_shapes: set = None,
     ) -> List[Tuple[str, List[Tuple[float, float]]]]:
         """Greedily order shapes and choose each shape's nearest safe start.
 
@@ -769,41 +776,46 @@ class ToolpathGenerator:
         # Shapes with fewer than two points are ignored by both G-code and
         # preview generation, so they must not influence route selection.
         remaining = [(name, points) for name, points in shapes.items() if len(points) >= 2]
+        cut_last_shapes = cut_last_shapes or set()
+        regular_shapes = [item for item in remaining if item[0] not in cut_last_shapes]
+        last_shapes = [item for item in remaining if item[0] in cut_last_shapes]
         planned = []
         current = tuple(start_point)
 
-        while remaining:
-            best_choice = None
-            best_distance = float('inf')
+        for group in (regular_shapes, last_shapes):
+            remaining = list(group)
+            while remaining:
+                best_choice = None
+                best_distance = float('inf')
 
-            for index, (name, points) in enumerate(remaining):
-                is_closed = math.dist(points[0], points[-1]) < 0.15
-                if is_closed:
-                    unique_points = points[:-1]
-                    start_index = min(
-                        range(len(unique_points)),
-                        key=lambda i: math.dist(current, unique_points[i]),
-                    )
-                    distance = math.dist(current, unique_points[start_index])
-                    candidate = (
-                        unique_points[start_index:]
-                        + unique_points[:start_index]
-                        + [unique_points[start_index]]
-                    )
-                else:
-                    reverse = math.dist(current, points[-1]) < math.dist(current, points[0])
-                    candidate = list(reversed(points)) if reverse else points
-                    distance = math.dist(current, candidate[0])
+                for index, (name, points) in enumerate(remaining):
+                    is_closed = math.dist(points[0], points[-1]) < 0.15
+                    if is_closed:
+                        unique_points = points[:-1]
+                        start_index = min(
+                            range(len(unique_points)),
+                            key=lambda i: math.dist(current, unique_points[i]),
+                        )
+                        distance = math.dist(current, unique_points[start_index])
+                        candidate = (
+                            unique_points[start_index:]
+                            + unique_points[:start_index]
+                            + [unique_points[start_index]]
+                        )
+                    else:
+                        reverse = math.dist(current, points[-1]) < math.dist(current, points[0])
+                        candidate = list(reversed(points)) if reverse else points
+                        distance = math.dist(current, candidate[0])
 
-                if distance < best_distance:
-                    best_distance = distance
-                    best_choice = (index, name, candidate)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_choice = (index, name, candidate)
 
-            index, name, points = best_choice
-            remaining.pop(index)
-            planned.append((name, points))
-            if points:
-                current = tuple(points[-1])
+                index, name, points = best_choice
+                remaining.pop(index)
+                planned.append((name, points))
+                if points:
+                    current = tuple(points[-1])
 
         logger.info("Planned %d shapes by nearest travel start", len(planned))
         return planned

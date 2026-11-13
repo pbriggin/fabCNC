@@ -4334,6 +4334,7 @@ window.toolpathCanvas = {
     addShape: addShape,
     clearShapes: clearShapes,
     getPositions: getShapePositions,
+    getSelectedShapeNames: () => getSelectedShapes().map(shape => shape.shapeName),
     resize: resizeCanvas,
     // Transform tools
     mirrorX: mirrorX,
