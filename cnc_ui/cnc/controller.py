@@ -52,13 +52,6 @@ SERIAL_BAUDRATE = int(os.environ.get("FABCNC_SERIAL_BAUDRATE", "115200"))
 _FIRMWARE_FILENAME = "firmware.bin"
 _MAX_FIRMWARE_SIZE = 1024 * 1024
 _BFT_PACKET_RETRIES = 3
-# Keep the restored Z limits aligned with Marlin's configured Z axis defaults.
-# Homing uses lower temporary caps to limit motion into the Z endstop.
-_Z_HOMING_MAX_FEEDRATE_MM_S = 5
-_Z_HOMING_MAX_ACCELERATION_MM_S2 = 15
-_Z_MAX_FEEDRATE_MM_S = 25
-_Z_MAX_ACCELERATION_MM_S2 = 100
-_MOTION_ACCELERATION_MM_S2 = 250
 
 
 def _prepare_sd_commands(gcode_lines: list[str]) -> list[str]:
@@ -169,6 +162,7 @@ class CNCController:
         self.baudrate = baudrate
         self.serial_port: Optional[serial.Serial] = None
         self.stop_requested = False
+        self.stop_request_generation = 0
         self.pause_requested = False
         self.sd_uploading = False
         self.sd_job_active = False
@@ -322,12 +316,8 @@ class CNCController:
             self.read_thread.start()
 
             if not self.sd_job_disconnected and not self.firmware_update_active:
-                # Enable position reporting and restore the normal
-                # acceleration only when no SD print may be active.
+                # Enable position reporting only when no SD print may be active.
                 self._send_command("M114")
-                self._send_command(
-                    f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}"
-                )
 
             return True
         except (serial.SerialException, OSError) as e:
@@ -1609,10 +1599,8 @@ class CNCController:
             logger.info(f"JOG {axis.upper()} AXIS: distance={distance} mm, feed={feed_rate} mm/min")
             move = f"G1 {axis}{distance} F{feed_rate}"
         self._run_acknowledged_sequence_locked([
-            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
             ("G91", 10.0), (move, 10.0),
             ("G90", 10.0), ("M400", 180.0),
-            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
             ("M114", 10.0),
         ], "jog")
     
@@ -1645,11 +1633,9 @@ class CNCController:
     def _jog_xy_locked(self, x_distance: float, y_distance: float, feed_rate: float) -> None:
         logger.info(f"JOG XY DIAGONAL: X={x_distance} mm, Y={y_distance} mm, feed={feed_rate} mm/min")
         self._run_acknowledged_sequence_locked([
-            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
             ("G91", 10.0),
             (f"G1 X{x_distance} Y{y_distance} F{feed_rate}", 10.0),
             ("G90", 10.0), ("M400", 180.0),
-            (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
             ("M114", 10.0),
         ], "jog")
 
@@ -1699,14 +1685,8 @@ class CNCController:
                                  ("M17 Y", 10.0), ("G4 P500", 10.0)))
                 log_controller_event("recovery_home_y_motor_cycle", axis=axis)
             commands.extend((("M17", 10.0),
-                             (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
-                             (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
-                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
                              (f"G28 {axis}", 180.0),
                              ("M400", 180.0), ("M114", 10.0),
-                             (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
-                             (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
-                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
                              ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
@@ -1740,6 +1720,7 @@ class CNCController:
                 logger.warning("Rejected home all: %s", reason)
                 log_controller_event("home_rejected", axis="ALL", reason=reason)
                 return False
+            stop_request_generation = self.stop_request_generation
             self.homed = False
             machine_state.set_status("Homing all axes...", busy=True)
             if not self._quiesce_before_stream():
@@ -1751,25 +1732,34 @@ class CNCController:
                                  ("M17 Y", 10.0), ("G4 P500", 10.0)))
                 log_controller_event("recovery_home_y_motor_cycle", axis="ALL")
             commands.extend((("M17", 10.0),
-                             (f"M203 Z{_Z_HOMING_MAX_FEEDRATE_MM_S}", 10.0),
-                             (f"M201 Z{_Z_HOMING_MAX_ACCELERATION_MM_S2}", 10.0),
-                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
                              ("G28", 180.0),
                              ("M400", 180.0), ("G92 E0", 10.0), ("M114", 10.0),
-                             (f"M203 Z{_Z_MAX_FEEDRATE_MM_S}", 10.0),
-                             (f"M201 Z{_Z_MAX_ACCELERATION_MM_S2}", 10.0),
-                             (f"M204 P{_MOTION_ACCELERATION_MM_S2} T{_MOTION_ACCELERATION_MM_S2}", 10.0),
                              ("M18", 10.0)))
             for command, timeout in commands:
                 response = self._exchange_locked(command, timeout)
                 if not _sd_response_ok(response):
                     self._mark_serial_uncertain(f"Homing failed waiting for {command}", response)
                     return False
-            if reset_y:
-                self.reset_y_motors_before_home = False
-            machine_state.set_status("Idle", busy=False)
-            self.homed = True
-            self.rehome_required = False
+            # A confirmed full home clears the stale Stop latch left by a
+            # previously completed stop. Preserve a newer Stop that arrived
+            # while homing, since Stop is allowed to bypass operation_lock.
+            # The gate makes the check and state update atomic with stop_job().
+            with self.firmware_update_gate:
+                if self.stop_request_generation != stop_request_generation:
+                    self.homed = False
+                    self.rehome_required = True
+                    log_controller_event("home_all_interrupted_by_stop")
+                    return False
+                if self.serial_uncertain or self.reset_required:
+                    self.homed = False
+                    self.rehome_required = True
+                    return False
+                self.stop_requested = False
+                if reset_y:
+                    self.reset_y_motors_before_home = False
+                machine_state.set_status("Idle", busy=False)
+                self.homed = True
+                self.rehome_required = False
             return True
 
     # ==================== Job Execution ====================
@@ -1962,6 +1952,7 @@ class CNCController:
         with self.firmware_update_gate:
             if self._firmware_operation_blocked(generation):
                 return False
+            self.stop_request_generation += 1
             self.pause_requested = False
             self.stop_requested = True
             self.homed = False
