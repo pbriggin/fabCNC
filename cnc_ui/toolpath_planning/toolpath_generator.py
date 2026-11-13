@@ -109,8 +109,19 @@ class ToolpathGenerator:
                     gcode_lines.extend(self._generate_notch_gcode(shape_name, notch))
             gcode_lines.append("")
         
-        # Sort shapes by position (left to right, top to bottom)
-        sorted_shapes = self._sort_shapes_by_position(shapes)
+        # Notch cuts run before outlines and finish at the last notch apex.
+        # Use that point as the start of the nearest-neighbor outline route.
+        start_point = (0.0, 0.0)
+        if notches:
+            last_notch = next(
+                (notch for notch_list in reversed(list(notches.values()))
+                 for notch in reversed(notch_list)),
+                None,
+            )
+            if last_notch:
+                start_point = tuple(last_notch['apex'])
+
+        sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
         
         # Process each shape
         for shape_name, points in sorted_shapes:
@@ -118,10 +129,7 @@ class ToolpathGenerator:
             # Don't reset A position - keep continuous tracking so the motor
             # takes the shortest path from the previous shape's ending angle
             
-            # Find best starting point (corner if available)
-            optimized_points = self._optimize_starting_point(points)
-            
-            shape_gcode = self._generate_shape_toolpath(shape_name, optimized_points)
+            shape_gcode = self._generate_shape_toolpath(shape_name, points)
             gcode_lines.extend(shape_gcode)
         
         # Add footer
@@ -631,7 +639,11 @@ class ToolpathGenerator:
         # Round to 2 decimal places for degrees
         return round(a_position_degrees, 2)
     
-    def generate_visualization_data(self, shapes: Dict[str, List[Tuple[float, float]]]) -> Dict:
+    def generate_visualization_data(
+        self,
+        shapes: Dict[str, List[Tuple[float, float]]],
+        notches: dict = None,
+    ) -> Dict:
         """
         Generate toolpath visualization data for the canvas.
         
@@ -644,8 +656,17 @@ class ToolpathGenerator:
         """
         result = {'shapes': {}}
         
-        # Sort shapes by position
-        sorted_shapes = self._sort_shapes_by_position(shapes)
+        start_point = (0.0, 0.0)
+        if notches:
+            last_notch = next(
+                (notch for notch_list in reversed(list(notches.values()))
+                 for notch in reversed(notch_list)),
+                None,
+            )
+            if last_notch:
+                start_point = tuple(last_notch['apex'])
+
+        sorted_shapes = self._plan_shapes_by_proximity(shapes, start_point)
         
         for shape_name, points in sorted_shapes:
             if len(points) < 2:
@@ -654,8 +675,7 @@ class ToolpathGenerator:
             # Reset A position tracking for each new shape
             self.current_a = 0.0
             
-            # Find best starting point (corner if available)
-            optimized_points = self._optimize_starting_point(points)
+            optimized_points = points
             
             # Get reduced corners (merges adjacent corners)
             reduced_corners = self._reduce_adjacent_corners(optimized_points)
@@ -704,6 +724,58 @@ class ToolpathGenerator:
             logger.info(f"Generated visualization for {shape_name}: {len(segments)} segments, {corner_count} corners")
         
         return result
+
+    def _plan_shapes_by_proximity(
+        self,
+        shapes: Dict[str, List[Tuple[float, float]]],
+        start_point: Tuple[float, float] = (0.0, 0.0),
+    ) -> List[Tuple[str, List[Tuple[float, float]]]]:
+        """Greedily order shapes and choose each shape's nearest safe start.
+
+        Open paths may be reversed so the closest endpoint is used. Closed paths
+        retain their original cutting direction and rotate to the closest vertex.
+        """
+        # Shapes with fewer than two points are ignored by both G-code and
+        # preview generation, so they must not influence route selection.
+        remaining = [(name, points) for name, points in shapes.items() if len(points) >= 2]
+        planned = []
+        current = tuple(start_point)
+
+        while remaining:
+            best_choice = None
+            best_distance = float('inf')
+
+            for index, (name, points) in enumerate(remaining):
+                is_closed = math.dist(points[0], points[-1]) < 0.15
+                if is_closed:
+                    unique_points = points[:-1]
+                    start_index = min(
+                        range(len(unique_points)),
+                        key=lambda i: math.dist(current, unique_points[i]),
+                    )
+                    distance = math.dist(current, unique_points[start_index])
+                    candidate = (
+                        unique_points[start_index:]
+                        + unique_points[:start_index]
+                        + [unique_points[start_index]]
+                    )
+                else:
+                    reverse = math.dist(current, points[-1]) < math.dist(current, points[0])
+                    candidate = list(reversed(points)) if reverse else points
+                    distance = math.dist(current, candidate[0])
+
+                if distance < best_distance:
+                    best_distance = distance
+                    best_choice = (index, name, candidate)
+
+            index, name, points = best_choice
+            remaining.pop(index)
+            planned.append((name, points))
+            if points:
+                current = tuple(points[-1])
+
+        logger.info("Planned %d shapes by nearest travel start", len(planned))
+        return planned
     
     def _calculate_continuous_a(self, target_a: float) -> float:
         """

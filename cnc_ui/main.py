@@ -2253,7 +2253,7 @@ async def _toggle_toolpath_impl(button):
             viz_data, gcode_str = await loop.run_in_executor(
                 _exec,
                 lambda: (
-                    generator.generate_visualization_data(shapes_snapshot),
+                    generator.generate_visualization_data(shapes_snapshot, notches_snapshot),
                     generator.generate_toolpath(
                         shapes_snapshot,
                         source_filename="preview",
