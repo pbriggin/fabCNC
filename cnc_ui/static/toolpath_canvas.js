@@ -3358,6 +3358,8 @@ function rotateByDegrees(degrees) {
 function handleKeyDown(e) {
     // Don't handle if typing in an input field
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    // The generated preview is a snapshot; block keyboard edits just like the UI controls.
+    if (toolpathLocked) return;
     
     // Cmd/Ctrl + Z = Undo
     if ((e.metaKey || e.ctrlKey) && e.key === 'z') {

@@ -1291,11 +1291,12 @@ def create_file_controls():
             on_upload=lambda e: handle_file_upload(e)
         ).props('accept=.dxf dense multiple').classes('w-full dxf-upload').style('font-size: 13px;') \
             .tooltip('Select one or more DXF files to add their shapes to the canvas')
+        _register_toolpath_edit_control(upload)
 
-        ui.button('Open DXF', icon='folder_open', on_click=open_saved_dxf_dialog) \
+        _register_toolpath_edit_control(ui.button('Open DXF', icon='folder_open', on_click=open_saved_dxf_dialog) \
             .props('dense').classes('w-full').style(
                 'background-color: #2a2a2a; color: #4a9eff; font-size: 13px;'
-            ).tooltip('Add a DXF file already saved on this Raspberry Pi to the canvas')
+            ).tooltip('Add a DXF file already saved on this Raspberry Pi to the canvas'))
         
         # Use JavaScript to reset on click (before file picker opens)
         # This clears the old file, then user picks new file which shows up
@@ -1315,10 +1316,10 @@ def create_file_controls():
         
         # Canvas document controls
         with ui.row().classes('w-full gap-1').style('flex-wrap: nowrap;'):
-            ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas')
-            ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name')
-            ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout')
-            ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas')
+            _register_toolpath_edit_control(ui.button('Save', icon='save', on_click=lambda: save_canvas_state()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save changes to the current canvas'))
+            _register_toolpath_edit_control(ui.button('Save As', icon='save_as', on_click=lambda: save_canvas_as()).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Save the current canvas under a new name'))
+            _register_toolpath_edit_control(ui.button('Load', icon='folder_open', on_click=load_canvas_state).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Replace the current canvas with a previously saved layout'))
+            _register_toolpath_edit_control(ui.button('Clear', icon='delete', on_click=clear_canvas).props('dense flat stack no-wrap').style('flex: 1; min-width: 0; padding: 4px 2px; background-color: #2a2a2a; font-size: 12px; color: #4a9eff;').tooltip('Remove every shape from the current canvas'))
 
         canvas_name_label = ui.label(_canvas_name_text()).classes(
             'self-center text-center font-bold px-3 py-1 rounded-full'
@@ -1330,21 +1331,40 @@ def create_file_controls():
         ui.context.client.storage['canvas_name_label'] = canvas_name_label
 
 
+def _toolpath_edit_locked() -> bool:
+    return bool(
+        client_job_state.get('toolpath_generated', False)
+        or client_job_state.get('toolpath_generation_in_progress', False)
+    )
+
+
+def _register_toolpath_edit_control(control):
+    """Register a canvas/toolpath editor control and apply the current lock."""
+    controls = ui.context.client.storage.setdefault('toolpath_edit_controls', [])
+    controls.append(control)
+    if _toolpath_edit_locked():
+        control.disable()
+    return control
+
+
+def _sync_toolpath_edit_controls() -> None:
+    """Disable canvas and toolpath editors while a preview is locked."""
+    locked = _toolpath_edit_locked()
+    for control in ui.context.client.storage.get('toolpath_edit_controls', []):
+        if locked:
+            control.disable()
+        else:
+            control.enable()
+
+
 def _sync_pressure_select() -> None:
-    """Lock pressure while generated toolpath is active or being generated."""
-    pressure_select = ui.context.client.storage.get('pressure_select')
-    if pressure_select is None:
-        return
-    if (client_job_state.get('toolpath_generated', False)
-            or client_job_state.get('toolpath_generation_in_progress', False)):
-        pressure_select.disable()
-    else:
-        pressure_select.enable()
+    """Keep the editor controls locked for the full toolpath generation interval."""
+    _sync_toolpath_edit_controls()
 
 
 def _sync_toolpath_button(generated: bool) -> None:
     """Keep the visible action in sync with the persisted preview state."""
-    _sync_pressure_select()
+    _sync_toolpath_edit_controls()
     button = ui.context.client.storage.get('toolpath_button')
     if button is None:
         return
@@ -1366,20 +1386,20 @@ def create_job_controls():
         # Cut pressure + speed selectors (grid keeps dropdowns aligned)
         with ui.grid(columns='auto 1fr').classes('w-full items-center gap-x-2 gap-y-1'):
             ui.label('Cut Pressure:').style('color: #aaa; font-size: 13px;')
-            _pressure_select = ui.select(
+            _pressure_select = _register_toolpath_edit_control(ui.select(
                 options=list(PRESSURE_MAP.keys()),
                 value=cut_settings['pressure'],
                 on_change=lambda e: apply_cut_pressure(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;') \
-                .tooltip('Select the cutting-wheel pressure used when generating the toolpath')
+                .tooltip('Select the cutting-wheel pressure used when generating the toolpath'))
             ui.context.client.storage['pressure_select'] = _pressure_select
             ui.label('Cut Speed:').style('color: #aaa; font-size: 13px;')
-            _speed_select = ui.select(
+            _speed_select = _register_toolpath_edit_control(ui.select(
                 options=list(SPEED_MAP.keys()),
                 value=cut_settings['speed'],
                 on_change=lambda e: apply_cut_speed(e.value)
             ).props('dense outlined').classes('w-full').style('font-size: 13px;') \
-                .tooltip('Select the machine feed rate used for cutting moves')
+                .tooltip('Select the machine feed rate used for cutting moves'))
             ui.context.client.storage['speed_select'] = _speed_select
         apply_cut_pressure(cut_settings['pressure'])
         apply_cut_speed(cut_settings['speed'])
@@ -3913,40 +3933,40 @@ def main_page():
                                     ui.run_javascript(js)
 
                                 # Transform tools
-                                ui.button('⬌', on_click=lambda: _run_js_logged('mirror_x', 'window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes left-to-right across the X axis')
-                                ui.button('⬍', on_click=lambda: _run_js_logged('mirror_y', 'window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes top-to-bottom across the Y axis')
+                                _register_toolpath_edit_control(ui.button('⬌', on_click=lambda: _run_js_logged('mirror_x', 'window.toolpathCanvas.mirrorX()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes left-to-right across the X axis'))
+                                _register_toolpath_edit_control(ui.button('⬍', on_click=lambda: _run_js_logged('mirror_y', 'window.toolpathCanvas.mirrorY()')).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Mirror the selected shapes top-to-bottom across the Y axis'))
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                rotate_input = ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the rotation angle in degrees')
+                                rotate_input = _register_toolpath_edit_control(ui.number(value=90, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the rotation angle in degrees'))
                                 ui.label('°').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('↻', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})', degrees=rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes clockwise by the entered angle')
-                                ui.button('↺', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})', degrees=-rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes counterclockwise by the entered angle')
+                                _register_toolpath_edit_control(ui.button('↻', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees({rotate_input.value})', degrees=rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes clockwise by the entered angle'))
+                                _register_toolpath_edit_control(ui.button('↺', on_click=lambda: _run_js_logged('rotate', f'window.toolpathCanvas.rotateByDegrees(-{rotate_input.value})', degrees=-rotate_input.value)).props('dense flat').style('min-width: 36px; height: 36px; font-size: 22px; background-color: #2a2a2a; color: #4a9eff; display: flex; align-items: center; justify-content: center;').tooltip('Rotate the selected shapes counterclockwise by the entered angle'))
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                scale_input = ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the selected shapes’ size as a percentage of their current size')
+                                scale_input = _register_toolpath_edit_control(ui.number(value=100, format='%.0f').props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the selected shapes’ size as a percentage of their current size'))
                                 ui.label('%').classes('text-body2').style('margin-right: 2px;')
-                                ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Resize the selected shapes using the entered percentage')
+                                _register_toolpath_edit_control(ui.button('Scale', on_click=lambda: _run_js_logged('scale', f'window.toolpathCanvas.scaleShape({scale_input.value / 100})', factor=scale_input.value / 100)).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Resize the selected shapes using the entered percentage'))
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
                                 # Pattern tools
-                                grid_x = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of columns in the shape grid')
+                                grid_x = _register_toolpath_edit_control(ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of columns in the shape grid'))
                                 ui.label('×').classes('text-body2')
-                                grid_y = ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of rows in the shape grid')
-                                ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Duplicate the selected shapes into the specified rows and columns')
+                                grid_y = _register_toolpath_edit_control(ui.number(value=2, format='%.0f', min=1, max=1000).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Set the number of rows in the shape grid'))
+                                _register_toolpath_edit_control(ui.button('Grid', on_click=lambda: _run_js_logged('grid_array', f'window.toolpathCanvas.gridArray({int(grid_x.value)}, {int(grid_y.value)})', count_x=int(grid_x.value), count_y=int(grid_y.value))).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Duplicate the selected shapes into the specified rows and columns'))
                                 
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')  # Separator
                                 
-                                keep_orientation = ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;').tooltip('Keep each shape at its current rotation while nesting')
-                                nest_offset = ui.number(
+                                keep_orientation = _register_toolpath_edit_control(ui.checkbox('Keep Orientation', value=True).props('dense').style('font-size: 12px;').tooltip('Keep each shape at its current rotation while nesting'))
+                                nest_offset = _register_toolpath_edit_control(ui.number(
                                     value=15.0,
                                     format='%.1f',
                                     min=1.0,
                                     max=100.0,
                                     step=0.1,
-                                ).props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the minimum spacing between nested shape outlines, in millimeters')
+                                ).props('dense outlined').style('width: 60px; font-size: 13px;').classes('toolbar-input').tooltip('Set the minimum spacing between nested shape outlines, in millimeters'))
                                 
                                 async def do_nest():
                                     offset_val = float(nest_offset.value)
@@ -3981,7 +4001,7 @@ def main_page():
                                                   height=result.get('height'),
                                                   error=result.get('error'))
                                 
-                                ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Arrange shapes automatically using the entered gap and orientation settings')
+                                _register_toolpath_edit_control(ui.button('Nest', on_click=do_nest).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Arrange shapes automatically using the entered gap and orientation settings'))
                             
                             # Second toolbar row: inspection/editing tools
                             notch_mode_state = {'active': False, 'btn': None}
@@ -4024,6 +4044,9 @@ def main_page():
                                 if not btn:
                                     return
                                 selected_names = selected_names or []
+                                if not selected_names:
+                                    btn.set_text('Clear Cut Last')
+                                    return
                                 all_marked = bool(selected_names) and all(
                                     name in current_toolpath_cut_last
                                     for name in selected_names
@@ -4043,7 +4066,20 @@ def main_page():
                                     if isinstance(name, str) and name in current_toolpath_shapes
                                 ]
                                 if not selected_names:
-                                    ui.notify('Select one or more shapes first.', type='warning')
+                                    if not current_toolpath_cut_last:
+                                        ui.notify('No shapes are marked to cut last.', type='info')
+                                        return
+                                    current_toolpath_cut_last.clear()
+                                    _mark_canvas_dirty()
+                                    if client_job_state['toolpath_generated']:
+                                        machine_state.set_toolpath_generated(False)
+                                        client_job_state['toolpath_generated'] = False
+                                        ui.run_javascript('window.toolpathCanvas.clearToolpath()')
+                                        _sync_toolpath_button(False)
+                                        current_gcode = []
+                                        app.storage.user.pop('generated_job', None)
+                                    update_cut_last_button()
+                                    ui.notify('Cut-last selection cleared.', type='info')
                                     return
                                 remove_cut_last = all(
                                     name in current_toolpath_cut_last for name in selected_names
@@ -4088,23 +4124,24 @@ def main_page():
                                 ui.run_javascript(f"window.toolpathCanvas.setMeasureMode({str(measure_mode_state['active']).lower()})")
 
                             with ui.row().classes('items-center gap-2').style('background: #2a2a2a; border-radius: 4px; padding: 4px 10px; width: 100%; min-width: 0; box-sizing: border-box; flex-wrap: nowrap; flex-shrink: 0; overflow-x: auto; overflow-y: hidden;'):
-                                notch_btn = ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches')
+                                notch_btn = _register_toolpath_edit_control(ui.button('V Notch', on_click=toggle_notch_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FF6B35;').tooltip('Toggle notch tool — click nodes on shapes to add/remove V-notches'))
                                 notch_mode_state['btn'] = notch_btn
-                                measure_btn = ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point')
+                                measure_btn = _register_toolpath_edit_control(ui.button('Measure', icon='straighten', on_click=toggle_measure_mode).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFD54F;').tooltip('Measure between endpoints, corners, and cardinal extrema — click a start point, then an end point'))
                                 measure_mode_state['btn'] = measure_btn
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                cut_last_btn = ui.button('Cut Last', icon='last_page', on_click=toggle_selected_shapes_cut_last).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFB74D;').tooltip('Select one or more shapes; toggle whether they are cut after the other shapes')
+                                cut_last_btn = _register_toolpath_edit_control(ui.button('Cut Last', icon='last_page', on_click=toggle_selected_shapes_cut_last).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #FFB74D;').tooltip('With no selection, clear all cut-last assignments; with selected shapes, toggle their cut-last status'))
                                 cut_last_button_state['btn'] = cut_last_btn
+                                update_cut_last_button()
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint')
-                                ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint')
-                                ui.button(icon='horizontal_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeHorizontally()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Horizontally — equal X spacing (need 3+ shapes)')
-                                ui.button(icon='vertical_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeVertically()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Vertically — equal Y spacing (need 3+ shapes)')
+                                _register_toolpath_edit_control(ui.button(icon='align_horizontal_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersVertical()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Center — same X centerpoint'))
+                                _register_toolpath_edit_control(ui.button(icon='align_vertical_center', on_click=lambda: ui.run_javascript('window.toolpathCanvas.alignCentersHorizontal()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Align Middle — same Y centerpoint'))
+                                _register_toolpath_edit_control(ui.button(icon='horizontal_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeHorizontally()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Horizontally — equal X spacing (need 3+ shapes)'))
+                                _register_toolpath_edit_control(ui.button(icon='vertical_distribute', on_click=lambda: ui.run_javascript('window.toolpathCanvas.distributeVertically()')).props('dense flat').style('min-width: 36px; height: 36px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Distribute Vertically — equal Y spacing (need 3+ shapes)'))
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                spread_spacing = ui.number(value=15, format='%.0f', min=1, max=200).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Min gap between shape outlines (mm)')
-                                ui.button('Spread', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.ensureSpacing({int(spread_spacing.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Push shapes apart so every outline gap ≥ spacing value')
+                                spread_spacing = _register_toolpath_edit_control(ui.number(value=15, format='%.0f', min=1, max=200).props('dense outlined').style('width: 50px; font-size: 13px;').classes('toolbar-input').tooltip('Min gap between shape outlines (mm)'))
+                                _register_toolpath_edit_control(ui.button('Spread', on_click=lambda: ui.run_javascript(f'window.toolpathCanvas.ensureSpacing({int(spread_spacing.value)})')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #4a9eff;').tooltip('Push shapes apart so every outline gap ≥ spacing value'))
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
-                                ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)')
+                                _register_toolpath_edit_control(ui.button('⌖ Reset Zoom', on_click=lambda: ui.run_javascript('window.toolpathCanvas.resetZoom()')).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa;').tooltip('Reset zoom & pan to fit the full work area (or scroll to zoom, Alt+drag to pan)'))
                                 ui.element('div').style('width: 1px; height: 24px; background: #4a4a4a; margin: 0 4px;')
 
                                 # Units toggle: mm ↔ in
@@ -4120,7 +4157,7 @@ def main_page():
                                     unit = units_state['unit']
                                     await ui.run_javascript(f"window.toolpathCanvas.setUnits('{unit}')")
 
-                                units_btn = ui.button('mm', on_click=toggle_units).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa; min-width: 52px;').tooltip('Toggle axis units between mm and inches')
+                                units_btn = _register_toolpath_edit_control(ui.button('mm', on_click=toggle_units).props('dense flat').style('height: 36px; font-size: 13px; background-color: #2a2a2a; color: #aaaaaa; min-width: 52px;').tooltip('Toggle axis units between mm and inches'))
                             
                             # Load Fabric.js library
                             ui.add_head_html('<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>')
