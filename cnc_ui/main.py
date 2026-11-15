@@ -5110,6 +5110,7 @@ def main_page():
 
         # Per-page state for disconnect recovery feedback
         _prev_status_local: list = [None]
+        _last_open_load_notice: list = [""]
         _was_disconnected: list = [False]
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
         _prev_controls_disabled_look: list = [False]  # last CSS-toggled disconnected-look state sent to browser
@@ -5368,6 +5369,27 @@ def main_page():
         # Start periodic UI update timer (10 Hz = 100ms)
         async def _update_ui_timer():
             await update_ui(pos_labels, status_label, status_pill, status_icon)
+
+            open_load_event = getattr(cnc_controller, 'last_open_load_event', '')
+            if open_load_event and open_load_event != _last_open_load_notice[0]:
+                _last_open_load_notice[0] = open_load_event
+                fields = dict(
+                    part.split('=', 1)
+                    for part in open_load_event.split('|')[1:]
+                    if '=' in part
+                )
+                driver = fields.get('driver', 'unknown driver')
+                coil = fields.get('coil', '?')
+                eligible = fields.get('eligible', '0') == '1'
+                details = (
+                    f"Marlin observed open-load on {driver}, coil {coil}. "
+                    f"DRV_STATUS {fields.get('status', 'unknown')}. "
+                )
+                details += (
+                    'Checking persistence before stopping.' if eligible
+                    else 'This sample did not meet the stop filter; see controller log for gate details.'
+                )
+                ui.notify(details, type='warning', timeout=12000)
 
             # A move/control command was attempted while disconnected — force the
             # alert back open even if the operator had previously dismissed it.

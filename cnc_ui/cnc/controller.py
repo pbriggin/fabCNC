@@ -183,6 +183,7 @@ class CNCController:
         self.reset_required = False
         self.last_controller_error = ""
         self.last_driver_fault = ""
+        self.last_open_load_event = ""
         self.last_serial_device = self.serial_device
         self.emergency_parser_supported: Optional[bool] = None
         self.read_loop_paused = False
@@ -1355,6 +1356,8 @@ class CNCController:
         """Persist driver events and latch fatal Marlin messages from any reader."""
         _persist_tmc_event_line(line)
         is_tmc_fault = line.startswith("TMC_FAULT|")
+        if line.startswith("TMC_OPEN_LOAD|"):
+            self.last_open_load_event = line[:500]
         if is_tmc_fault:
             self.last_driver_fault = line[:500]
 
