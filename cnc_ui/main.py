@@ -5314,7 +5314,30 @@ def main_page():
                     connection_alert_subtitle.set_text(
                         'Marlin reported a kill condition; retry the connection:'
                     )
+                    driver_fault = getattr(cnc_controller, 'last_driver_fault', '')
+                    if driver_fault.startswith('TMC_FAULT|'):
+                        fault_fields = dict(
+                            part.split('=', 1)
+                            for part in driver_fault.split('|')[1:]
+                            if '=' in part
+                        )
+                        fault_kind = fault_fields.get('kind', 'driver fault').replace('_', ' ')
+                        driver = fault_fields.get('driver', 'unknown driver')
+                        coil = fault_fields.get('coil')
+                        fault_summary = f'Detected: {fault_kind} on {driver}'
+                        if coil:
+                            fault_summary += f', coil {coil}'
+                        if fault_fields.get('status'):
+                            fault_summary += f' (DRV_STATUS {fault_fields["status"]})'
+                        fault_summary += '.\n\n'
+                    else:
+                        controller_error = getattr(cnc_controller, 'last_controller_error', '').strip()
+                        fault_summary = (
+                            f'Controller reported: {controller_error[:250]}\n\n'
+                            if controller_error else ''
+                        )
                     connection_alert_steps.set_text(
+                        f'{fault_summary}'
                         '1. Confirm the cutter has stopped and release the physical E-Stop.\n'
                         '2. Click "Retry Connection" below.\n'
                         '3. Run Home All before further motion.'

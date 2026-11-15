@@ -67,6 +67,20 @@ class ControllerSafetyTests(unittest.TestCase):
         machine_state.set_status("Idle", busy=False)
         machine_state.set_job_loaded(False)
 
+    def test_tmc_fault_and_open_load_records_are_persisted(self):
+        with patch.object(controller_module, "log_controller_event") as record:
+            controller_module._persist_tmc_event_line(
+                "TMC_FAULT|v=1|kind=open_load|driver=Y2|coil=A|status=0x20000000|uptime_ms=1500|count=4"
+            )
+            controller_module._persist_tmc_event_line(
+                "TMC_OPEN_LOAD|driver=Y2|coil=B|status=0x40000000|uptime_ms=1000|count=3"
+            )
+
+        self.assertEqual(record.call_count, 2)
+        self.assertEqual(record.call_args_list[0].args[0], "tmc_driver_fault")
+        self.assertEqual(record.call_args_list[1].args[0], "tmc_open_load_event")
+        self.assertIn("driver=Y2", record.call_args_list[1].kwargs["event"])
+
     def test_controller_opens_configured_uart_at_configured_baud_without_dtr_pulse(self):
         controller = CNCController(auto_connect=False, port="/dev/ttyAMA0", baudrate=115200)
         fake_serial = FakeSerial()

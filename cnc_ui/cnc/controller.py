@@ -128,6 +128,14 @@ def _marlin_checksum(payload: str) -> int:
         cs ^= b
     return cs & 0xff
 
+
+def _persist_tmc_event_line(line: str) -> None:
+    """Persist unsolicited TMC diagnostic records before a fatal reset."""
+    if line.startswith("TMC_FAULT|"):
+        log_controller_event("tmc_driver_fault", event=line[:500])
+    elif line.startswith("TMC_OPEN_LOAD|"):
+        log_controller_event("tmc_open_load_event", event=line[:500])
+
 try:
     # Structured logging helpers — present whenever main.py has been imported.
     from logging_setup import (
@@ -174,6 +182,7 @@ class CNCController:
         self.reconnect_thread_active = False
         self.reset_required = False
         self.last_controller_error = ""
+        self.last_driver_fault = ""
         self.last_serial_device = self.serial_device
         self.emergency_parser_supported: Optional[bool] = None
         self.read_loop_paused = False
@@ -572,6 +581,7 @@ class CNCController:
 
             self.reset_required = False
             self.last_controller_error = ""
+            self.last_driver_fault = ""
             self.stop_requested = False
             self.pause_requested = False
             self.homed = False
@@ -1386,6 +1396,13 @@ class CNCController:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
                         log_serial_rx(line, mode="async")
+
+                        # Driver fault records are emitted before Marlin's fatal
+                        # kill response. Persist them as soon as they arrive so
+                        # the event survives the controller reset that follows.
+                        _persist_tmc_event_line(line)
+                        if line.startswith("TMC_FAULT|"):
+                            self.last_driver_fault = line[:500]
 
                         # --- Line-number protocol bookkeeping (streaming only) ---
                         credit_stream_ok = True
