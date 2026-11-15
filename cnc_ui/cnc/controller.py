@@ -1351,6 +1351,41 @@ class CNCController:
                 self.pause_requested = True
                 return emitted
     
+    def _handle_controller_fault_line(self, line: str) -> None:
+        """Persist driver events and latch fatal Marlin messages from any reader."""
+        _persist_tmc_event_line(line)
+        if line.startswith("TMC_FAULT|"):
+            self.last_driver_fault = line[:500]
+
+        lower = line.lower()
+        if not any(marker in lower for marker in (
+            'printer halted', 'stopped due to errors', 'kill() called', 'kill caused by'
+        )):
+            return
+
+        had_sd_job = (
+            self.sd_job_active
+            or self.sd_job_disconnected
+            or _SD_JOB_STATE_FILE.exists()
+        )
+        if not self.reset_required:
+            log_controller_event("controller_reset_required", response=line[:500])
+        self.reset_required = True
+        self.last_controller_error = line
+        self.homed = False
+        self.stop_requested = True
+        self.pause_requested = False
+        self.ok_event.set()
+        machine_state.reset_job()
+        machine_state.set_status("E-Stop Reset Required", busy=False)
+        if had_sd_job:
+            self._clear_sd_job_state()
+            log_controller_event(
+                "sd_job_cleared_after_controller_kill",
+                filename=_SD_FILENAME,
+                response=line[:500],
+            )
+
     def _read_response(self, timeout: float = 1.0, poll_interval: float = 0.01) -> str:
         """Read response from Marlin until 'ok' is received."""
         if not self.serial_port or not self.serial_port.is_open:
@@ -1365,6 +1400,7 @@ class CNCController:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
                         log_serial_rx(line, mode="sync")
+                        self._handle_controller_fault_line(line)
                     response_lines.append(line)
                     
                     if line.startswith("ok"):
@@ -1397,12 +1433,9 @@ class CNCController:
                     if line:
                         log_serial_rx(line, mode="async")
 
-                        # Driver fault records are emitted before Marlin's fatal
-                        # kill response. Persist them as soon as they arrive so
-                        # the event survives the controller reset that follows.
-                        _persist_tmc_event_line(line)
-                        if line.startswith("TMC_FAULT|"):
-                            self.last_driver_fault = line[:500]
+                        # Handle fault records and fatal messages regardless of
+                        # which reader currently owns the serial transaction.
+                        self._handle_controller_fault_line(line)
 
                         # --- Line-number protocol bookkeeping (streaming only) ---
                         credit_stream_ok = True
@@ -1424,34 +1457,6 @@ class CNCController:
                         if 'error' in line.lower() or 'err:' in line.lower():
                             logger.warning(f"Controller error: {line}")
                         lower = line.lower()
-                        if (
-                            'printer halted' in lower
-                            or 'stopped due to errors' in lower
-                            or 'kill() called' in lower
-                            or 'kill caused by' in lower
-                        ):
-                            had_sd_job = (
-                                self.sd_job_active
-                                or self.sd_job_disconnected
-                                or _SD_JOB_STATE_FILE.exists()
-                            )
-                            if not self.reset_required:
-                                log_controller_event("controller_reset_required", response=line[:500])
-                            self.reset_required = True
-                            self.last_controller_error = line
-                            self.homed = False
-                            self.stop_requested = True
-                            self.pause_requested = False
-                            self.ok_event.set()
-                            machine_state.reset_job()
-                            machine_state.set_status("E-Stop Reset Required", busy=False)
-                            if had_sd_job:
-                                self._clear_sd_job_state()
-                                log_controller_event(
-                                    "sd_job_cleared_after_controller_kill",
-                                    filename=_SD_FILENAME,
-                                    response=line[:500],
-                                )
                         
                 time.sleep(0.005)  # 5ms polling rate
             except OSError as e:
