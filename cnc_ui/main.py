@@ -31,6 +31,7 @@ from nicegui.element import Element
 from cnc.state import machine_state
 from cnc.controller import cnc_controller
 from cnc.controller import parse_homing_sensitivity_response
+from cnc.controller import describe_open_load_event, describe_tmc_fault
 from cnc.files import file_manager
 from pathlib import Path
 from fastapi import Request
@@ -5110,7 +5111,8 @@ def main_page():
 
         # Per-page state for disconnect recovery feedback
         _prev_status_local: list = [None]
-        _last_open_load_notice: list = [""]
+        # Start from the current event so a page reload does not replay an old warning.
+        _last_open_load_notice: list = [getattr(cnc_controller, 'last_open_load_event', '')]
         _was_disconnected: list = [False]
         _connection_alert_dismissed: list = [False]   # user closed the popup; reopen via the status pill
         _prev_controls_disabled_look: list = [False]  # last CSS-toggled disconnected-look state sent to browser
@@ -5197,7 +5199,8 @@ def main_page():
                             .classes('text-h6 font-bold').style('margin-bottom:6px;')
                         ui.label(
                             'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'fabCNC will retry the connection and clear Marlin’s halt if needed.'
+                            'If Marlin halted, it must have restarted (E-stop pressed and released, '
+                            'or a power cycle) before this retry can succeed.'
                         ).classes('text-body2').style('color:#ccc; white-space:normal;')
                         with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
                             ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
@@ -5319,33 +5322,25 @@ def main_page():
                     connection_alert_subtitle.set_text(
                         'Marlin reported a kill condition; retry the connection:'
                     )
-                    driver_fault = getattr(cnc_controller, 'last_driver_fault', '')
-                    if driver_fault.startswith('TMC_FAULT|'):
-                        fault_fields = dict(
-                            part.split('=', 1)
-                            for part in driver_fault.split('|')[1:]
-                            if '=' in part
-                        )
-                        fault_kind = fault_fields.get('kind', 'driver fault').replace('_', ' ')
-                        driver = fault_fields.get('driver', 'unknown driver')
-                        coil = fault_fields.get('coil')
-                        fault_summary = f'Detected: {fault_kind} on {driver}'
-                        if coil:
-                            fault_summary += f', coil {coil}'
-                        if fault_fields.get('status'):
-                            fault_summary += f' (DRV_STATUS {fault_fields["status"]})'
-                        fault_summary += '.\n\n'
-                    else:
+                    fault_summary = describe_tmc_fault(
+                        getattr(cnc_controller, 'last_driver_fault', '')
+                    )
+                    if not fault_summary:
                         controller_error = getattr(cnc_controller, 'last_controller_error', '').strip()
-                        fault_summary = (
-                            f'Controller reported: {controller_error[:250]}\n\n'
-                            if controller_error else ''
-                        )
+                        if controller_error:
+                            fault_summary = f'Controller reported: {controller_error[:250]}'
+                    if fault_summary:
+                        fault_summary += '\n\n'
+                    # A halted Marlin ignores serial commands (including M999)
+                    # until the board restarts, so the restart must come first.
                     connection_alert_steps.set_text(
                         f'{fault_summary}'
-                        '1. Confirm the cutter has stopped and release the physical E-Stop.\n'
-                        '2. Click "Retry Connection" below.\n'
-                        '3. Run Home All before further motion.'
+                        '1. Confirm the cutter has stopped.\n'
+                        '2. Restart the controller: press the physical E-Stop, then release it. '
+                        'If it was already pressed, just release it.\n'
+                        '3. Wait 5 seconds, then click "Retry Connection" below. '
+                        'If the retry fails, power cycle the control box (red switch) and retry.\n'
+                        '4. Run Home All before further motion.'
                     )
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
@@ -5371,25 +5366,11 @@ def main_page():
             await update_ui(pos_labels, status_label, status_pill, status_icon)
 
             open_load_event = getattr(cnc_controller, 'last_open_load_event', '')
-            if open_load_event and open_load_event != _last_open_load_notice[0]:
+            if open_load_event != _last_open_load_notice[0]:
                 _last_open_load_notice[0] = open_load_event
-                fields = dict(
-                    part.split('=', 1)
-                    for part in open_load_event.split('|')[1:]
-                    if '=' in part
-                )
-                driver = fields.get('driver', 'unknown driver')
-                coil = fields.get('coil', '?')
-                eligible = fields.get('eligible', '0') == '1'
-                details = (
-                    f"Marlin observed open-load on {driver}, coil {coil}. "
-                    f"DRV_STATUS {fields.get('status', 'unknown')}. "
-                )
-                details += (
-                    'Checking persistence before stopping.' if eligible
-                    else 'This sample did not meet the stop filter; see controller log for gate details.'
-                )
-                ui.notify(details, type='warning', timeout=12000)
+                open_load_warning = describe_open_load_event(open_load_event)
+                if open_load_warning:
+                    ui.notify(open_load_warning, type='warning', timeout=12000)
 
             # A move/control command was attempted while disconnected — force the
             # alert back open even if the operator had previously dismissed it.

@@ -81,6 +81,115 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertEqual(record.call_args_list[1].args[0], "tmc_open_load_event")
         self.assertIn("driver=Y2", record.call_args_list[1].kwargs["event"])
 
+    def test_tmc_fault_latches_reset_and_keeps_sd_marker_until_halt_line(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        fault = "TMC_FAULT|v=1|kind=open_load|driver=Y2|coil=A|status=0x20000000|uptime_ms=1500|count=4"
+
+        controller._handle_controller_fault_line(fault)
+
+        self.assertTrue(controller.reset_required)
+        self.assertTrue(controller.stop_requested)
+        self.assertFalse(controller.homed)
+        self.assertEqual(fault, controller.last_driver_fault)
+        self.assertTrue(controller.sd_job_active)
+        self.assertEqual("E-Stop Reset Required", machine_state.snapshot().status_text)
+
+        controller._handle_controller_fault_line("Error:Printer halted. kill() called!")
+
+        self.assertFalse(controller.sd_job_active)
+        self.assertEqual(fault, controller.last_driver_fault)
+
+    def test_tmc_fault_is_latched_from_a_synchronous_read(self):
+        controller = connected_controller(responses=(
+            "TMC_FAULT|v=1|kind=short|driver=X|coil=B|status=0x10000000|uptime_ms=9|count=1",
+        ))
+
+        controller._read_response(timeout=0.05)
+
+        self.assertTrue(controller.reset_required)
+        self.assertIn("driver=X", controller.last_driver_fault)
+
+    def test_raw_open_load_event_is_recorded_without_stopping(self):
+        controller = connected_controller()
+        event = "TMC_OPEN_LOAD|driver=X|coil=A|status=0x20000000|uptime_ms=5|count=1|moving=1|enabled=1|standstill=0|stealth=0|eligible=1"
+
+        controller._handle_controller_fault_line(event)
+
+        self.assertEqual(event, controller.last_open_load_event)
+        self.assertFalse(controller.reset_required)
+        self.assertFalse(controller.stop_requested)
+
+    def test_estop_reset_clears_driver_fault_and_open_load_state(self):
+        controller = connected_controller()
+        controller.reset_required = True
+        controller.last_driver_fault = "TMC_FAULT|v=1|kind=open_load|driver=Y|coil=A"
+        controller.last_open_load_event = "TMC_OPEN_LOAD|driver=Y|coil=A|eligible=1"
+        controller._exchange_locked = lambda command, timeout: "ok"
+
+        self.assertTrue(controller.reset_controller_after_estop())
+
+        self.assertFalse(controller.reset_required)
+        self.assertEqual("", controller.last_driver_fault)
+        self.assertEqual("", controller.last_open_load_event)
+
+    def test_estop_reset_fails_while_marlin_is_still_halted(self):
+        controller = connected_controller()
+        controller.reset_required = True
+        controller._exchange_locked = lambda command, timeout: "No response"
+
+        self.assertFalse(controller.reset_controller_after_estop())
+        self.assertTrue(controller.reset_required)
+
+    def test_sd_monitor_fails_closed_after_two_silent_status_polls(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        calls = []
+        controller.send_command_with_response = lambda *a, **k: calls.append(a[0]) or "No response"
+
+        with patch.object(controller_module.time, "sleep"):
+            controller._monitor_sd_job(total_bytes=100)
+
+        self.assertEqual(["M27", "M27"], calls)
+        self.assertTrue(controller.serial_uncertain)
+        self.assertTrue(controller.stop_requested)
+        self.assertTrue(controller.sd_job_active)
+        self.assertIn("M27", controller.last_controller_error)
+
+    def test_sd_monitor_treats_busy_keepalive_as_a_live_link(self):
+        controller = connected_controller()
+        controller.sd_job_active = True
+        replies = deque(["No response", "echo:busy: processing", "No response",
+                         "echo:busy: processing", "No response", "No response"])
+        controller.send_command_with_response = lambda *a, **k: replies.popleft()
+
+        with patch.object(controller_module.time, "sleep"):
+            controller._monitor_sd_job(total_bytes=100)
+
+        self.assertEqual(0, len(replies))
+        self.assertTrue(controller.serial_uncertain)
+
+    def test_tmc_fault_summary_names_driver_coil_and_status(self):
+        self.assertEqual(
+            "Detected: open load on Y2, coil A (DRV_STATUS 0x20000000).",
+            controller_module.describe_tmc_fault(
+                "TMC_FAULT|v=1|kind=open_load|driver=Y2|coil=A|status=0x20000000|uptime_ms=1|count=4"
+            ),
+        )
+        self.assertEqual(
+            "Detected: overtemperature on X (DRV_STATUS 0x2000000).",
+            controller_module.describe_tmc_fault(
+                "TMC_FAULT|v=1|kind=overtemperature|driver=X|coil=-|status=0x2000000|uptime_ms=1|count=1"
+            ),
+        )
+        self.assertEqual("", controller_module.describe_tmc_fault("Error:Printer halted. kill() called!"))
+
+    def test_open_load_warning_is_shown_only_for_samples_that_count_toward_a_stop(self):
+        base = "TMC_OPEN_LOAD|driver=X|coil=B|status=0x40000000|uptime_ms=1|count=2|moving=1|enabled=1|standstill=0|stealth=0|eligible="
+        self.assertIn("open-load on X, coil B", controller_module.describe_open_load_event(base + "1"))
+        self.assertEqual("", controller_module.describe_open_load_event(base + "0"))
+        self.assertEqual("", controller_module.describe_open_load_event(""))
+
     def test_controller_opens_configured_uart_at_configured_baud_without_dtr_pulse(self):
         controller = CNCController(auto_connect=False, port="/dev/ttyAMA0", baudrate=115200)
         fake_serial = FakeSerial()

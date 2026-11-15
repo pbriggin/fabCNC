@@ -136,6 +136,49 @@ def _persist_tmc_event_line(line: str) -> None:
     elif line.startswith("TMC_OPEN_LOAD|"):
         log_controller_event("tmc_open_load_event", event=line[:500])
 
+
+def parse_tmc_event_fields(line: str) -> dict[str, str]:
+    """Split a ``TMC_FAULT|k=v|...`` or ``TMC_OPEN_LOAD|k=v|...`` record."""
+    return dict(
+        part.split("=", 1) for part in line.split("|")[1:] if "=" in part
+    )
+
+
+def describe_tmc_fault(line: str) -> str:
+    """Operator-facing one-line summary of a TMC_FAULT record ('' if not one)."""
+    if not line.startswith("TMC_FAULT|"):
+        return ""
+    fields = parse_tmc_event_fields(line)
+    summary = (
+        f"Detected: {fields.get('kind', 'driver fault').replace('_', ' ')} "
+        f"on {fields.get('driver', 'unknown driver')}"
+    )
+    coil = fields.get("coil", "")
+    if coil and coil != "-":
+        summary += f", coil {coil}"
+    if fields.get("status"):
+        summary += f" (DRV_STATUS {fields['status']})"
+    return summary + "."
+
+
+def describe_open_load_event(line: str) -> str:
+    """Operator warning for a TMC_OPEN_LOAD record that counts toward a stop.
+
+    Returns '' for records the firmware's stop filter rejected (eligible=0):
+    those are diagnostic only and are kept in the controller log, not shown.
+    """
+    if not line.startswith("TMC_OPEN_LOAD|"):
+        return ""
+    fields = parse_tmc_event_fields(line)
+    if fields.get("eligible") != "1":
+        return ""
+    return (
+        f"Marlin observed open-load on {fields.get('driver', 'unknown driver')}, "
+        f"coil {fields.get('coil', '?')} (DRV_STATUS {fields.get('status', 'unknown')}). "
+        "The job stops if it persists."
+    )
+
+
 try:
     # Structured logging helpers — present whenever main.py has been imported.
     from logging_setup import (
@@ -583,6 +626,7 @@ class CNCController:
             self.reset_required = False
             self.last_controller_error = ""
             self.last_driver_fault = ""
+            self.last_open_load_event = ""
             self.stop_requested = False
             self.pause_requested = False
             self.homed = False
@@ -1468,8 +1512,7 @@ class CNCController:
                         # Log errors
                         if 'error' in line.lower() or 'err:' in line.lower():
                             logger.warning(f"Controller error: {line}")
-                        lower = line.lower()
-                        
+
                 time.sleep(0.005)  # 5ms polling rate
             except OSError as e:
                 if e.errno == 5:  # EIO — serial device disconnected (e.g. SKR board power loss)
