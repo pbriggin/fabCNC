@@ -2098,6 +2098,7 @@ class CNCController:
         self.serial_uncertain = True
         self.homed = False
         self.rehome_required = True
+        self.last_controller_error = reason
         if stop_motion:
             self.stop_requested = True
         machine_state.set_status("Machine state uncertain — verify controller", busy=True)
@@ -2498,6 +2499,7 @@ class CNCController:
         active_seen = initially_active
         idle_reports = 0
         missed_reports = 0
+        silent_status_reports = 0
         last_position_poll = 0.0
 
         while self.connected and not self.stop_requested:
@@ -2514,7 +2516,9 @@ class CNCController:
                 if total_bytes > 0:
                     machine_state.update_job_progress(position / total_bytes)
                 missed_reports = 0
+                silent_status_reports = 0
             elif "not sd printing" in response.lower():
+                silent_status_reports = 0
                 idle_reports += 1
                 if active_seen and idle_reports >= 2:
                     self._finish_sd_job()
@@ -2534,10 +2538,23 @@ class CNCController:
                     return
             elif not response or response == "No response":
                 missed_reports += 1
+                silent_status_reports += 1
+                if silent_status_reports >= 2:
+                    reason = "No response to two consecutive M27 SD status queries; job state is unknown"
+                    self._mark_serial_uncertain(reason, stop_motion=True)
+                    log_controller_event(
+                        "sd_status_unresponsive",
+                        consecutive_silent_reports=silent_status_reports,
+                        job_id=self.current_job_id,
+                    )
+                    return
                 if missed_reports >= 3:
                     machine_state.set_status("Running (SD status unavailable)", busy=True)
             else:
                 missed_reports += 1
+                # Marlin's busy keepalive means the serial link is alive (e.g.
+                # while G28 is still executing), even without an M27 result.
+                silent_status_reports = 0
 
             # M114 may block behind motion and delay Stop. M27 provides all
             # progress information needed while Marlin owns SD playback.

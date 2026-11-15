@@ -5260,7 +5260,11 @@ def main_page():
             if cnc_controller.connected and cnc_controller.serial_uncertain:
                 connection_alert_icon.props('name=warning color=orange-4')
                 connection_alert_title.set_text('Machine state uncertain')
-                connection_alert_subtitle.set_text('Controller status could not be confirmed:')
+                uncertain_reason = getattr(cnc_controller, 'last_controller_error', '').strip()
+                connection_alert_subtitle.set_text(
+                    f'Controller status could not be confirmed: {uncertain_reason}'
+                    if uncertain_reason else 'Controller status could not be confirmed:'
+                )
                 connection_alert_steps.set_text(
                     '1. Confirm the cutter is fully stopped.\n'
                     '2. Click "Retry Connection" below.\n'
