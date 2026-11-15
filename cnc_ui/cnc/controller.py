@@ -1354,13 +1354,15 @@ class CNCController:
     def _handle_controller_fault_line(self, line: str) -> None:
         """Persist driver events and latch fatal Marlin messages from any reader."""
         _persist_tmc_event_line(line)
-        if line.startswith("TMC_FAULT|"):
+        is_tmc_fault = line.startswith("TMC_FAULT|")
+        if is_tmc_fault:
             self.last_driver_fault = line[:500]
 
         lower = line.lower()
-        if not any(marker in lower for marker in (
+        is_halt_message = any(marker in lower for marker in (
             'printer halted', 'stopped due to errors', 'kill() called', 'kill caused by'
-        )):
+        ))
+        if not is_tmc_fault and not is_halt_message:
             return
 
         had_sd_job = (
@@ -1369,7 +1371,11 @@ class CNCController:
             or _SD_JOB_STATE_FILE.exists()
         )
         if not self.reset_required:
-            log_controller_event("controller_reset_required", response=line[:500])
+            log_controller_event(
+                "controller_reset_required",
+                response=line[:500],
+                trigger="tmc_fault" if is_tmc_fault else "marlin_halt",
+            )
         self.reset_required = True
         self.last_controller_error = line
         self.homed = False
@@ -1378,7 +1384,10 @@ class CNCController:
         self.ok_event.set()
         machine_state.reset_job()
         machine_state.set_status("E-Stop Reset Required", busy=False)
-        if had_sd_job:
+        # TMC_FAULT is sent immediately before Marlin.kill(). Preserve the SD
+        # recovery marker until the generic halt line confirms the stop, or
+        # until reconnect reconciliation proves the SD job is no longer active.
+        if had_sd_job and is_halt_message:
             self._clear_sd_job_state()
             log_controller_event(
                 "sd_job_cleared_after_controller_kill",
