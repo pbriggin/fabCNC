@@ -100,6 +100,26 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertFalse(controller.sd_job_active)
         self.assertEqual(fault, controller.last_driver_fault)
 
+    def test_halt_kind_distinguishes_estop_soft_stop_and_kill(self):
+        controller = connected_controller()
+        controller._handle_controller_fault_line("Error:!! KILL caused by KILL button/pin")
+        controller._handle_controller_fault_line("Error:Printer halted. kill() called!")
+        self.assertEqual("estop", controller.halt_kind)
+
+        controller = connected_controller()
+        controller._handle_controller_fault_line(
+            "TMC_FAULT|v=1|kind=open_load|driver=Y2|coil=A|status=0x601F0003|uptime_ms=1|count=1"
+        )
+        controller._handle_controller_fault_line(
+            "Error:Printer stopped due to errors. Fix the error and use M999 to restart."
+        )
+        self.assertEqual("soft", controller.halt_kind)
+        self.assertTrue(controller.reset_required)
+
+        controller = connected_controller()
+        controller._handle_controller_fault_line("Error:Printer halted. kill() called!")
+        self.assertEqual("hard", controller.halt_kind)
+
     def test_tmc_fault_is_latched_from_a_synchronous_read(self):
         controller = connected_controller(responses=(
             "TMC_FAULT|v=1|kind=short|driver=X|coil=B|status=0x10000000|uptime_ms=9|count=1",

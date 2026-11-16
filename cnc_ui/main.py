@@ -2613,10 +2613,14 @@ async def force_controller_recovery():
             ui.notify('The controller connection is already active.', type='info')
             return
         if await asyncio.to_thread(cnc_controller.reset_controller_after_estop):
-            ui.notify('Retry succeeded. Re-home before the next job.', type='positive')
+            ui.notify('Controller reset. Run Home All before the next job.', type='positive')
         else:
             logger.error('Controller retry failed: %s', cnc_controller.last_controller_error or 'No M999 response')
-            ui.notify('Retry failed. Use the physical E-stop and inspect the controller.', type='negative', timeout=8000)
+            ui.notify(
+                'Reset failed: the controller did not answer. Check the E-Stop is released, '
+                'or power cycle the control box, then try again.',
+                type='negative', timeout=8000,
+            )
         return
 
     log_event('system', 'controller_force_recovery_clicked')
@@ -5192,39 +5196,19 @@ def main_page():
                 retry_connection_button = ui.button('Retry Connection', on_click=retry_controller_connection) \
                     .props('dense outline color=warning').style('font-size: 12px;').classes('remote-control-lock')
 
-                def _confirm_force_controller_recovery():
-                    with ui.dialog().props('persistent') as recovery_dialog, \
-                         ui.card().style(_DIALOG_CARD_STYLE):
-                        ui.label('Retry the controller connection?') \
-                            .classes('text-h6 font-bold').style('margin-bottom:6px;')
-                        ui.label(
-                            'Confirm the cutter is fully stopped and the physical E-stop is released. '
-                            'If Marlin halted, it must have restarted (E-stop pressed and released, '
-                            'or a power cycle) before this retry can succeed.'
-                        ).classes('text-body2').style('color:#ccc; white-space:normal;')
-                        with ui.row().classes('gap-2 justify-end w-full').style('margin-top:16px;'):
-                            ui.button('Cancel', on_click=lambda: recovery_dialog.close()).props('flat') \
-                                .style('color:#aaa;')
-
-                            async def _run_forced_recovery():
-                                recovery_dialog.close()
-                                force_recovery_button.disable()
-                                try:
-                                    await force_controller_recovery()
-                                finally:
-                                    force_recovery_button.enable()
-
-                            ui.button(
-                                'Retry Connection',
-                                icon='restart_alt',
-                                on_click=_run_forced_recovery,
-                            ).props('color=negative dense')
-                    recovery_dialog.open()
+                # The alert above already lists the recovery steps, so the
+                # button acts directly instead of opening a second prompt.
+                async def _run_forced_recovery():
+                    force_recovery_button.disable()
+                    try:
+                        await force_controller_recovery()
+                    finally:
+                        force_recovery_button.enable()
 
                 force_recovery_button = ui.button(
                     'Retry Connection',
                     icon='restart_alt',
-                    on_click=_confirm_force_controller_recovery,
+                    on_click=_run_forced_recovery,
                 ).props('dense color=negative').style('font-size: 12px;').classes('remote-control-lock')
                 force_recovery_button.set_visibility(False)
         connection_alert.set_visibility(False)
@@ -5319,29 +5303,55 @@ def main_page():
                     and (cnc_controller.reset_required or cnc_controller.serial_uncertain)
                 )
                 if cnc_controller.reset_required:
-                    connection_alert_subtitle.set_text(
-                        'Marlin reported a kill condition; retry the connection:'
-                    )
+                    halt_kind = getattr(cnc_controller, 'halt_kind', '')
                     fault_summary = describe_tmc_fault(
                         getattr(cnc_controller, 'last_driver_fault', '')
                     )
-                    if not fault_summary:
-                        controller_error = getattr(cnc_controller, 'last_controller_error', '').strip()
-                        if controller_error:
-                            fault_summary = f'Controller reported: {controller_error[:250]}'
-                    if fault_summary:
-                        fault_summary += '\n\n'
-                    # A halted Marlin ignores serial commands (including M999)
-                    # until the board restarts, so the restart must come first.
-                    connection_alert_steps.set_text(
-                        f'{fault_summary}'
-                        '1. Confirm the cutter has stopped.\n'
-                        '2. Restart the controller: press the physical E-Stop, then release it. '
-                        'If it was already pressed, just release it.\n'
-                        '3. Wait 5 seconds, then click "Retry Connection" below. '
-                        'If the retry fails, power cycle the control box (red switch) and retry.\n'
-                        '4. Run Home All before further motion.'
-                    )
+                    connection_alert_icon.props('name=warning color=red-4')
+                    force_recovery_button.set_text('Reset Controller')
+                    if halt_kind == 'estop':
+                        connection_alert_title.set_text('E-Stop pressed')
+                        connection_alert_subtitle.set_text(
+                            'The controller halted and all motors are off.'
+                        )
+                        connection_alert_steps.set_text(
+                            '1. Confirm the cutter has stopped and the machine is safe.\n'
+                            '2. Release the E-Stop. The controller restarts by itself.\n'
+                            '3. Wait 5 seconds, then click "Reset Controller" below. '
+                            'If the reset fails, power cycle the control box (red switch) and try again.\n'
+                            '4. Run Home All before further motion.'
+                        )
+                    elif halt_kind == 'soft':
+                        connection_alert_title.set_text('Motor driver fault')
+                        connection_alert_subtitle.set_text(
+                            'The job was stopped and all motors are off.'
+                        )
+                        connection_alert_steps.set_text(
+                            (f'{fault_summary}\n\n' if fault_summary else '')
+                            + '1. Confirm the cutter has stopped.\n'
+                            '2. Check the wiring and connector of the motor named above.\n'
+                            '3. Click "Reset Controller" below. The E-Stop is not needed.\n'
+                            '4. Run Home All before further motion.'
+                        )
+                    else:
+                        connection_alert_title.set_text('Controller halted')
+                        connection_alert_subtitle.set_text(
+                            'The controller stopped itself and must be restarted.'
+                        )
+                        if not fault_summary:
+                            controller_error = getattr(cnc_controller, 'last_controller_error', '').strip()
+                            if controller_error:
+                                fault_summary = f'Controller reported: {controller_error[:250]}'
+                        # A halted Marlin ignores serial commands (including M999)
+                        # until the board restarts, so the restart must come first.
+                        connection_alert_steps.set_text(
+                            (f'{fault_summary}\n\n' if fault_summary else '')
+                            + '1. Confirm the cutter has stopped.\n'
+                            '2. Restart the controller: press the E-Stop and release it, '
+                            'or power cycle the control box (red switch).\n'
+                            '3. Wait 5 seconds, then click "Reset Controller" below.\n'
+                            '4. Run Home All before further motion.'
+                        )
             connection_alert.set_visibility(True)
             # Keep the dimming backdrop visible, but click-through so the canvas
             # and file controls remain usable until the alert is dismissed.

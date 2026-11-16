@@ -227,6 +227,10 @@ class CNCController:
         self.last_controller_error = ""
         self.last_driver_fault = ""
         self.last_open_load_event = ""
+        # Why Marlin stopped: "estop" (KILL input), "soft" (recoverable stop
+        # after a driver fault; M999 clears it), "hard" (any other kill; the
+        # board must restart), or "" when not halted.
+        self.halt_kind = ""
         self.last_serial_device = self.serial_device
         self.emergency_parser_supported: Optional[bool] = None
         self.read_loop_paused = False
@@ -363,6 +367,7 @@ class CNCController:
             self.serial_uncertain = False
             self.reset_required = False
             self.last_controller_error = ""
+            self.halt_kind = ""
 
             # Start background thread to read responses
             self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -627,6 +632,7 @@ class CNCController:
             self.last_controller_error = ""
             self.last_driver_fault = ""
             self.last_open_load_event = ""
+            self.halt_kind = ""
             self.stop_requested = False
             self.pause_requested = False
             self.homed = False
@@ -1411,6 +1417,16 @@ class CNCController:
         ))
         if not is_tmc_fault and not is_halt_message:
             return
+
+        # Classify the stop so the operator gets the right recovery steps.
+        # "KILL caused by KILL button/pin" precedes the generic halt line.
+        if 'kill caused by kill button' in lower:
+            self.halt_kind = "estop"
+        elif 'printer halted' in lower or 'kill() called' in lower or 'kill caused by' in lower:
+            if self.halt_kind != "estop":
+                self.halt_kind = "hard"
+        elif 'stopped due to errors' in lower and not self.halt_kind:
+            self.halt_kind = "soft"
 
         had_sd_job = (
             self.sd_job_active
