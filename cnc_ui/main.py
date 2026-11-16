@@ -2638,10 +2638,18 @@ async def update_ui(pos_labels, status_label, status_pill=None, status_icon=None
     pos_labels['Z'].set_text(f'{z:.2f} mm')
     pos_labels['A'].set_text(f'{a:.2f} °')
     
-    # Update toolhead position on canvas only while machine is running (avoid blocking JS thread when idle)
-    if state.busy:
+    # Move the toolhead dot on the canvas while the machine is running, and
+    # also whenever the reported position differs from what this browser was
+    # last sent. Without the second case a position that arrives just as the
+    # machine goes idle (the M114 at the end of Home All, or after a reset)
+    # never reached the canvas and the dot stayed where the last job stopped.
+    # Idle ticks with an unchanged position still send nothing.
+    client_storage = ui.context.client.storage
+    toolhead_position = (round(x, 3), round(y, 3))
+    if state.busy or client_storage.get('toolhead_position') != toolhead_position:
         try:
             await ui.run_javascript(f'if(window.toolpathCanvas) window.toolpathCanvas.updateToolhead({x}, {y})', timeout=0.5)
+            client_storage['toolhead_position'] = toolhead_position
         except Exception:
             pass
     
