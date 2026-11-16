@@ -1528,7 +1528,7 @@ class CNCController:
 
                         # Parse position updates (M114 response)
                         if line.startswith("X:"):
-                            logger.info(f"PARSING POSITION: {line}")
+                            logger.debug(f"PARSING POSITION: {line}")
                             self._parse_position(line)
 
                         # Log errors
@@ -1630,12 +1630,12 @@ class CNCController:
                     axis, value = part.split(':')
                     if axis in ['X', 'Y', 'Z', 'A', 'E']:
                         pos[axis] = float(value)
-                        logger.info(f"  Parsed {axis}: {value}")
+                        logger.debug(f"  Parsed {axis}: {value}")
             
             # Update machine state - A axis reports in degrees directly
             a_value = pos.get('A', pos.get('E'))
             
-            logger.info(f"POSITION UPDATE: X={pos.get('X')}, Y={pos.get('Y')}, Z={pos.get('Z')}, A={a_value}°")
+            logger.debug(f"POSITION UPDATE: X={pos.get('X')}, Y={pos.get('Y')}, Z={pos.get('Z')}, A={a_value}°")
             
             machine_state.update_position(
                 x=pos.get('X'),
