@@ -5097,7 +5097,11 @@ def main_page():
                             firmware_install_button = ui.button(
                                 'Install Firmware', icon='system_update_alt',
                                 on_click=install_selected_firmware,
-                            ).props('color=primary dense').classes('w-full remote-control-lock').disable()
+                            ).props('color=primary dense').classes('w-full remote-control-lock')
+                            # Not chained: disable() returns None in NiceGUI, which
+                            # left this name unbound to the button, so the timer
+                            # below could never re-enable it.
+                            firmware_install_button.disable()
 
                             def update_firmware_controls() -> None:
                                 update = cnc_controller.firmware_update_snapshot()
@@ -5105,14 +5109,13 @@ def main_page():
                                 progress = float(update.get('progress') or 0.0)
                                 stage = str(update.get('stage') or 'Idle')
                                 message = str(update.get('message') or '')
-                                if active:
-                                    firmware_upload.disable()
-                                    firmware_install_button.disable()
-                                else:
-                                    firmware_upload.enable()
-                                    staged = firmware_client_storage.get('firmware_update_file')
-                                    if isinstance(staged, dict) and Path(str(staged.get('path', ''))).is_file():
-                                        firmware_install_button.enable()
+                                staged = firmware_client_storage.get('firmware_update_file')
+                                staged_ready = (
+                                    isinstance(staged, dict)
+                                    and Path(str(staged.get('path', ''))).is_file()
+                                )
+                                firmware_upload.set_enabled(not active)
+                                firmware_install_button.set_enabled(not active and staged_ready)
                                 firmware_progress.set_value(progress / 100.0)
                                 firmware_status_label.set_text(
                                     f'{stage}: {message}' if message else stage
