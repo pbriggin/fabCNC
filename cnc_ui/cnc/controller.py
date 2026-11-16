@@ -1473,6 +1473,12 @@ class CNCController:
                     if line:
                         log_serial_rx(line, mode="sync")
                         self._handle_controller_fault_line(line)
+                        # Position reports read here (homing, jog and recovery
+                        # sequences send M114 synchronously) must update the
+                        # display too; the background reader is paused and
+                        # never sees them.
+                        if line.startswith("X:"):
+                            self._parse_position(line)
                     response_lines.append(line)
                     
                     if line.startswith("ok"):

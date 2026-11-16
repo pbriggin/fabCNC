@@ -120,6 +120,18 @@ class ControllerSafetyTests(unittest.TestCase):
         controller._handle_controller_fault_line("Error:Printer halted. kill() called!")
         self.assertEqual("hard", controller.halt_kind)
 
+    def test_position_report_from_a_synchronous_read_updates_display(self):
+        machine_state.update_position(x=246.6, y=605.65, z=-13.65, a=-306.98)
+        controller = connected_controller(responses=(
+            "X:0.00 Y:0.00 Z:0.00 A:0.00 Count X:0 Y:0 Z:0 A:0",
+            "ok",
+        ))
+
+        controller._read_response(timeout=0.05)
+
+        position = machine_state.snapshot()
+        self.assertEqual((0.0, 0.0), (position.x, position.y))
+
     def test_tmc_fault_is_latched_from_a_synchronous_read(self):
         controller = connected_controller(responses=(
             "TMC_FAULT|v=1|kind=short|driver=X|coil=B|status=0x10000000|uptime_ms=9|count=1",
