@@ -216,6 +216,29 @@ class ControllerSafetyTests(unittest.TestCase):
         )
         self.assertEqual("", controller_module.describe_tmc_fault("Error:Printer halted. kill() called!"))
 
+    def test_tmc_fault_summary_explains_gstat(self):
+        base = "TMC_FAULT|v=1|kind=open_load|driver=Y2|coil=A|status=0x601F0000|gstat="
+        tail = "|uptime_ms=1|count=1"
+        self.assertEqual(
+            "Detected: open load on Y2, coil A (DRV_STATUS 0x601F0000). "
+            "The driver chip reset and lost its settings (GSTAT 0x1).",
+            controller_module.describe_tmc_fault(base + "0x1" + tail),
+        )
+        self.assertEqual(
+            "Detected: open load on Y2, coil A (DRV_STATUS 0x601F0000). "
+            "The driver chip reset and lost its settings; the driver saw low supply voltage (GSTAT 0x5).",
+            controller_module.describe_tmc_fault(base + "0x5" + tail),
+        )
+        self.assertEqual(
+            "Detected: open load on Y2, coil A (DRV_STATUS 0x601F0000). "
+            "The driver did not reset (GSTAT 0x0).",
+            controller_module.describe_tmc_fault(base + "0x0" + tail),
+        )
+        self.assertEqual(
+            "Detected: open load on Y2, coil A (DRV_STATUS 0x601F0000).",
+            controller_module.describe_tmc_fault(base + "junk" + tail),
+        )
+
     def test_open_load_warning_is_shown_only_for_samples_that_count_toward_a_stop(self):
         base = "TMC_OPEN_LOAD|driver=X|coil=B|status=0x40000000|uptime_ms=1|count=2|moving=1|enabled=1|standstill=0|stealth=0|eligible="
         self.assertIn("open-load on X, coil B", controller_module.describe_open_load_event(base + "1"))

@@ -158,7 +158,37 @@ def describe_tmc_fault(line: str) -> str:
         summary += f", coil {coil}"
     if fields.get("status"):
         summary += f" (DRV_STATUS {fields['status']})"
-    return summary + "."
+    summary += "."
+    gstat_note = _describe_gstat(fields.get("gstat", ""))
+    if gstat_note:
+        summary += f" {gstat_note}"
+    return summary
+
+
+# TMC GSTAT bits, reported by firmware as ``gstat=0x..`` in TMC_FAULT records.
+_GSTAT_BITS = (
+    (0x1, "the driver chip reset and lost its settings"),
+    (0x2, "the driver shut itself down (overtemperature or short)"),
+    (0x4, "the driver saw low supply voltage"),
+)
+
+
+def _describe_gstat(value: str) -> str:
+    """Plain-language reading of a GSTAT field ('' if absent or unparseable).
+
+    Older firmware omits the field, so '' keeps their summaries unchanged.
+    """
+    try:
+        gstat = int(value, 16)
+    except ValueError:
+        return ""
+    if gstat == 0:
+        return "The driver did not reset (GSTAT 0x0)."
+    notes = [text for bit, text in _GSTAT_BITS if gstat & bit]
+    if not notes:
+        return ""
+    joined = "; ".join(notes)
+    return f"{joined[0].upper()}{joined[1:]} (GSTAT {value})."
 
 
 def describe_open_load_event(line: str) -> str:
